@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import shutil
@@ -58,6 +59,10 @@ class SimState:
     fused_dir: Optional[Path] = None
     t_started: float = 0.0
     t_finished: float = 0.0
+    # Set when the workbench's auto-finish path requests termination because
+    # all expected frames are fused. The reader thread treats the eventual
+    # SIGTERM exit as DONE (not ERROR / CANCELLED) under this flag.
+    intentional_finish: bool = False
 
 
 class SimRunner:
@@ -160,6 +165,23 @@ class SimRunner:
         except Exception as e:
             self.append_log(f"[workbench] cancel failed: {e}")
 
+    def finish(self) -> None:
+        """Send SIGTERM to the launcher AND mark the eventual exit as DONE
+        (not ERROR / CANCELLED). Used when sim is complete + all expected
+        frames are already fused, but sim_one.sh is still in its 10-min
+        fuse-drain wait. Skips the unnecessary wait without surfacing an
+        error to the user."""
+        with self.lock:
+            proc = self.state.proc
+            if proc is None or self.state.state != "RUNNING":
+                return
+            self.state.intentional_finish = True
+        try:
+            proc.terminate()
+            self.append_log("[workbench] auto-finish: all frames fused, ending fuse drain")
+        except Exception as e:
+            self.append_log(f"[workbench] auto-finish failed: {e}")
+
     def _read_loop(self, proc: subprocess.Popen) -> None:
         try:
             assert proc.stdout is not None
@@ -175,17 +197,47 @@ class SimRunner:
             with self.lock:
                 self.state.t_finished = time.time()
                 if self.state.state == "RUNNING":
-                    self.state.state = "DONE" if rc == 0 else "ERROR"
+                    if self.state.intentional_finish:
+                        # We asked for termination because everything is done.
+                        self.state.state = "DONE"
+                    else:
+                        self.state.state = "DONE" if rc == 0 else "ERROR"
             self.append_log(f"[workbench] sim exited code={rc}")
 
 
 # ----------------------------------------------------------------------- viewer
+# 3DGS uses 0th-order SH for the diffuse color. Standard reconstruction
+# constant (Y_0^0 = 1/(2*sqrt(pi)) ≈ 0.2821).
+_SH_C0 = 0.28209479177387814
+
+
+# Y-up -> Z-up rotation matrix (undoes fuse's --zup_to_yup).
+# Takes (x, y, z)_yup to (x, -z, y)_zup.
+_M_YUP_TO_ZUP = np.array([[1.0, 0.0, 0.0],
+                          [0.0, 0.0, -1.0],
+                          [0.0, 1.0,  0.0]], dtype=np.float32)
+
+
 class FrameStream:
-    """Polls a fused dir for new frame_*.ply, holds them in memory as xyz arrays."""
+    """Polls a fused dir for new frame_*.ply.
+
+    For each new frame: extract xyz (rotated y-up→z-up).
+    First frame additionally yields per-point covariances + RGBs + opacities
+    so the workbench can render with viser's 3DGS support — full Gaussian
+    splats, not chunky point cloud squares.
+
+    Coordinate fix-up: fuse_to_full_ply.py emits Y-up plys (vkgs convention),
+    viser's grid-on-XY scene is Z-up, so we rotate centers AND covariances.
+    Color: SH band-0 reconstruction from f_dc_0/1/2.
+    Opacity: sigmoid(opacity_field).
+    """
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.frames: list[np.ndarray] = []
+        self.frames: list[np.ndarray] = []           # list of (N, 3) z-up xyz
+        self.colors: Optional[np.ndarray] = None     # (N, 3) float, [0,1]
+        self.covariances: Optional[np.ndarray] = None  # (N, 3, 3) float
+        self.opacities: Optional[np.ndarray] = None  # (N, 1) float
         self.known: set[str] = set()
         self.dir: Optional[Path] = None
 
@@ -193,6 +245,9 @@ class FrameStream:
         with self.lock:
             self.dir = fused_dir
             self.frames.clear()
+            self.colors = None
+            self.covariances = None
+            self.opacities = None
             self.known.clear()
 
     def num_frames(self) -> int:
@@ -204,6 +259,74 @@ class FrameStream:
             if 0 <= i < len(self.frames):
                 return self.frames[i]
         return None
+
+    def get_static_attrs(self):
+        """Returns (covariances, rgbs, opacities) for the loaded run, or None
+        if not available (e.g. xyz-only plys without SH/scale/rot)."""
+        with self.lock:
+            if self.covariances is None or self.colors is None or self.opacities is None:
+                return None
+            return self.covariances, self.colors, self.opacities
+
+    @staticmethod
+    def _yup_to_zup(xyz: np.ndarray) -> np.ndarray:
+        return np.stack([xyz[:, 0], -xyz[:, 2], xyz[:, 1]], axis=1)
+
+    @staticmethod
+    def _extract_rgb(v) -> Optional[np.ndarray]:
+        names = v.dtype.names
+        if not all(k in names for k in ("f_dc_0", "f_dc_1", "f_dc_2")):
+            return None
+        r = (v["f_dc_0"] * _SH_C0 + 0.5).clip(0.0, 1.0)
+        g = (v["f_dc_1"] * _SH_C0 + 0.5).clip(0.0, 1.0)
+        b = (v["f_dc_2"] * _SH_C0 + 0.5).clip(0.0, 1.0)
+        return np.stack([r, g, b], axis=1).astype(np.float32)
+
+    @staticmethod
+    def _build_covariances(v) -> Optional[np.ndarray]:
+        """Reconstruct 3x3 covariance per particle from 3DGS scale/rot fields,
+        rotated from Y-up (fuse output) to Z-up (viser scene)."""
+        names = v.dtype.names
+        needed = ("scale_0", "scale_1", "scale_2",
+                  "rot_0", "rot_1", "rot_2", "rot_3")
+        if not all(k in names for k in needed):
+            return None
+        n = v.shape[0]
+        scales = np.stack([np.exp(v["scale_0"]).astype(np.float32),
+                           np.exp(v["scale_1"]).astype(np.float32),
+                           np.exp(v["scale_2"]).astype(np.float32)], axis=1)
+        quats = np.stack([v["rot_0"].astype(np.float32),
+                          v["rot_1"].astype(np.float32),
+                          v["rot_2"].astype(np.float32),
+                          v["rot_3"].astype(np.float32)], axis=1)
+        norms = np.linalg.norm(quats, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        quats /= norms
+        qw, qx, qy, qz = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+        R = np.empty((n, 3, 3), dtype=np.float32)
+        R[:, 0, 0] = 1.0 - 2.0 * (qy * qy + qz * qz)
+        R[:, 0, 1] = 2.0 * (qx * qy - qz * qw)
+        R[:, 0, 2] = 2.0 * (qx * qz + qy * qw)
+        R[:, 1, 0] = 2.0 * (qx * qy + qz * qw)
+        R[:, 1, 1] = 1.0 - 2.0 * (qx * qx + qz * qz)
+        R[:, 1, 2] = 2.0 * (qy * qz - qx * qw)
+        R[:, 2, 0] = 2.0 * (qx * qz - qy * qw)
+        R[:, 2, 1] = 2.0 * (qy * qz + qx * qw)
+        R[:, 2, 2] = 1.0 - 2.0 * (qx * qx + qy * qy)
+        # Apply Y-up -> Z-up to the rotation: R_zup = M @ R
+        R = np.einsum("ij,njk->nik", _M_YUP_TO_ZUP, R)
+        # cov = R * diag(scales)^2 * R^T = (R * S) @ (R * S)^T
+        RS = R * scales[:, np.newaxis, :]  # (N, 3, 3) — broadcasts col-scaling
+        cov = np.matmul(RS, RS.transpose(0, 2, 1))
+        return cov.astype(np.float32)
+
+    @staticmethod
+    def _extract_opacity(v) -> Optional[np.ndarray]:
+        if "opacity" not in v.dtype.names:
+            return None
+        a = v["opacity"].astype(np.float32)
+        # 3DGS stores opacity as the inverse-sigmoid; apply sigmoid to recover [0,1].
+        return (1.0 / (1.0 + np.exp(-a))).reshape(-1, 1).astype(np.float32)
 
     def poll(self) -> int:
         """Returns count of new frames added this call."""
@@ -226,9 +349,17 @@ class FrameStream:
                 try:
                     v = PlyData.read(str(entry))["vertex"].data
                     xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float32)
+                    xyz = self._yup_to_zup(xyz)
+                    # First-frame: extract static gaussian-splat attrs.
+                    new_colors  = self._extract_rgb(v)       if self.colors      is None else None
+                    new_covs    = self._build_covariances(v) if self.covariances is None else None
+                    new_opacity = self._extract_opacity(v)   if self.opacities   is None else None
                 except Exception:
                     continue  # partial / unreadable; retry next poll
                 with self.lock:
+                    if new_colors  is not None and self.colors      is None: self.colors      = new_colors
+                    if new_covs    is not None and self.covariances is None: self.covariances = new_covs
+                    if new_opacity is not None and self.opacities   is None: self.opacities   = new_opacity
                     self.frames.append(xyz)
                     self.known.add(stem)
                 added += 1
@@ -243,8 +374,21 @@ def load_recipe(path: Path) -> dict:
 
 
 def write_effective_recipe(base: dict, overrides: dict, dest: Path) -> None:
+    """Merge user overrides into a copy of `base` and write to `dest`.
+
+    Preserves int-ness from the base recipe — viser sliders return floats
+    even for integer-stepped sliders, but downstream consumers (Taichi
+    `dense()`, gs_simulation_building.py grid sizing) require strict ints
+    for keys like n_grid / frame_num.
+    """
     merged = dict(base)
-    merged.update({k: v for k, v in overrides.items() if v is not None})
+    for k, v in overrides.items():
+        if v is None:
+            continue
+        if k in base and isinstance(base[k], int) and not isinstance(base[k], bool):
+            merged[k] = int(round(v))
+        else:
+            merged[k] = v
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(merged, indent=2))
 
@@ -283,9 +427,22 @@ def main() -> None:
         section_size=1.0, section_color=(80, 80, 110),
     )
 
-    cloud = server.scene.add_point_cloud(
-        "particles", points=np.zeros((1, 3), dtype=np.float32),
-        colors=np.zeros((1, 3), dtype=np.uint8), point_size=0.005,
+    # Real 3DGS rendering — full per-point covariances + SH band-0 colors +
+    # opacities. Initialized with a single invisible dummy splat; once the
+    # first frame is loaded we swap in real attrs and update centers per frame.
+    splat = server.scene.add_gaussian_splats(
+        "particles",
+        centers=np.zeros((1, 3), dtype=np.float32),
+        covariances=np.tile(np.eye(3, dtype=np.float32) * 1e-6, (1, 1, 1)),
+        rgbs=np.zeros((1, 3), dtype=np.float32),
+        opacities=np.zeros((1, 1), dtype=np.float32),
+    )
+    # We also keep a small fallback point cloud for the case where a loaded
+    # ply lacks SH/scale/rot fields (e.g. xyz-only sim_*.ply). Hidden until used.
+    fallback_cloud = server.scene.add_point_cloud(
+        "particles_fallback", points=np.zeros((1, 3), dtype=np.float32),
+        colors=np.zeros((1, 3), dtype=np.uint8), point_size=0.01,
+        visible=False,
     )
 
     # ---------- GUI ----------
@@ -320,6 +477,14 @@ def main() -> None:
         eta_text     = server.gui.add_text("ETA", initial_value="—")
         eta_text.disabled = True
 
+    with server.gui.add_folder("Past runs"):
+        runs_refresh_btn = server.gui.add_button("Refresh list")
+        runs_dd          = server.gui.add_dropdown("Run", options=["(none)"],
+                                                    initial_value="(none)")
+        load_run_btn     = server.gui.add_button("Load selected", color="cyan")
+        runs_status      = server.gui.add_text("Info", initial_value="(no runs yet)")
+        runs_status.disabled = True
+
     with server.gui.add_folder("Playback"):
         play_chk = server.gui.add_checkbox("Play", initial_value=True)
         frame_slider = server.gui.add_slider("Frame", min=0, max=0, step=1,
@@ -329,7 +494,19 @@ def main() -> None:
         target_fps   = server.gui.add_slider("Target fps", min=1.0, max=60.0,
                                              step=1.0, initial_value=24.0)
 
-    log_box = server.gui.add_markdown(content="*(no output yet)*")
+    # Scrollable HTML console (last 200 lines; user can scroll up to see history).
+    # The <img onerror> trick auto-scrolls to bottom on every content update —
+    # plain <script> tags don't execute when injected via innerHTML, but image
+    # error handlers do. The img itself is hidden.
+    LOG_HEAD = ('<div id="wb-log" style="max-height: 280px; overflow-y: auto; '
+                'font-family: ui-monospace, Menlo, Consolas, monospace; '
+                'font-size: 11px; line-height: 1.35; white-space: pre-wrap; '
+                'background: #111; color: #ddd; padding: 8px; border-radius: 4px; '
+                'user-select: text; word-break: break-word;">')
+    LOG_TAIL = ('<img src style="display:none" '
+                'onerror="this.parentElement.scrollTop=this.parentElement.scrollHeight">'
+                '</div>')
+    log_box = server.gui.add_html(LOG_HEAD + "(no output yet)" + LOG_TAIL)
 
     # ---------- state ----------
     ui_state = {
@@ -342,12 +519,24 @@ def main() -> None:
         # Progress hooks: set when Run is clicked.
         "expected_frames": 0,              # frame_num from the effective recipe
         "first_frame_t": 0.0,              # time when 1st frame appeared (for ETA)
+        # Auto-finish bookkeeping: prevents double-call when sim has already
+        # finished and all frames are fused but launcher is in fuse drain.
+        "auto_finish_done_for": "",        # output_name we already finished
+        # Lookup from "label (N frames)" → output_name for past runs.
+        "_run_lookup": {},
     }
 
     def rebuild_param_widgets():
-        """Tear down & rebuild the dynamic recipe-params widgets."""
+        """Tear down & rebuild the dynamic recipe-params widgets.
+
+        Picks widget type based on the BASE recipe's value type:
+          - int  → integer slider (e.g. n_grid, frame_num)
+          - tiny-step float → number input (e.g. substep_dt = 1e-4)
+          - regular float → float slider (e.g. camera angles)
+        """
         for h in param_handles.values():
-            h.remove()
+            try: h.remove()
+            except Exception: pass
         param_handles.clear()
         recipe_data = ui_state["current_recipe_data"] or {}
         with param_folder:
@@ -357,13 +546,24 @@ def main() -> None:
                 init = recipe_data[key]
                 if isinstance(init, (list, tuple)) or not isinstance(init, (int, float)):
                     continue
-                # Number input is more flexible than slider for floats with tiny step
-                if step < 0.01:
-                    handle = server.gui.add_number(f"{label}", initial_value=float(init),
-                                                   min=float(lo), max=float(hi), step=step)
+                is_int = isinstance(init, int) and not isinstance(init, bool)
+                if is_int:
+                    handle = server.gui.add_slider(
+                        label,
+                        min=int(lo), max=int(hi),
+                        step=int(max(1, step)),
+                        initial_value=int(init),
+                    )
+                elif step < 0.01:
+                    handle = server.gui.add_number(
+                        label, initial_value=float(init),
+                        min=float(lo), max=float(hi), step=float(step),
+                    )
                 else:
-                    handle = server.gui.add_slider(f"{label}", min=float(lo), max=float(hi),
-                                                   step=step, initial_value=float(init))
+                    handle = server.gui.add_slider(
+                        label, min=float(lo), max=float(hi),
+                        step=float(step), initial_value=float(init),
+                    )
                 param_handles[key] = handle
 
     def load_recipe_data(name: str) -> None:
@@ -465,6 +665,89 @@ def main() -> None:
     def _(_):
         runner.cancel()
 
+    # ---------- Past runs ----------
+    def scan_past_runs():
+        fused_root = pkg_root / "work/fused"
+        if not fused_root.is_dir():
+            return []
+        out = []
+        for d in fused_root.iterdir():
+            if not d.is_dir():
+                continue
+            n = sum(1 for _ in d.glob("frame_*.ply"))
+            if n == 0:
+                continue
+            mtime = d.stat().st_mtime
+            out.append((d.name, n, mtime))
+        out.sort(key=lambda e: -e[2])  # newest first
+        return out
+
+    def refresh_runs_list():
+        entries = scan_past_runs()
+        if not entries:
+            runs_dd.options = ["(none)"]
+            runs_dd.value = "(none)"
+            runs_status.value = "(no runs yet — click Run sim to start one)"
+            ui_state["_run_lookup"] = {}
+            return
+        labels = [f"{name}  ({n} frames)" for name, n, _ in entries]
+        runs_dd.options = labels
+        runs_dd.value = labels[0]
+        ui_state["_run_lookup"] = {labels[i]: entries[i][0] for i in range(len(entries))}
+        runs_status.value = f"{len(entries)} run(s) found — newest first"
+
+    @runs_refresh_btn.on_click
+    def _(_):
+        refresh_runs_list()
+
+    @load_run_btn.on_click
+    def _(_):
+        label = runs_dd.value
+        if label == "(none)":
+            runs_status.value = "(no run selected)"
+            return
+        name = ui_state["_run_lookup"].get(label, label)
+        d = pkg_root / "work/fused" / name
+        if not d.is_dir():
+            runs_status.value = f"not found: {d}"
+            return
+        # Switch the FrameStream to this dir; one poll loads everything that's there.
+        stream.reset(d)
+        stream.poll()
+        n = stream.num_frames()
+        ui_state["frame"] = 0
+        ui_state["expected_frames"] = n
+        ui_state["first_frame_t"] = time.time()
+        frame_slider.max = max(0, n - 1)
+        frame_slider.value = 0
+        progress_bar.value = 100.0 if n > 0 else 0.0
+        eta_text.value = "loaded"
+        stage_text.value = f"loaded past run: {name}"
+        runs_status.value = f"loaded {name}: {n} frames"
+        runner.append_log(f"[workbench] loaded past run: {name} ({n} frames)")
+        first = stream.get(0)
+        static = stream.get_static_attrs()
+        if static is not None and first is not None:
+            covs, rgbs, ops = static
+            splat.covariances = covs
+            splat.rgbs        = rgbs
+            splat.opacities   = ops
+            splat.centers     = first
+            splat.visible     = True
+            fallback_cloud.visible = False
+        elif first is not None and first.shape[0] > 0:
+            z = first[:, 2]
+            norm = (z - z.min()) / (z.max() - z.min() + 1e-8)
+            synth = np.stack([norm * 0.8 + 0.2,
+                              0.4 * np.ones_like(norm),
+                              1.0 - norm * 0.8], axis=1)
+            fallback_cloud.points  = first
+            fallback_cloud.colors  = (synth * 255).astype(np.uint8)
+            fallback_cloud.visible = True
+            splat.visible = False
+
+    refresh_runs_list()  # initial scan
+
     @play_chk.on_update
     def _(_):
         ui_state["playing"] = play_chk.value
@@ -477,9 +760,21 @@ def main() -> None:
         ui_state["playing"] = False
         play_chk.value = False
 
-    print(f"\n>>> http://localhost:{args.port} <<<\n")
-    print(f"pkg_root = {pkg_root}")
-    print(f"recipes  = {available_recipes}\n")
+    # Surface any unhandled exception (in main loop or threads).
+    import sys as _sys, traceback as _tb, threading as _th
+    def _excepthook(et, ev, tb):
+        print("=== UNHANDLED EXCEPTION ===", flush=True)
+        _tb.print_exception(et, ev, tb)
+    _sys.excepthook = _excepthook
+    def _thread_excepthook(args):
+        print(f"=== THREAD EXCEPTION in {args.thread.name} ===", flush=True)
+        _tb.print_exception(args.exc_type, args.exc_value, args.exc_traceback)
+    _th.excepthook = _thread_excepthook
+
+    print(f"\n>>> http://localhost:{args.port} <<<\n", flush=True)
+    print(f"pkg_root = {pkg_root}", flush=True)
+    print(f"recipes  = {available_recipes}\n", flush=True)
+    print("[workbench] entering main loop", flush=True)
 
     # ---------- main loop ----------
     last_advance = time.perf_counter()
@@ -495,6 +790,15 @@ def main() -> None:
                 t1 = runner.state.t_finished
             n_frames = stream.num_frames()
             expected = ui_state["expected_frames"]
+
+            # ---- Auto-finish: skip the 10-min fuse-drain wait when everything's
+            #      already done. Fires exactly once per run.
+            recent_short = "\n".join(runner.last_lines(40))
+            if (st == "RUNNING" and expected > 0 and n_frames >= expected
+                and "[PhaseA-SUMMARY]" in recent_short
+                and ui_state["auto_finish_done_for"] != runner.state.output_name):
+                ui_state["auto_finish_done_for"] = runner.state.output_name
+                runner.finish()  # SIGTERM + flag → exits as DONE not ERROR
 
             # ---- Stage detection (look at recent log lines for the latest marker) ----
             recent = "\n".join(runner.last_lines(80))
@@ -550,8 +854,15 @@ def main() -> None:
             else:
                 status_text.value = st
 
-            lines = runner.last_lines(20)
-            log_box.content = "```\n" + ("\n".join(lines) if lines else "(no output yet)") + "\n```"
+            # On state transition into DONE/ERROR, refresh the past-runs dropdown
+            # so the just-finished run shows up at the top without user action.
+            if st in ("DONE", "ERROR") and ui_state.get("_last_seen_st") not in ("DONE", "ERROR"):
+                refresh_runs_list()
+            ui_state["_last_seen_st"] = st
+
+            lines = runner.last_lines(200)
+            text = "\n".join(lines) if lines else "(no output yet)"
+            log_box.content = LOG_HEAD + html.escape(text) + LOG_TAIL
             last_log_dump = now
 
         # Frame stream poll every 250ms
@@ -559,21 +870,32 @@ def main() -> None:
             added = stream.poll()
             if added > 0:
                 n = stream.num_frames()
-                # Update the frame slider's max range
                 if n - 1 > frame_slider.max:
                     frame_slider.max = n - 1
-                # Initialize colors when we first get a frame
-                first = stream.get(0)
-                if first is not None and added == n:
-                    z = first[:, 1]
-                    if z.max() > z.min():
-                        norm = (z - z.min()) / (z.max() - z.min())
-                    else:
-                        norm = np.zeros_like(z)
-                    colors = np.stack([norm * 0.8 + 0.2,
-                                       0.4 * np.ones_like(norm),
-                                       1.0 - norm * 0.8], axis=1)
-                    cloud.colors = (colors * 255).astype(np.uint8)
+                # On first batch of frames: install gaussian splat attrs if the
+                # plys carried them. Otherwise show a fallback point cloud.
+                if added == n:  # i.e. this poll just added the very first frames
+                    static = stream.get_static_attrs()
+                    first = stream.get(0)
+                    if static is not None and first is not None:
+                        covs, rgbs, ops = static
+                        splat.covariances = covs
+                        splat.rgbs        = rgbs
+                        splat.opacities   = ops
+                        splat.centers     = first
+                        splat.visible     = True
+                        fallback_cloud.visible = False
+                    elif first is not None:
+                        # xyz-only fallback: synthesize colors from height
+                        z = first[:, 2]
+                        norm = (z - z.min()) / (z.max() - z.min() + 1e-8)
+                        synth = np.stack([norm * 0.8 + 0.2,
+                                          0.4 * np.ones_like(norm),
+                                          1.0 - norm * 0.8], axis=1)
+                        fallback_cloud.points  = first
+                        fallback_cloud.colors  = (synth * 255).astype(np.uint8)
+                        fallback_cloud.visible = True
+                        splat.visible = False
             last_poll = now
 
         # Animation advance
@@ -587,7 +909,10 @@ def main() -> None:
 
         f = stream.get(ui_state["frame"])
         if f is not None:
-            cloud.points = f
+            if splat.visible:
+                splat.centers = f
+            else:
+                fallback_cloud.points = f
         time.sleep(0.02)
 
 
