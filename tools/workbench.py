@@ -35,19 +35,54 @@ import viser
 from plyfile import PlyData
 
 # ----------------------------------------------------------------------- params
-# Curated subset of recipe keys the workbench surfaces as sliders/inputs.
-# Anything else in the recipe JSON is preserved as-is when we write the
-# effective recipe to a temp file before spawning the sim.
-EXPOSED_PARAMS = [
-    # (key, label, min, max, step, group)
-    ("n_grid",       "Grid resolution",       50,    400,   10,   "Solver"),
-    ("substep_dt",   "Substep dt (s)",        1e-5,  5e-4,  1e-5, "Solver"),
-    ("frame_num",    "Total frames",          30,    600,   10,   "Solver"),
-    ("frame_dt",     "Frame dt (s)",          0.005, 0.1,   0.005,"Solver"),
-    ("init_azimuthm", "Camera azimuth (deg)", 0.0,   360.0, 1.0,  "Camera"),
-    ("init_elevation","Camera elevation",     -45.0, 60.0,  1.0,  "Camera"),
-    ("init_radius",   "Camera radius",        1.0,   500.0, 1.0,  "Camera"),
-]
+# Per-key UI metadata: (group_folder, label, min, max, step).
+# min/max/step are used for sliders; None signals "not numeric" (bool/str).
+# Keys missing here are still surfaced in the Advanced (raw JSON) folder.
+PARAM_HINTS = {
+    # ---- Material -----------------------------------------------------------
+    "material":            ("Material", "Material",                   None,  None,  None),
+    "E":                   ("Material", "Young's modulus E (Pa)",     100.0, 1e7,   100.0),
+    "nu":                  ("Material", "Poisson ratio ν",            0.0,   0.499, 0.005),
+    "density":             ("Material", "Density",                    0.01,  100.0, 0.01),
+    "yield_stress":        ("Material", "Yield stress",               0.0,   1e6,   1.0),
+    "friction_angle":      ("Material", "Friction angle (deg)",       0.0,   90.0,  1.0),
+    "beta":                ("Material", "β (constitutive)",           -10.0, 10.0,  0.1),
+    "xi":                  ("Material", "ξ (plastic hardening)",      0.0,   20.0,  0.1),
+    "hardening":           ("Material", "Hardening",                  0.0,   5.0,   0.1),
+    "alpha_0":             ("Material", "α₀ (initial plastic)",       -2.0,  2.0,   0.01),
+    "plastic_viscosity":   ("Material", "Plastic viscosity",          0.0,   1e4,   1.0),
+    # ---- Solver -------------------------------------------------------------
+    "n_grid":              ("Solver",   "Grid resolution",            50,    400,   10),
+    "grid_lim":            ("Solver",   "Grid lim",                   1,     10,    1),
+    "substep_dt":          ("Solver",   "Substep dt (s)",             1e-5,  5e-4,  1e-5),
+    "frame_dt":            ("Solver",   "Frame dt (s)",               0.005, 0.1,   0.005),
+    "frame_num":           ("Solver",   "Total frames",               30,    600,   10),
+    "flip_pic_ratio":      ("Solver",   "FLIP/PIC ratio",             0.0,   1.0,   0.05),
+    "rpic_damping":        ("Solver",   "RPIC damping",               0.0,   1.0,   0.01),
+    "grid_v_damping_scale":("Solver",   "Grid v damping scale",       0.5,   2.0,   0.05),
+    # ---- Camera -------------------------------------------------------------
+    "init_azimuthm":       ("Camera",   "Init azimuth (deg)",         0,     360,   1),
+    "init_elevation":      ("Camera",   "Init elevation",             -45,   60,    1),
+    "init_radius":         ("Camera",   "Init radius",                1,     500,   1),
+    "delta_a":             ("Camera",   "Camera dA",                  -10.0, 10.0,  0.1),
+    "delta_e":             ("Camera",   "Camera dE",                  -10.0, 10.0,  0.05),
+    "delta_r":             ("Camera",   "Camera dR",                  -10.0, 10.0,  0.05),
+    "move_camera":         ("Camera",   "Move camera",                None,  None,  None),
+    "default_camera_index":("Camera",   "Default camera index",       -10,   10,    1),
+    # ---- Other --------------------------------------------------------------
+    "opacity_threshold":   ("Other",    "Opacity threshold",          0.0,   1.0,   0.05),
+    "show_hint":           ("Other",    "Show hint",                  None,  None,  None),
+}
+# 3-vector keys rendered as a single native add_vector3 widget.
+VECTOR3_KEYS = {"g": ("Forces", "Gravity (x, y, z)")}
+# Nested dicts that get their OWN folder, expanded one level.
+NESTED_DICT_KEYS = {"particle_filling": "Particle filling"}
+# Keys we never surface (internal / metadata).
+HIDDEN_KEYS = {"_note"}
+# Canonical material names — straight from mpm_solver_warp's branch list.
+# Anything else makes the sim fall through to its default (jelly), so we
+# constrain the UI to these.
+MATERIALS = ["jelly", "metal", "sand", "foam", "snow", "plasticine", "watermelon"]
 
 
 # ----------------------------------------------------------------------- runner
@@ -368,6 +403,31 @@ class FrameStream:
         return added
 
 
+# ----------------------------------------------------------------------- state
+class JsonStore:
+    """Tiny JSON-backed list/dict store for persisted UI state.
+
+    Used for model history + user-saved recipe metadata. Atomic write via
+    .tmp + os.replace so we never corrupt the file on crash.
+    """
+
+    def __init__(self, path: Path, default):
+        self.path = path
+        self.default = default
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def load(self):
+        try:
+            return json.loads(self.path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return json.loads(json.dumps(self.default))  # deep copy
+
+    def save(self, value) -> None:
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(value, indent=2))
+        os.replace(tmp, self.path)
+
+
 # ----------------------------------------------------------------------- recipe
 def load_recipe(path: Path) -> dict:
     return json.loads(path.read_text())
@@ -404,15 +464,33 @@ def main() -> None:
 
     pkg_root = Path(args.pkg_root).resolve()
     recipes_dir = pkg_root / "tools/recipes"
+    user_recipes_dir = pkg_root / "work/_user_recipes"
+    user_recipes_dir.mkdir(parents=True, exist_ok=True)
     work_uploads = pkg_root / "work/uploads"
     work_uploads.mkdir(parents=True, exist_ok=True)
     work_recipes = pkg_root / "work/_tmp_recipes"
     work_recipes.mkdir(parents=True, exist_ok=True)
+    state_dir = pkg_root / "work/_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    model_history = JsonStore(state_dir / "model_history.json", default=[])
 
     if not recipes_dir.is_dir():
         raise SystemExit(f"recipes dir not found at {recipes_dir}")
 
-    available_recipes = sorted(p.stem for p in recipes_dir.glob("*.json"))
+    def list_all_recipes() -> list[str]:
+        """Built-in recipes from tools/recipes/ + user-saved ones from
+        work/_user_recipes/. User saves are prefixed `★ ` in the dropdown."""
+        builtin = sorted(p.stem for p in recipes_dir.glob("*.json"))
+        user = sorted(f"★ {p.stem}" for p in user_recipes_dir.glob("*.json"))
+        return builtin + user
+
+    def resolve_recipe_path(label: str) -> Path:
+        """Map a dropdown label back to its on-disk JSON path."""
+        if label.startswith("★ "):
+            return user_recipes_dir / f"{label[2:]}.json"
+        return recipes_dir / f"{label}.json"
+
+    available_recipes = list_all_recipes()
     if not available_recipes:
         raise SystemExit(f"no recipes found in {recipes_dir}")
 
@@ -420,11 +498,22 @@ def main() -> None:
     stream = FrameStream()
 
     server = viser.ViserServer(port=args.port)
+    # Modern dark theme with a teal/cyan brand color, wider controls, and a
+    # collapsible side panel so the team can stash it when they want to focus
+    # on the 3D viewport.
+    server.gui.configure_theme(
+        dark_mode=True,
+        brand_color=(34, 211, 238),     # tailwind cyan-400
+        control_layout="collapsible",
+        control_width="medium",
+        show_logo=False,
+        show_share_button=False,
+    )
     server.scene.world_axes.visible = False
     server.scene.add_grid(
         "ground", width=4.0, height=4.0, plane="xy",
-        cell_size=0.1, cell_color=(180, 180, 200),
-        section_size=1.0, section_color=(80, 80, 110),
+        cell_size=0.1, cell_color=(60, 60, 70),
+        section_size=1.0, section_color=(120, 130, 150),
     )
 
     # Real 3DGS rendering — full per-point covariances + SH band-0 colors +
@@ -448,65 +537,134 @@ def main() -> None:
     # ---------- GUI ----------
     server.gui.set_panel_label("gsfluent workbench")
 
-    with server.gui.add_folder("Model"):
-        upload = server.gui.add_upload_button("Upload .ply", icon=viser.Icon.UPLOAD)
-        path_input = server.gui.add_text("...or model path", initial_value="")
-        model_status = server.gui.add_text("Model status", initial_value="(no model)")
+    # Top-level tabs split the sidebar into three coherent flows:
+    #   Sim    → set up model + recipe + parameters + run
+    #   View   → playback controls
+    #   History→ load past runs
+    # Within Sim, sub-folders group params by domain (Material, Solver, ...).
+    tabs = server.gui.add_tab_group()
+    tab_sim     = tabs.add_tab("Sim", icon=viser.Icon.PLAYER_PLAY)
+    tab_view    = tabs.add_tab("View", icon=viser.Icon.EYE)
+    tab_history = tabs.add_tab("History", icon=viser.Icon.HISTORY)
+
+    # ===== SIM tab =====
+    with tab_sim:
+        server.gui.add_markdown("### Model")
+        # Recents dropdown — populated from work/_state/model_history.json.
+        # Picking an entry copies the path into Model path so the user can
+        # tweak before running.
+        recent_models_dd = server.gui.add_dropdown(
+            "Recent",
+            options=["(none)"] + model_history.load(),
+            initial_value="(none)",
+            hint="Models you've used before. Pick one to fill the path below.",
+        )
+        upload = server.gui.add_upload_button(
+            "Upload 3DGS .ply",
+            icon=viser.Icon.UPLOAD,
+            hint="Drop a 3DGS-trained .ply or paste an existing model dir below.",
+        )
+        path_input = server.gui.add_text("Model path", initial_value="")
+        model_status = server.gui.add_text("Status", initial_value="no model loaded")
         model_status.disabled = True
 
-    with server.gui.add_folder("Recipe"):
-        recipe_dd = server.gui.add_dropdown("Preset", options=available_recipes,
-                                            initial_value=available_recipes[0])
-        particles = server.gui.add_slider("Particles", min=20_000, max=2_000_000,
-                                          step=10_000, initial_value=200_000)
-        # Param widgets are rebuilt whenever the user picks a different recipe.
-        param_handles: dict[str, object] = {}
-        param_folder = server.gui.add_folder("Recipe parameters")
+        server.gui.add_markdown("### Recipe")
+        recipe_dd = server.gui.add_dropdown(
+            "Preset", options=available_recipes,
+            initial_value=available_recipes[0],
+            hint="Built-in + your saved presets (★). Save your own with the button below.",
+        )
+        particles = server.gui.add_slider(
+            "Particles", min=20_000, max=2_000_000, step=10_000,
+            initial_value=200_000,
+            hint="MPM particle count. Lower = faster sim, less detail.",
+        )
 
-    with server.gui.add_folder("Run"):
-        output_input = server.gui.add_text("Output name", initial_value="(auto)")
-        run_btn      = server.gui.add_button("Run sim", color="green")
-        cancel_btn   = server.gui.add_button("Cancel")
+        # Per-group folders for editable recipe params. Filled by rebuild_param_widgets.
+        group_folders: dict[str, object] = {}
+        for grp in ("Material", "Solver", "Forces", "Camera",
+                    "Particle filling", "Other"):
+            group_folders[grp] = server.gui.add_folder(grp)
+        advanced_folder = server.gui.add_folder("Advanced (raw JSON)")
+        param_handles: dict[str, object] = {}
+        raw_json_keys: list[str] = []
+
+        # Save-current-edits as a new preset. Stored at work/_user_recipes/<name>.json
+        # and surfaced in the Preset dropdown with a ★ prefix.
+        save_preset_name = server.gui.add_text(
+            "Save as preset", initial_value="",
+            hint="Type a name + click Save. Appears in the Preset dropdown next time.",
+        )
+        save_preset_btn = server.gui.add_button(
+            "Save preset", icon=viser.Icon.DEVICE_FLOPPY,
+        )
+        save_preset_status = server.gui.add_text("Save status", initial_value="—")
+        save_preset_status.disabled = True
+
+        server.gui.add_markdown("### Run")
+        output_input = server.gui.add_text(
+            "Output name", initial_value="(auto)",
+            hint="Folder name under work/fused/. Leave (auto) for "
+                 "<model>_<recipe>_<timestamp>.",
+        )
+        run_btn      = server.gui.add_button("Run sim",  color="green",
+                                              icon=viser.Icon.PLAYER_PLAY)
+        cancel_btn   = server.gui.add_button("Cancel",   color="red",
+                                              icon=viser.Icon.PLAYER_STOP)
         status_text  = server.gui.add_text("Status", initial_value="IDLE")
         status_text.disabled = True
-        # Progress bar — driven by num_fused_frames / total_expected_frames.
-        # 0% until first frame arrives (covers kernel JIT warmup ~30–90s).
         progress_bar = server.gui.add_progress_bar(0.0, animated=False)
         stage_text   = server.gui.add_text("Stage", initial_value="—")
         stage_text.disabled = True
         eta_text     = server.gui.add_text("ETA", initial_value="—")
         eta_text.disabled = True
 
-    with server.gui.add_folder("Past runs"):
-        runs_refresh_btn = server.gui.add_button("Refresh list")
-        runs_dd          = server.gui.add_dropdown("Run", options=["(none)"],
-                                                    initial_value="(none)")
-        load_run_btn     = server.gui.add_button("Load selected", color="cyan")
-        runs_status      = server.gui.add_text("Info", initial_value="(no runs yet)")
-        runs_status.disabled = True
+        # Scrollable HTML console — auto-scroll to bottom via the <img onerror> trick.
+        LOG_HEAD = (
+            '<div id="wb-log" style="max-height: 280px; overflow-y: auto; '
+            'font-family: ui-monospace, Menlo, Consolas, monospace; '
+            'font-size: 11px; line-height: 1.45; white-space: pre-wrap; '
+            'background: #0d1117; color: #c9d1d9; padding: 10px; border-radius: 6px; '
+            'border: 1px solid #1f2937; user-select: text; word-break: break-word;">'
+        )
+        LOG_TAIL = (
+            '<img src style="display:none" '
+            'onerror="this.parentElement.scrollTop=this.parentElement.scrollHeight">'
+            '</div>'
+        )
+        log_box = server.gui.add_html(LOG_HEAD + "(no output yet)" + LOG_TAIL)
 
-    with server.gui.add_folder("Playback"):
+    # ===== VIEW tab =====
+    with tab_view:
+        server.gui.add_markdown("### Playback")
         play_chk = server.gui.add_checkbox("Play", initial_value=True)
         frame_slider = server.gui.add_slider("Frame", min=0, max=0, step=1,
                                              initial_value=0)
-        speed_slider = server.gui.add_slider("Speed", min=0.25, max=4.0,
-                                             step=0.25, initial_value=1.0)
-        target_fps   = server.gui.add_slider("Target fps", min=1.0, max=60.0,
-                                             step=1.0, initial_value=24.0)
+        speed_slider = server.gui.add_slider(
+            "Speed", min=0.25, max=4.0, step=0.25, initial_value=1.0,
+            hint="Playback speed multiplier on top of Target fps.",
+        )
+        target_fps   = server.gui.add_slider(
+            "Target fps", min=1.0, max=60.0, step=1.0, initial_value=24.0,
+            hint="Frame-advance rate. Render fps is much higher and decoupled.",
+        )
 
-    # Scrollable HTML console (last 200 lines; user can scroll up to see history).
-    # The <img onerror> trick auto-scrolls to bottom on every content update —
-    # plain <script> tags don't execute when injected via innerHTML, but image
-    # error handlers do. The img itself is hidden.
-    LOG_HEAD = ('<div id="wb-log" style="max-height: 280px; overflow-y: auto; '
-                'font-family: ui-monospace, Menlo, Consolas, monospace; '
-                'font-size: 11px; line-height: 1.35; white-space: pre-wrap; '
-                'background: #111; color: #ddd; padding: 8px; border-radius: 4px; '
-                'user-select: text; word-break: break-word;">')
-    LOG_TAIL = ('<img src style="display:none" '
-                'onerror="this.parentElement.scrollTop=this.parentElement.scrollHeight">'
-                '</div>')
-    log_box = server.gui.add_html(LOG_HEAD + "(no output yet)" + LOG_TAIL)
+    # ===== HISTORY tab =====
+    with tab_history:
+        server.gui.add_markdown("### Past runs")
+        runs_refresh_btn = server.gui.add_button(
+            "Refresh list", icon=viser.Icon.REFRESH,
+        )
+        runs_dd          = server.gui.add_dropdown(
+            "Run", options=["(none)"], initial_value="(none)",
+            hint="Every directory under work/fused/ that contains frame_*.ply.",
+        )
+        load_run_btn     = server.gui.add_button(
+            "Load selected", color="cyan", icon=viser.Icon.PLAYER_TRACK_NEXT,
+        )
+        runs_status      = server.gui.add_text("Info",
+                                               initial_value="(no runs yet)")
+        runs_status.disabled = True
 
     # ---------- state ----------
     ui_state = {
@@ -526,55 +684,144 @@ def main() -> None:
         "_run_lookup": {},
     }
 
-    def rebuild_param_widgets():
-        """Tear down & rebuild the dynamic recipe-params widgets.
+    def _make_scalar_widget(folder, key: str, init, hint=None):
+        """Create the right widget for a scalar (int / float / bool / str)."""
+        # PARAM_HINTS entry: (group, label, min, max, step)
+        label = hint[1] if hint else key
+        lo    = hint[2] if hint else None
+        hi    = hint[3] if hint else None
+        step  = hint[4] if hint else None
+        is_bool = isinstance(init, bool)
+        is_int  = isinstance(init, int) and not is_bool
 
-        Picks widget type based on the BASE recipe's value type:
-          - int  → integer slider (e.g. n_grid, frame_num)
-          - tiny-step float → number input (e.g. substep_dt = 1e-4)
-          - regular float → float slider (e.g. camera angles)
-        """
+        with folder:
+            if is_bool:
+                return server.gui.add_checkbox(label, initial_value=bool(init))
+            if isinstance(init, str):
+                return server.gui.add_text(label, initial_value=str(init))
+            if is_int:
+                # Integer slider when we have a hint; otherwise number input.
+                if lo is not None and hi is not None and step is not None:
+                    s = max(1, int(step))
+                    init_clamped = int(min(max(init, int(lo)), int(hi)))
+                    return server.gui.add_slider(
+                        label, min=int(lo), max=int(hi), step=s,
+                        initial_value=init_clamped,
+                    )
+                return server.gui.add_number(label, initial_value=int(init), step=1)
+            # Float
+            if isinstance(init, float):
+                if lo is not None and hi is not None and step is not None:
+                    if step < 0.01:
+                        return server.gui.add_number(
+                            label, initial_value=float(init),
+                            min=float(lo), max=float(hi), step=float(step),
+                        )
+                    init_clamped = max(min(float(init), float(hi)), float(lo))
+                    return server.gui.add_slider(
+                        label, min=float(lo), max=float(hi),
+                        step=float(step), initial_value=init_clamped,
+                    )
+                return server.gui.add_number(label, initial_value=float(init))
+            # Unknown scalar — fallback as text
+            return server.gui.add_text(label, initial_value=str(init))
+
+    def rebuild_param_widgets():
+        """Tear down + rebuild every parameter widget for the current recipe."""
         for h in param_handles.values():
             try: h.remove()
             except Exception: pass
         param_handles.clear()
+        raw_json_keys.clear()
         recipe_data = ui_state["current_recipe_data"] or {}
-        with param_folder:
-            for key, label, lo, hi, step, group in EXPOSED_PARAMS:
-                if key not in recipe_data:
-                    continue
-                init = recipe_data[key]
-                if isinstance(init, (list, tuple)) or not isinstance(init, (int, float)):
-                    continue
-                is_int = isinstance(init, int) and not isinstance(init, bool)
-                if is_int:
-                    handle = server.gui.add_slider(
-                        label,
-                        min=int(lo), max=int(hi),
-                        step=int(max(1, step)),
-                        initial_value=int(init),
-                    )
-                elif step < 0.01:
-                    handle = server.gui.add_number(
-                        label, initial_value=float(init),
-                        min=float(lo), max=float(hi), step=float(step),
-                    )
-                else:
-                    handle = server.gui.add_slider(
-                        label, min=float(lo), max=float(hi),
-                        step=float(step), initial_value=float(init),
-                    )
-                param_handles[key] = handle
 
-    def load_recipe_data(name: str) -> None:
-        path = recipes_dir / f"{name}.json"
+        for key, val in recipe_data.items():
+            if key in HIDDEN_KEYS:
+                continue
+            # Vector3 special case: viser's add_vector3 = native (x, y, z) widget.
+            if key in VECTOR3_KEYS and isinstance(val, (list, tuple)) and len(val) == 3:
+                grp_name, label = VECTOR3_KEYS[key]
+                folder = group_folders.get(grp_name, advanced_folder)
+                with folder:
+                    h = server.gui.add_vector3(
+                        label,
+                        initial_value=(float(val[0]), float(val[1]), float(val[2])),
+                        step=0.1,
+                        hint=f"3-component vector for `{key}`.",
+                    )
+                    param_handles[f"vec3:{key}"] = h
+                continue
+            # Nested dict: expand its scalar children into a sub-folder.
+            if key in NESTED_DICT_KEYS and isinstance(val, dict):
+                grp_name = NESTED_DICT_KEYS[key]
+                folder = group_folders.get(grp_name) or advanced_folder
+                for child_key, child_val in val.items():
+                    if isinstance(child_val, (int, float, bool, str)):
+                        h = _make_scalar_widget(folder, child_key, child_val)
+                        param_handles[f"nested:{key}.{child_key}"] = h
+                    else:
+                        # Sub-non-scalar: dump as raw JSON in advanced.
+                        with advanced_folder:
+                            h = server.gui.add_text(
+                                f"{key}.{child_key} (json)",
+                                initial_value=json.dumps(child_val),
+                            )
+                            param_handles[f"raw_nested:{key}.{child_key}"] = h
+                            raw_json_keys.append(f"raw_nested:{key}.{child_key}")
+                continue
+            # Material name: dropdown of canonical values, not free text.
+            if key == "material" and isinstance(val, str):
+                folder = group_folders.get("Material") or advanced_folder
+                with folder:
+                    options = list(MATERIALS)
+                    # If the recipe specifies an unknown material, surface it
+                    # so the user can see + change it.
+                    if val not in options:
+                        options = [val] + options
+                    h = server.gui.add_dropdown(
+                        "Material", options=options, initial_value=val,
+                        hint="MPM constitutive model. Other params (E, ν, ...) should match.",
+                    )
+                    param_handles[key] = h
+                continue
+            # Plain scalars: route by hint or default into Other.
+            if isinstance(val, (int, float, bool, str)):
+                hint = PARAM_HINTS.get(key)
+                grp_name = hint[0] if hint else "Other"
+                folder = group_folders.get(grp_name) or advanced_folder
+                h = _make_scalar_widget(folder, key, val, hint)
+                param_handles[key] = h
+                continue
+            # Lists / unknown structures → raw JSON text in advanced
+            with advanced_folder:
+                h = server.gui.add_text(
+                    f"{key} (json)", initial_value=json.dumps(val),
+                )
+                param_handles[f"raw:{key}"] = h
+                raw_json_keys.append(f"raw:{key}")
+
+    def load_recipe_data(label: str) -> None:
+        """`label` may be a built-in name ('jelly') or a starred user preset
+        ('★ my_custom'). resolve_recipe_path handles both."""
+        path = resolve_recipe_path(label)
         if not path.exists():
             runner.append_log(f"[workbench] recipe missing: {path}")
             return
         ui_state["current_recipe_data"] = load_recipe(path)
         ui_state["current_recipe_path"] = path
         rebuild_param_widgets()
-        runner.append_log(f"[workbench] loaded recipe '{name}'")
+        runner.append_log(f"[workbench] loaded recipe '{label}'")
+
+    def push_to_model_history(model_dir: Path) -> None:
+        """Prepend `model_dir` to history; max 10 entries; de-dup."""
+        s = str(model_dir)
+        history = [h for h in model_history.load() if h != s]
+        history = [s] + history
+        history = history[:10]
+        model_history.save(history)
+        recent_models_dd.options = ["(none)"] + history
+        # Don't change recent_models_dd.value — leaving it as-is would otherwise
+        # re-trigger a no-op pick. The user just gets the entry in the list.
 
     load_recipe_data(available_recipes[0])
 
@@ -595,7 +842,6 @@ def main() -> None:
     def _(_):
         f = upload.value
         if f is None: return
-        # f.name is the original filename, f.content is bytes
         if not f.name.lower().endswith(".ply"):
             runner.append_log("[workbench] uploaded file must be .ply")
             return
@@ -604,25 +850,111 @@ def main() -> None:
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / "point_cloud.ply"
         target.write_bytes(f.content)
-        ui_state["current_model_dir"] = target_dir.parent.parent
-        runner.append_log(f"[workbench] uploaded {f.name} -> {ui_state['current_model_dir']}")
-        path_input.value = str(ui_state["current_model_dir"])
+        model_dir = target_dir.parent.parent
+        ui_state["current_model_dir"] = model_dir
+        runner.append_log(f"[workbench] uploaded {f.name} -> {model_dir}")
+        path_input.value = str(model_dir)
         update_model_status()
+        push_to_model_history(model_dir)
 
     @path_input.on_update
     def _(_):
         v = path_input.value.strip()
         if not v:
             ui_state["current_model_dir"] = None
-        else:
-            p = Path(v)
-            if not p.is_absolute(): p = (pkg_root / p).resolve()
-            ui_state["current_model_dir"] = p if p.exists() else None
+            update_model_status()
+            return
+        p = Path(v)
+        if not p.is_absolute():
+            p = (pkg_root / p).resolve()
+        ui_state["current_model_dir"] = p if p.exists() else None
         update_model_status()
+        # Only record valid model dirs in history (avoid recording typos).
+        if ui_state["current_model_dir"] is not None and (p / "point_cloud").is_dir():
+            push_to_model_history(p)
+
+    @recent_models_dd.on_update
+    def _(_):
+        v = recent_models_dd.value
+        if v == "(none)":
+            return
+        path_input.value = v  # triggers path_input.on_update above
 
     @recipe_dd.on_update
     def _(_):
         load_recipe_data(recipe_dd.value)
+
+    def _build_effective_recipe_dict() -> dict:
+        """Walk param_handles, apply edits to a deep-copy of the current
+        recipe, return the merged dict. Same logic as the Run path uses
+        — extracted so Save-as-preset can reuse it."""
+        if ui_state["current_recipe_data"] is None:
+            return {}
+        base = json.loads(json.dumps(ui_state["current_recipe_data"]))
+        for handle_key, h in param_handles.items():
+            v = h.value
+            if handle_key.startswith("vec3:"):
+                _, key = handle_key.split(":", 1)
+                if isinstance(base.get(key), list) and len(base[key]) >= 3:
+                    base[key] = [float(v[0]), float(v[1]), float(v[2])]
+            elif handle_key.startswith("nested:"):
+                _, rest = handle_key.split(":", 1)
+                parent, child = rest.split(".", 1)
+                if isinstance(base.get(parent), dict) and child in base[parent]:
+                    orig = base[parent][child]
+                    base[parent][child] = (int(round(v))
+                        if isinstance(orig, int) and not isinstance(orig, bool)
+                        else v)
+            elif handle_key.startswith("raw:"):
+                key = handle_key[len("raw:"):]
+                try: base[key] = json.loads(v)
+                except Exception: pass
+            elif handle_key.startswith("raw_nested:"):
+                _, rest = handle_key.split(":", 1)
+                parent, child = rest.split(".", 1)
+                try:
+                    if isinstance(base.get(parent), dict):
+                        base[parent][child] = json.loads(v)
+                except Exception: pass
+            else:
+                key = handle_key
+                if key in base:
+                    orig = base[key]
+                    if isinstance(orig, int) and not isinstance(orig, bool):
+                        base[key] = int(round(v)) if isinstance(v, (int, float)) else v
+                    else:
+                        base[key] = v
+        return base
+
+    @save_preset_btn.on_click
+    def _(_):
+        name = save_preset_name.value.strip()
+        if not name:
+            save_preset_status.value = "name can't be empty"
+            return
+        # Restrict to simple identifiers — no slashes, dots, etc.
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+        if not safe:
+            save_preset_status.value = "invalid name"
+            return
+        eff = _build_effective_recipe_dict()
+        if not eff:
+            save_preset_status.value = "no recipe loaded — pick a preset first"
+            return
+        # Stash a tiny note about the lineage, so users can tell where it came from.
+        eff = dict(eff)
+        eff["_note"] = f"User preset (workbench save). Based on: {recipe_dd.value}"
+        out_path = user_recipes_dir / f"{safe}.json"
+        out_path.write_text(json.dumps(eff, indent=2))
+        # Refresh the preset dropdown so the new entry is selectable immediately.
+        all_recipes = list_all_recipes()
+        recipe_dd.options = all_recipes
+        starred = f"★ {safe}"
+        if starred in all_recipes:
+            recipe_dd.value = starred
+        save_preset_status.value = f"saved as ★ {safe}"
+        save_preset_name.value = ""
+        runner.append_log(f"[workbench] saved preset '{safe}' to {out_path}")
 
     @run_btn.on_click
     def _(_):
@@ -634,14 +966,53 @@ def main() -> None:
             runner.append_log("[workbench] already running; cancel first")
             return
 
-        # Build the effective recipe with user overrides
-        base = ui_state["current_recipe_data"]
-        overrides = {k: h.value for k, h in param_handles.items()}
+        # Build the effective recipe with user overrides.
+        # Widget keys come in four kinds:
+        #   "<key>"                           — plain scalar, override base[key]
+        #   "vec3:<key>:<i>"                  — i-th component of a 3-vector
+        #   "nested:<parent>.<child>"         — child key inside base[parent]
+        #   "raw:<key>" / "raw_nested:..."    — raw JSON text editor
+        base = json.loads(json.dumps(ui_state["current_recipe_data"]))  # deep copy
+        for handle_key, h in param_handles.items():
+            v = h.value
+            if handle_key.startswith("vec3:"):
+                # add_vector3 .value is a (x, y, z) tuple
+                _, key = handle_key.split(":", 1)
+                if isinstance(base.get(key), list) and len(base[key]) >= 3:
+                    base[key] = [float(v[0]), float(v[1]), float(v[2])]
+            elif handle_key.startswith("nested:"):
+                _, rest = handle_key.split(":", 1)
+                parent, child = rest.split(".", 1)
+                if isinstance(base.get(parent), dict) and child in base[parent]:
+                    orig = base[parent][child]
+                    base[parent][child] = (int(round(v))
+                        if isinstance(orig, int) and not isinstance(orig, bool)
+                        else v)
+            elif handle_key.startswith("raw:"):
+                key = handle_key[len("raw:"):]
+                try: base[key] = json.loads(v)
+                except Exception: pass  # leave as-is on parse error
+            elif handle_key.startswith("raw_nested:"):
+                _, rest = handle_key.split(":", 1)
+                parent, child = rest.split(".", 1)
+                try:
+                    if isinstance(base.get(parent), dict):
+                        base[parent][child] = json.loads(v)
+                except Exception: pass
+            else:
+                key = handle_key
+                if key in base:
+                    orig = base[key]
+                    if isinstance(orig, int) and not isinstance(orig, bool):
+                        base[key] = int(round(v)) if isinstance(v, (int, float)) else v
+                    else:
+                        base[key] = v
         token = time.strftime("%Y%m%d-%H%M%S")
         out_name = output_input.value if output_input.value not in ("", "(auto)") \
                                       else f"{m.name}_{recipe_dd.value}_{token}"
         eff_recipe = work_recipes / f"{out_name}.json"
-        write_effective_recipe(base, overrides, eff_recipe)
+        eff_recipe.parent.mkdir(parents=True, exist_ok=True)
+        eff_recipe.write_text(json.dumps(base, indent=2))
 
         # Reset frame stream + slider + progress hooks
         stream.reset(pkg_root / "work/fused" / out_name)
@@ -649,8 +1020,6 @@ def main() -> None:
         frame_slider.max = 0
         frame_slider.value = 0
         ui_state["expected_frames"] = int(base.get("frame_num", 150))
-        if "frame_num" in param_handles:
-            ui_state["expected_frames"] = int(param_handles["frame_num"].value)
         ui_state["first_frame_t"] = 0.0
         progress_bar.value = 0.0
         stage_text.value = "starting (kernel JIT — first run can take 30–90s)"
