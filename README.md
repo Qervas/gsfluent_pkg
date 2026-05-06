@@ -24,7 +24,25 @@ cd gsfluent_pkg
 
 ## 用法
 
-### 仿真自己的建筑
+### 浏览器工作台（推荐）
+
+一个页面搞定一切——上传模型、选配方、调参数、跑仿真、看结果：
+
+```bash
+./run-workbench.sh
+```
+
+打开 `http://localhost:8080`：
+
+- **Model**：拖一个 `.ply` 进来上传，或粘贴已有的模型目录路径
+- **Recipe**：从下拉里选 `jelly` / `demolition` / 自己加的；下面的滑块自动显示该配方的当前值
+- **Recipe parameters**：网格分辨率、子步长、帧数、相机角度等都暴露成滑块/输入框；改一下即可应用到下次跑
+- **Run**：点 Run，仿真在后台跑，建筑一边算一边在 3D 视口里形变
+- **Playback**：滑帧、暂停、调速度
+
+不需要终端命令、不需要懂 JSON。
+
+### CLI（脚本化场景用）
 
 ```bash
 ./run-sim.sh <building_path> --recipe demolition
@@ -34,8 +52,6 @@ cd gsfluent_pkg
 
 - 一个 `.ply` 文件（脚本自动包装成仿真器要的目录结构）
 - 一个 3DGS 模型目录（含 `point_cloud/iteration_*/point_cloud.ply` 的标准训练输出）
-
-跑完之后浏览器自动打开 `localhost:8080`，仿真一边算，建筑一边形变。笔记本 GPU + 200k 粒子约 1 frame/sec，150 帧大概两分钟。
 
 例子：
 
@@ -127,7 +143,8 @@ gsfluent_pkg/
 ├── README.md          # 中文版（默认）
 ├── README.en.md       # English
 ├── setup.sh           # 一次性安装（conda 环境 + CUDA 扩展）
-├── run-sim.sh         # 主入口：丢模型，开浏览器
+├── run-workbench.sh   # 浏览器工作台（推荐入口）
+├── run-sim.sh         # CLI：丢模型，开浏览器（脚本化用）
 ├── run-viewer.sh      # 回放已有结果
 ├── env.yml            # conda 环境定义
 ├── core/              # 仿真代码（gs_simulation, mpm_solver_warp, ...）
