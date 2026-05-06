@@ -23,7 +23,25 @@ Requirements:
 
 ## Use
 
-### Sim a building
+### Browser workbench (recommended)
+
+One page does everything — upload model, pick recipe, tweak parameters, run sim, watch results:
+
+```bash
+./run-workbench.sh
+```
+
+Opens at `http://localhost:8080`:
+
+- **Model** — drop a `.ply` to upload, or paste a path to an existing model directory.
+- **Recipe** — dropdown of `jelly` / `demolition` / any you've added. Params below auto-populate with that recipe's defaults.
+- **Recipe parameters** — sliders / inputs for grid resolution, substep dt, frame count, camera angles, etc. Edits apply on the next Run.
+- **Run** — click and the sim spawns in the background; the building deforms live in the 3D viewport as frames arrive.
+- **Playback** — frame slider, pause, speed.
+
+No terminal commands, no JSON editing required.
+
+### CLI (for scripted use)
 
 ```bash
 ./run-sim.sh <building_path> --recipe demolition
@@ -126,7 +144,8 @@ gsfluent_pkg/
 ├── README.md          # 中文 (default on GitHub)
 ├── README.en.md       # this file
 ├── setup.sh           # one-time install (conda env + CUDA exts)
-├── run-sim.sh         # main entry: drop a model, get a browser tab
+├── run-workbench.sh   # browser workbench (recommended entry)
+├── run-sim.sh         # CLI: drop a model, get a browser tab (scripted use)
 ├── run-viewer.sh      # replay an existing run
 ├── env.yml            # conda spec
 ├── core/              # the sim code (gs_simulation, mpm_solver_warp, ...)
