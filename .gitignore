@@ -1,0 +1,30 @@
+# Generated runtime state
+work/
+core_runtime/
+vk_plys/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# CUDA extension build artifacts
+core/gaussian-splatting/submodules/*/build/
+core/gaussian-splatting/submodules/*/*.egg-info/
+core/gaussian-splatting/submodules/*/dist/
+
+# Conda env (shouldn't be in repo, but just in case)
+env/
+envs/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# User data — never commit a 3DGS model
+*.ply.large
+# (do NOT ignore `core/` — that's our source code; only ignore user model dirs at top-level)
+/model/
+
+# Crash dumps — pattern with extension only, since we have a `core/` source dir.
+core.[0-9]*
