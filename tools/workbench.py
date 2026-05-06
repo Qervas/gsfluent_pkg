@@ -312,6 +312,13 @@ def main() -> None:
         cancel_btn   = server.gui.add_button("Cancel")
         status_text  = server.gui.add_text("Status", initial_value="IDLE")
         status_text.disabled = True
+        # Progress bar — driven by num_fused_frames / total_expected_frames.
+        # 0% until first frame arrives (covers kernel JIT warmup ~30–90s).
+        progress_bar = server.gui.add_progress_bar(0.0, animated=False)
+        stage_text   = server.gui.add_text("Stage", initial_value="—")
+        stage_text.disabled = True
+        eta_text     = server.gui.add_text("ETA", initial_value="—")
+        eta_text.disabled = True
 
     with server.gui.add_folder("Playback"):
         play_chk = server.gui.add_checkbox("Play", initial_value=True)
@@ -332,6 +339,9 @@ def main() -> None:
         "playing": True,
         "frame": 0,
         "_slider_suppress": False,
+        # Progress hooks: set when Run is clicked.
+        "expected_frames": 0,              # frame_num from the effective recipe
+        "first_frame_t": 0.0,              # time when 1st frame appeared (for ETA)
     }
 
     def rebuild_param_widgets():
@@ -433,11 +443,18 @@ def main() -> None:
         eff_recipe = work_recipes / f"{out_name}.json"
         write_effective_recipe(base, overrides, eff_recipe)
 
-        # Reset frame stream + slider
+        # Reset frame stream + slider + progress hooks
         stream.reset(pkg_root / "work/fused" / out_name)
         ui_state["frame"] = 0
         frame_slider.max = 0
         frame_slider.value = 0
+        ui_state["expected_frames"] = int(base.get("frame_num", 150))
+        if "frame_num" in param_handles:
+            ui_state["expected_frames"] = int(param_handles["frame_num"].value)
+        ui_state["first_frame_t"] = 0.0
+        progress_bar.value = 0.0
+        stage_text.value = "starting (kernel JIT — first run can take 30–90s)"
+        eta_text.value = "—"
 
         err = runner.start(m, eff_recipe, int(particles.value), out_name,
                            env_name=args.env)
@@ -470,19 +487,66 @@ def main() -> None:
     last_log_dump = 0.0
     while True:
         now = time.perf_counter()
-        # Status text + log roll-up every 250ms
+        # Status + progress + log roll-up every 250ms
         if now - last_log_dump >= 0.25:
             with runner.lock:
                 st = runner.state.state
                 t0 = runner.state.t_started
                 t1 = runner.state.t_finished
+            n_frames = stream.num_frames()
+            expected = ui_state["expected_frames"]
+
+            # ---- Stage detection (look at recent log lines for the latest marker) ----
+            recent = "\n".join(runner.last_lines(80))
             if st == "RUNNING":
-                status_text.value = f"RUNNING ({now - last_advance + 0:.0f}s)" if t0 == 0 else \
-                                    f"RUNNING ({time.time() - t0:.0f}s)"
+                if "[PhaseA-SUMMARY]" in recent:
+                    stage_text.value = "fuse drain (sim done; waiting on fuse quiet timeout)"
+                elif "[watch] +frame" in recent and "step 2/3" in recent:
+                    stage_text.value = "fuse (matching sim frames to reference)"
+                elif "[PhaseA]" in recent or "step 1/3" in recent:
+                    stage_text.value = "sim (MPM substeps)"
+                else:
+                    stage_text.value = "starting (kernel JIT — first run can take 30–90s)"
             elif st == "DONE":
-                status_text.value = f"DONE in {t1 - t0:.0f}s ({stream.num_frames()} frames)"
+                stage_text.value = "complete"
             elif st == "ERROR":
-                status_text.value = f"ERROR (see log)"
+                stage_text.value = "error"
+            elif st == "CANCELLED":
+                stage_text.value = "cancelled"
+            else:
+                stage_text.value = "—"
+
+            # ---- Progress bar + ETA from observed fps since first frame ----
+            if expected > 0 and n_frames > 0:
+                if ui_state["first_frame_t"] == 0.0:
+                    ui_state["first_frame_t"] = time.time()
+                progress_bar.value = min(100.0, 100.0 * n_frames / expected)
+                elapsed = max(0.001, time.time() - ui_state["first_frame_t"])
+                fps_obs = n_frames / elapsed
+                if n_frames >= expected:
+                    eta_text.value = f"0:00 (done; {fps_obs:.2f} fps avg)"
+                elif fps_obs > 0:
+                    remaining = (expected - n_frames) / fps_obs
+                    eta_text.value = (f"{int(remaining // 60)}:{int(remaining % 60):02d} "
+                                      f"(~{fps_obs:.2f} fps)")
+                else:
+                    eta_text.value = "computing..."
+            elif st == "RUNNING":
+                progress_bar.value = 0.0
+                eta_text.value = "—"
+            elif st == "DONE":
+                progress_bar.value = 100.0
+
+            # ---- Top-level status line ----
+            if st == "RUNNING":
+                status_text.value = (
+                    f"RUNNING ({int(time.time() - t0) if t0 else 0}s) — "
+                    f"{n_frames}/{expected} frames"
+                )
+            elif st == "DONE":
+                status_text.value = f"DONE in {int(t1 - t0)}s ({n_frames} frames)"
+            elif st == "ERROR":
+                status_text.value = "ERROR (see log)"
             else:
                 status_text.value = st
 
