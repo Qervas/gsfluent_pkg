@@ -7,6 +7,7 @@ import { SimSetupPanel } from "./SimSetupPanel";
 import { CameraPanel } from "./CameraPanel";
 import { ParticleFillingPanel } from "./ParticleFillingPanel";
 import { OtherPanel } from "./OtherPanel";
+import { BoundaryEditor } from "./BoundaryEditor";
 
 const PROVENANCE_KEY = "_provenance";
 
@@ -45,7 +46,9 @@ export function Properties() {
       <PropertyFolder title="Other" defaultOpen={false}>
         <OtherPanel />
       </PropertyFolder>
-      <PropertyFolder title="Boundary conditions" defaultOpen={false}>{/* Phase 4.3 */}</PropertyFolder>
+      <PropertyFolder title="Boundary conditions" defaultOpen={false}>
+        <BoundaryEditor />
+      </PropertyFolder>
       <PropertyFolder title="Provenance" defaultOpen={false}>
         <ProvenanceFooter data={activeRecipeData} />
       </PropertyFolder>
