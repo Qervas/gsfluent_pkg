@@ -1,6 +1,12 @@
 import { PropertyFolder } from "./PropertyFolder";
-import { MaterialPanel } from "./MaterialPanel";
 import { useStore } from "@/lib/store";
+import { MaterialPanel } from "./MaterialPanel";
+import { SolverPanel } from "./SolverPanel";
+import { ForcesPanel } from "./ForcesPanel";
+import { SimSetupPanel } from "./SimSetupPanel";
+import { CameraPanel } from "./CameraPanel";
+import { ParticleFillingPanel } from "./ParticleFillingPanel";
+import { OtherPanel } from "./OtherPanel";
 
 const PROVENANCE_KEY = "_provenance";
 
@@ -21,12 +27,24 @@ export function Properties() {
       <PropertyFolder title="Material">
         <MaterialPanel />
       </PropertyFolder>
-      <PropertyFolder title="Solver" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
-      <PropertyFolder title="Forces" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
-      <PropertyFolder title="Sim setup" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
-      <PropertyFolder title="Camera" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
-      <PropertyFolder title="Particle filling" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
-      <PropertyFolder title="Other" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
+      <PropertyFolder title="Solver" defaultOpen={false}>
+        <SolverPanel />
+      </PropertyFolder>
+      <PropertyFolder title="Forces" defaultOpen={false}>
+        <ForcesPanel />
+      </PropertyFolder>
+      <PropertyFolder title="Sim setup" defaultOpen={false}>
+        <SimSetupPanel />
+      </PropertyFolder>
+      <PropertyFolder title="Camera" defaultOpen={false}>
+        <CameraPanel />
+      </PropertyFolder>
+      <PropertyFolder title="Particle filling" defaultOpen={false}>
+        <ParticleFillingPanel />
+      </PropertyFolder>
+      <PropertyFolder title="Other" defaultOpen={false}>
+        <OtherPanel />
+      </PropertyFolder>
       <PropertyFolder title="Boundary conditions" defaultOpen={false}>{/* Phase 4.3 */}</PropertyFolder>
       <PropertyFolder title="Provenance" defaultOpen={false}>
         <ProvenanceFooter data={activeRecipeData} />
