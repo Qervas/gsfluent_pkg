@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel
 
 from ..core import models as m
 
@@ -20,4 +23,17 @@ async def upload(file: UploadFile = File(...)):
     if not (content.startswith(b"ply\n") or content.startswith(b"ply\r")):
         raise HTTPException(422, "uploaded file is not a valid ply (missing magic header)")
     name, path = m.wrap_ply_upload(file.filename, content)
+    return {"name": name, "path": str(path)}
+
+
+class RegisterRequest(BaseModel):
+    path: str
+
+
+@router.post("/register")
+async def register(req: RegisterRequest):
+    try:
+        name, path = m.register_local_model(Path(req.path))
+    except FileNotFoundError as e:
+        raise HTTPException(422, str(e))
     return {"name": name, "path": str(path)}
