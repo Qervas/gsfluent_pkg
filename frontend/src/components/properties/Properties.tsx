@@ -8,8 +8,8 @@ import { CameraPanel } from "./CameraPanel";
 import { ParticleFillingPanel } from "./ParticleFillingPanel";
 import { OtherPanel } from "./OtherPanel";
 import { BoundaryEditor } from "./BoundaryEditor";
-
-const PROVENANCE_KEY = "_provenance";
+import { ProvenanceFooter } from "./ProvenanceFooter";
+import { SavePresetDialog } from "./SavePresetDialog";
 
 export function Properties() {
   const activeRecipeName = useStore((s) => s.activeRecipeName);
@@ -25,54 +25,20 @@ export function Properties() {
 
   return (
     <div className="text-xs">
-      <PropertyFolder title="Material">
-        <MaterialPanel />
-      </PropertyFolder>
-      <PropertyFolder title="Solver" defaultOpen={false}>
-        <SolverPanel />
-      </PropertyFolder>
-      <PropertyFolder title="Forces" defaultOpen={false}>
-        <ForcesPanel />
-      </PropertyFolder>
-      <PropertyFolder title="Sim setup" defaultOpen={false}>
-        <SimSetupPanel />
-      </PropertyFolder>
-      <PropertyFolder title="Camera" defaultOpen={false}>
-        <CameraPanel />
-      </PropertyFolder>
-      <PropertyFolder title="Particle filling" defaultOpen={false}>
-        <ParticleFillingPanel />
-      </PropertyFolder>
-      <PropertyFolder title="Other" defaultOpen={false}>
-        <OtherPanel />
-      </PropertyFolder>
-      <PropertyFolder title="Boundary conditions" defaultOpen={false}>
-        <BoundaryEditor />
-      </PropertyFolder>
+      <PropertyFolder title="Material"><MaterialPanel /></PropertyFolder>
+      <PropertyFolder title="Solver" defaultOpen={false}><SolverPanel /></PropertyFolder>
+      <PropertyFolder title="Forces" defaultOpen={false}><ForcesPanel /></PropertyFolder>
+      <PropertyFolder title="Sim setup" defaultOpen={false}><SimSetupPanel /></PropertyFolder>
+      <PropertyFolder title="Camera" defaultOpen={false}><CameraPanel /></PropertyFolder>
+      <PropertyFolder title="Particle filling" defaultOpen={false}><ParticleFillingPanel /></PropertyFolder>
+      <PropertyFolder title="Other" defaultOpen={false}><OtherPanel /></PropertyFolder>
+      <PropertyFolder title="Boundary conditions" defaultOpen={false}><BoundaryEditor /></PropertyFolder>
       <PropertyFolder title="Provenance" defaultOpen={false}>
-        <ProvenanceFooter data={activeRecipeData} />
+        <ProvenanceFooter />
       </PropertyFolder>
-    </div>
-  );
-}
-
-function ProvenanceFooter({ data }: { data: Record<string, unknown> }) {
-  const p = data[PROVENANCE_KEY] as
-    | { based_on?: string; saved_at?: string }
-    | undefined;
-  if (!p) {
-    return (
-      <div className="text-text-secondary py-1">Built-in preset.</div>
-    );
-  }
-  return (
-    <div className="text-text-secondary py-1 space-y-0.5">
-      <div>
-        Based on <span className="text-accent">{p.based_on ?? "(unknown)"}</span>
+      <div className="px-3 pt-3 pb-2 border-t border-border">
+        <SavePresetDialog />
       </div>
-      {p.saved_at && (
-        <div className="text-text-muted">saved {p.saved_at}</div>
-      )}
     </div>
   );
 }
