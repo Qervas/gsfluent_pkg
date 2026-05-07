@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { Outliner } from "@/components/outliner/Outliner";
 import { Properties } from "@/components/properties/Properties";
+import { Viewport } from "@/components/viewport/Viewport";
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 
@@ -21,7 +22,7 @@ export default function App() {
   return (
     <AppShell
       outliner={<Outliner onLoadRun={onLoadRun} />}
-      viewport={<div className="bg-elevated h-full" />}
+      viewport={<Viewport />}
       properties={<Properties />}
     />
   );
