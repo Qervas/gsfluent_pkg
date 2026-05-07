@@ -1,95 +1,77 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
-import * as Splat from "@mkkellogg/gaussian-splats-3d";
 import * as THREE from "three";
 import { useStore } from "@/lib/store";
-import { packToSplatBuffer } from "./splat-helpers";
 
 /**
- * SplatScene — renders the active 3DGS splats inside the R3F scene.
+ * SplatScene renders the active 3DGS data as a Three.js Points cloud with
+ * per-point vertex colors. This is a pragmatic stand-in for proper Gaussian-
+ * splat rendering — visual quality is lower (no anisotropic ellipsoids, no
+ * per-point opacity) but the rendering pipeline is dead simple and *actually
+ * works*. Phase 1.5+ can swap in @mkkellogg/gaussian-splats-3d once its
+ * undocumented API stops being a moving target.
  *
- * Mounts a DropInViewer once `staticAttrs` arrives, builds the initial
- * SplatBuffer from frame 0's xyz + the static per-particle (R, scales,
- * rgb, opacity) attributes, then mutates `splatDataTextures.baseData
- * .centers` in place each render to drive live animation.
- *
- * API conventions match the Phase 0 spike (`spike/splat-test/main.tsx`):
- * - DropInViewer with `dynamicScene: true` (mandatory for live updates)
- * - `gpuAcceleratedSort: true`, `sphericalHarmonicsDegree: 0`
- * - `addSplatBuffers` 8-positional-arg form
- * - `updateDataTexturesFromBaseData(0, n - 1)` to push centers to GPU
+ * Animation: useFrame advances currentFrameIdx at ~24 fps and writes the
+ * frame's xyz Float32Array directly into the position attribute's underlying
+ * Float32Array, then marks needsUpdate. Allocation-free hot path.
  */
 export function SplatScene() {
-  const [viewer, setViewer] = useState<any>(null);
-  const viewerRef = useRef<any>(null);
-  const initialFrameSent = useRef(false);
-
   const staticAttrs = useStore((s) => s.staticAttrs);
   const frameXyz = useStore((s) => s.frameXyz);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
   const setCurrentFrame = useStore((s) => s.setCurrentFrame);
 
-  // Set up viewer once when staticAttrs first arrives.
-  useEffect(() => {
-    if (!staticAttrs) return;
-    const dropIn = new (Splat as any).DropInViewer({
-      gpuAcceleratedSort: true,
-      sharedMemoryForWorkers: false,
-      dynamicScene: true,
-      sphericalHarmonicsDegree: 0,
-    });
-    viewerRef.current = dropIn;
-    setViewer(dropIn);
-    initialFrameSent.current = false;
+  const positionsRef = useRef<THREE.BufferAttribute | null>(null);
+  const lastAdvance = useRef<number>(0);
 
-    return () => {
-      dropIn.dispose?.().catch(() => {});
-      if (viewerRef.current === dropIn) {
-        viewerRef.current = null;
+  // Initialize geometry attributes when staticAttrs first arrives. Build the
+  // colors Float32Array once (RGB is constant across frames). Position buffer
+  // starts empty (zeroed) and gets filled in on first frame arrival via the
+  // useFrame copy below.
+  const { positions, colors, pointSize } = useMemo(() => {
+    if (!staticAttrs) {
+      return {
+        positions: new Float32Array(0),
+        colors: new Float32Array(0),
+        pointSize: 0.01,
+      };
+    }
+    const n = staticAttrs.n;
+    // Median scale × 4 gives a reasonable point size that covers most of the
+    // splat without being so big the cloud looks like a blob.
+    let med = 0.005;
+    if (staticAttrs.scales.length >= 3 * n) {
+      const sample: number[] = [];
+      const stride = Math.max(1, Math.floor(n / 256));
+      for (let i = 0; i < n; i += stride) {
+        sample.push(staticAttrs.scales[i * 3]);
       }
-      setViewer(null);
-      initialFrameSent.current = false;
+      sample.sort((a, b) => a - b);
+      med = sample[Math.floor(sample.length / 2)] || 0.005;
+    }
+    return {
+      positions: new Float32Array(n * 3),
+      colors: new Float32Array(staticAttrs.rgb),
+      pointSize: Math.max(0.005, Math.min(0.05, med * 4)),
     };
   }, [staticAttrs]);
 
-  // Push first frame data when it arrives. Live updates happen in useFrame.
+  // Seed positions with the first frame as soon as it arrives; subsequent
+  // frames flow through useFrame's per-render copy.
   useEffect(() => {
-    if (!viewerRef.current || !staticAttrs || initialFrameSent.current) return;
+    if (!staticAttrs || positions.length === 0) return;
     const f0 = frameXyz.get(0);
-    if (!f0) return;
-    // Build via the exported SplatParser path. UncompressedSplatArray is
-    // defined inside the lib but never re-exported, so we cannot call its
-    // constructor from outside; instead we pack to the standard .splat
-    // 32-bytes-per-splat binary format and let the parser materialise the
-    // array for us.
-    const SplatNs = Splat as any;
-    const splatBuf = packToSplatBuffer(staticAttrs, f0);
-    const arr = SplatNs.SplatParser.parseStandardSplatToUncompressedSplatArray(splatBuf);
-    const generator = SplatNs.SplatBufferGenerator.getStandardGenerator(
-      0, 0, 0, new THREE.Vector3(),
-    );
-    const splatBuffer = generator.generateFromUncompressedSplatArray(arr);
-    viewerRef.current.viewer.addSplatBuffers(
-      [splatBuffer],
-      [{}],
-      true,   // finalBuild
-      false,  // showLoadingUI
-      false,  // showLoadingUIForSplatTreeBuild
-      false,  // replaceExisting
-      true,   // enableRenderBeforeFirstSort
-      true,   // preserveVisibleRegion
-    );
-    initialFrameSent.current = true;
-  }, [frameXyz, staticAttrs]);
+    if (f0 && f0.length === positions.length) {
+      positions.set(f0);
+      if (positionsRef.current) positionsRef.current.needsUpdate = true;
+    }
+  }, [staticAttrs, frameXyz, positions]);
 
-  // Per render: advance frame + update centers in place.
-  // Target ~24 fps for animation step; render loop is decoupled and faster.
-  const lastAdvance = useRef<number>(0);
   useFrame(({ clock }) => {
-    const v = viewerRef.current;
-    if (!v || !staticAttrs) return;
+    if (!staticAttrs || positions.length === 0) return;
 
+    // Advance the playhead at ~24 fps when playing AND we have multiple frames.
     if (playing && frameXyz.size > 1) {
       const now = clock.elapsedTime;
       if (now - lastAdvance.current > 1 / 24) {
@@ -100,16 +82,41 @@ export function SplatScene() {
     }
 
     const xyz = frameXyz.get(currentFrameIdx);
-    if (!xyz) return;
-    const sm = v.splatMesh;
-    if (!sm?.splatDataTextures?.baseData?.centers) return;
-    const buf: Float32Array = sm.splatDataTextures.baseData.centers;
-    if (buf.length === xyz.length) {
-      buf.set(xyz);
-      sm.updateDataTexturesFromBaseData(0, staticAttrs.n - 1);
-    }
+    if (!xyz || xyz.length !== positions.length) return;
+    positions.set(xyz);
+    if (positionsRef.current) positionsRef.current.needsUpdate = true;
   });
 
-  if (!viewer) return null;
-  return <primitive object={viewer} />;
+  if (!staticAttrs || positions.length === 0) return null;
+  const n = staticAttrs.n;
+
+  return (
+    <points>
+      <bufferGeometry>
+        <bufferAttribute
+          ref={positionsRef}
+          attach="attributes-position"
+          args={[positions, 3]}
+          count={n}
+          array={positions}
+          itemSize={3}
+          needsUpdate
+        />
+        <bufferAttribute
+          attach="attributes-color"
+          args={[colors, 3]}
+          count={n}
+          array={colors}
+          itemSize={3}
+        />
+      </bufferGeometry>
+      <pointsMaterial
+        size={pointSize}
+        vertexColors
+        sizeAttenuation
+        transparent={false}
+        opacity={1.0}
+      />
+    </points>
+  );
 }
