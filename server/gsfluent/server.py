@@ -26,4 +26,7 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "pkg_root": str(PKG_ROOT)}
 
+    from .api import recipes as recipes_api
+    app.include_router(recipes_api.router)
+
     return app
