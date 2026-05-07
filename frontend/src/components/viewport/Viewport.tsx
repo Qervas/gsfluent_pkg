@@ -3,6 +3,7 @@ import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/dr
 import { useStore } from "@/lib/store";
 import { SplatScene } from "./SplatScene";
 import { EmptyState } from "./EmptyState";
+import { DropZone } from "./DropZone";
 
 export function Viewport() {
   const staticAttrs = useStore((s) => s.staticAttrs);
@@ -31,6 +32,7 @@ export function Viewport() {
         {staticAttrs && <SplatScene />}
       </Canvas>
       {!staticAttrs && <EmptyState />}
+      <DropZone />
     </div>
   );
 }
