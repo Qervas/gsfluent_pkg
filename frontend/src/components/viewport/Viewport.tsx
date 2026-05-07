@@ -9,8 +9,9 @@ export function Viewport() {
 
   return (
     <div className="h-full w-full relative bg-canvas">
-      <Canvas camera={{ position: [3, 3, 3], fov: 50 }}>
-        {/* Floor: 20x20 grid on XY plane (Z-up convention, matches our backend rotation). */}
+      <Canvas camera={{ position: [3, 3, 3], fov: 50, up: [0, 0, 1] }}>
+        {/* Grid lies on XY plane (Z-up convention, matching the backend's
+            y-up→z-up rotation in frame_stream._M_YUP_TO_ZUP). */}
         <Grid
           args={[20, 20]}
           cellColor="#21262d"
@@ -18,6 +19,7 @@ export function Viewport() {
           sectionThickness={0.6}
           fadeDistance={30}
           infiniteGrid
+          rotation={[-Math.PI / 2, 0, 0]}
         />
         <OrbitControls makeDefault />
         <GizmoHelper alignment="bottom-left" margin={[60, 60]}>
