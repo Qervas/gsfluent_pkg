@@ -1,0 +1,64 @@
+import json
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from ..core import runner
+
+router = APIRouter(prefix="/api/runs", tags=["runs"])
+
+
+class StartRunRequest(BaseModel):
+    run_name: str
+    model_path: str
+    recipe_data: dict
+    recipe_source: str
+    particles: int = 200_000
+
+
+@router.get("")
+def list_active():
+    return [{"id": r.id, "name": r.name, "state": r.state} for r in runner.list_runs()]
+
+
+@router.post("")
+async def start(req: StartRunRequest):
+    rid = await runner.start_run(
+        run_name=req.run_name,
+        model_dir=Path(req.model_path),
+        recipe_data=req.recipe_data,
+        recipe_source_name=req.recipe_source,
+        particles=req.particles,
+    )
+    return {"run_id": rid, "run_name": req.run_name}
+
+
+@router.delete("/{run_id}")
+def cancel(run_id: str):
+    if not runner.cancel_run(run_id):
+        raise HTTPException(404, f"run {run_id} not active")
+    return {"status": "cancelled"}
+
+
+@router.get("/history")
+def history():
+    out: list[dict] = []
+    if not runner.FUSED_DIR.exists():
+        return out
+    try:
+        entries = sorted(runner.FUSED_DIR.iterdir(), key=lambda p: -p.stat().st_mtime)
+    except OSError:
+        return out
+    for d in entries:
+        if not d.is_dir():
+            continue
+        m = d / "manifest.json"
+        if not m.exists():
+            continue
+        try:
+            data = json.loads(m.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        out.append(data)
+    return out
