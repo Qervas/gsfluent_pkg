@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,8 +12,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useStreamClient } from "@/lib/use-stream";
 
 export default function App() {
+  const client = useStreamClient();
+  useEffect(() => {
+    client.connect();
+  }, [client]);
+
   return (
     <AppShell
       outliner={
