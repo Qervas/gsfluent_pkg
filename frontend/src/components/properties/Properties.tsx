@@ -1,4 +1,5 @@
 import { PropertyFolder } from "./PropertyFolder";
+import { MaterialPanel } from "./MaterialPanel";
 import { useStore } from "@/lib/store";
 
 const PROVENANCE_KEY = "_provenance";
@@ -17,7 +18,9 @@ export function Properties() {
 
   return (
     <div className="text-xs">
-      <PropertyFolder title="Material">{/* Phase 4.1 */}</PropertyFolder>
+      <PropertyFolder title="Material">
+        <MaterialPanel />
+      </PropertyFolder>
       <PropertyFolder title="Solver" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
       <PropertyFolder title="Forces" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
       <PropertyFolder title="Sim setup" defaultOpen={false}>{/* Phase 4.2 */}</PropertyFolder>
