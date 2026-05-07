@@ -31,3 +31,6 @@ core.[0-9]*
 
 # Brainstorming companion artefacts
 .superpowers/
+
+# Vite build output bundled into the wheel; never committed.
+server/gsfluent/static/

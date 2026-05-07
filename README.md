@@ -24,7 +24,18 @@ cd gsfluent_pkg
 
 ## 用法
 
-### 浏览器工作台（推荐）
+### 推荐运行方式（React 工作台）
+
+```bash
+git clone https://github.com/Qervas/gsfluent_pkg
+cd gsfluent_pkg/server
+make build      # 构建前端 + 安装后端
+gsfluent serve  # 自动打开 http://localhost:8080
+```
+
+> 已弃用：`./run-workbench.sh`（viser 版本）将在 v0.3 移除。
+
+### 旧版浏览器工作台（已弃用）
 
 一个页面搞定一切——上传模型、选配方、调参数、跑仿真、看结果：
 
