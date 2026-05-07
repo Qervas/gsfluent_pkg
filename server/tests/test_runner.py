@@ -9,8 +9,6 @@ def _make_fake_sim(path: Path) -> None:
     path.write_text(
         "#!/bin/bash\n"
         "echo '[fake] running'\n"
-        "mkdir -p $5/frames\n"
-        "touch $5/frames/frame_0000.ply\n"
         "exit 0\n"
     )
     path.chmod(0o755)
