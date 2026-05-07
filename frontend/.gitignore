@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.vite/
+*.log
+
+# tsc -b incremental build artifacts (emitted from references)
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
