@@ -34,6 +34,12 @@ export const api = {
       fd.append("file", file);
       return fetch("/api/models/upload", { method: "POST", body: fd }).then(j<ModelItem>);
     },
+    register: (path: string) =>
+      fetch("/api/models/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      }).then(j<ModelItem>),
   },
   runs: {
     list:    () => fetch("/api/runs").then(j<RunStatus[]>),

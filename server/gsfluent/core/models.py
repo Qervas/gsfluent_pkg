@@ -77,3 +77,34 @@ def wrap_ply_upload(orig_filename: str, content: bytes) -> tuple[str, Path]:
     except Exception as e:
         _log.warning("model %s saved to %s but history update failed: %s", name, model_dir, e)
     return name, model_dir
+
+
+def register_local_model(path: Path) -> tuple[str, Path]:
+    """Register an existing local 3DGS model directory in history without
+    copying anything. Validates the path structure: must contain
+    `point_cloud/iteration_*/point_cloud.ply`. Returns (name, path).
+
+    Raises FileNotFoundError if the path doesn't exist or doesn't have
+    the expected layout.
+    """
+    if not path.exists() or not path.is_dir():
+        raise FileNotFoundError(f"path does not exist or is not a directory: {path}")
+    pc_root = path / "point_cloud"
+    if not pc_root.is_dir():
+        raise FileNotFoundError(f"missing point_cloud/ subdir under {path}")
+    # Look for any iteration_<N>/point_cloud.ply.
+    iters = sorted(pc_root.glob("iteration_*"))
+    if not iters:
+        raise FileNotFoundError(
+            f"no iteration_*/ subdir under {pc_root}. "
+            f"3DGS model layout requires <model>/point_cloud/iteration_<N>/point_cloud.ply"
+        )
+    # At least one iteration must have a point_cloud.ply.
+    if not any((it / "point_cloud.ply").is_file() for it in iters):
+        raise FileNotFoundError(
+            f"no point_cloud.ply found under {pc_root}/iteration_*/. "
+            f"Are you pointing at a 3DGS training output dir?"
+        )
+    name = path.name  # use the directory name verbatim — no uuid suffix needed
+    record_model(name, path)
+    return name, path

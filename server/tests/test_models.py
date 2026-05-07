@@ -94,3 +94,43 @@ def test_history_caps_at_max(client, tmp_path, monkeypatch):
     assert len(listed) == 5
     # Newest 5: m_7, m_6, m_5, m_4, m_3
     assert [x["name"] for x in listed] == ["m_7", "m_6", "m_5", "m_4", "m_3"]
+
+
+def test_register_local_model(client, tmp_path, monkeypatch):
+    from gsfluent.core import models as m
+    monkeypatch.setattr(m, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(m, "HISTORY_FILE", tmp_path / "model_history.json")
+    # Build a fake 3DGS model layout
+    model_dir = tmp_path / "my_model"
+    iter_dir = model_dir / "point_cloud" / "iteration_30000"
+    iter_dir.mkdir(parents=True)
+    fake_ply = b"ply\nformat binary_little_endian 1.0\nelement vertex 0\nend_header\n" + b"\x00" * 100
+    (iter_dir / "point_cloud.ply").write_bytes(fake_ply)
+
+    r = client.post("/api/models/register", json={"path": str(model_dir)})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "my_model"
+    assert body["path"] == str(model_dir)
+    # Must appear in history
+    listed = client.get("/api/models").json()
+    assert any(x["name"] == "my_model" for x in listed)
+
+
+def test_register_rejects_invalid_path(client, tmp_path, monkeypatch):
+    from gsfluent.core import models as m
+    monkeypatch.setattr(m, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(m, "HISTORY_FILE", tmp_path / "model_history.json")
+    # Path doesn't exist
+    r = client.post("/api/models/register", json={"path": str(tmp_path / "nope")})
+    assert r.status_code == 422
+    # Path exists but no point_cloud/ inside
+    bad = tmp_path / "bad_model"
+    bad.mkdir()
+    r2 = client.post("/api/models/register", json={"path": str(bad)})
+    assert r2.status_code == 422
+    # Path exists with point_cloud/ but no iteration_*/ inside
+    half = tmp_path / "half_model"
+    (half / "point_cloud").mkdir(parents=True)
+    r3 = client.post("/api/models/register", json={"path": str(half)})
+    assert r3.status_code == 422
