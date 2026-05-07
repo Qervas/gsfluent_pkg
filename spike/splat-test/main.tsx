@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as GaussianSplats3D from "@mkkellogg/gaussian-splats-3d";
@@ -78,15 +78,19 @@ function SplatScene({
   onFps: (f: number) => void;
   onStatus: (s: string) => void;
 }) {
-  const dropInRef = useRef<any>(null);
-  const baseCenters = useRef<Float32Array>(new Float32Array(n * 3));
+  // Lazy viewer ownership: the effect creates the DropInViewer, registers it
+  // here for useFrame, and disposes it on cleanup. We mirror it into state so
+  // <primitive> swaps from the placeholder Group to the real viewer once mounted.
+  const viewerRef = useRef<any>(null);
+  const baseCentersRef = useRef<Float32Array | null>(null);
   const readyRef = useRef(false);
   const lastFpsT = useRef(performance.now());
   const frames = useRef(0);
+  const [viewer, setViewer] = useState<any>(null);
 
-  // Memoize the DropInViewer so React strict-mode re-mounts don't blow up the GPU.
-  const dropIn = useMemo(() => {
-    return new GaussianSplats3D.DropInViewer({
+  useEffect(() => {
+    let cancelled = false;
+    const v = new GaussianSplats3D.DropInViewer({
       gpuAcceleratedSort: true,
       sharedMemoryForWorkers: false,
       dynamicScene: true,
@@ -94,22 +98,21 @@ function SplatScene({
       antialiased: false,
       logLevel: 0,
     });
-  }, []);
+    viewerRef.current = v;
+    baseCentersRef.current = new Float32Array(n * 3);
+    readyRef.current = false;
+    setViewer(v);
 
-  useEffect(() => {
-    dropInRef.current = dropIn;
-    let cancelled = false;
     onStatus("baking splat buffer...");
-    // Defer heavy buffer build to next tick so the loading text paints first.
     const t0 = performance.now();
     const buf = buildSplatBuffer(n);
     const tBake = performance.now() - t0;
-    onStatus(`bake=${tBake.toFixed(0)}ms; uploading...`);
+    if (!cancelled) onStatus(`bake=${tBake.toFixed(0)}ms; uploading...`);
 
     // viewer.addSplatBuffers(buffers, options[], finalBuild, showLoadingUI,
     //                        showLoadingUIForSplatTreeBuild, replaceExisting,
     //                        enableRenderBeforeFirstSort, preserveVisibleRegion)
-    dropIn.viewer
+    v.viewer
       .addSplatBuffers(
         [buf],
         [{}],
@@ -122,7 +125,7 @@ function SplatScene({
       )
       .then(() => {
         if (cancelled) return;
-        const sm = dropIn.splatMesh;
+        const sm = v.splatMesh;
         if (!sm || !sm.splatDataTextures?.baseData?.centers) {
           onStatus(
             "FAIL: splatMesh.splatDataTextures.baseData.centers not exposed"
@@ -130,38 +133,47 @@ function SplatScene({
           return;
         }
         // Snapshot the baked centers so we can drive a sin-wave offset off them.
-        baseCenters.current.set(sm.splatDataTextures.baseData.centers);
+        baseCentersRef.current!.set(sm.splatDataTextures.baseData.centers);
         readyRef.current = true;
         onStatus(`ready — bake=${tBake.toFixed(0)}ms; mutating per frame`);
       })
       .catch((e: any) => {
+        if (cancelled) return;
         onStatus(`addSplatBuffers failed: ${e?.message ?? e}`);
       });
 
     return () => {
       cancelled = true;
+      readyRef.current = false;
+      // Fire-and-forget dispose; under StrictMode the first cleanup tears down
+      // the first viewer before the second mount creates a fresh one. The lib's
+      // dispose() returns a Promise that may reject if called mid-load — swallow.
+      v.dispose?.().catch(() => {});
+      if (viewerRef.current === v) viewerRef.current = null;
     };
-  }, [dropIn, n, onStatus]);
+  }, [n, onStatus]);
 
   useFrame(() => {
-    const drop = dropInRef.current;
-    if (drop && readyRef.current) {
+    const drop = viewerRef.current;
+    const base = baseCentersRef.current;
+    if (drop && base && readyRef.current) {
       const sm = drop.splatMesh;
-      const centers: Float32Array = sm.splatDataTextures.baseData.centers;
-      const base = baseCenters.current;
-      const t = performance.now() * 0.001;
-      // In-place mutate Y axis only.
-      for (let i = 0; i < n; i++) {
-        const i3 = i * 3;
-        centers[i3] = base[i3];
-        centers[i3 + 1] = base[i3 + 1] + 0.05 * Math.sin(t * 2 + i * 0.001);
-        centers[i3 + 2] = base[i3 + 2];
+      if (sm && sm.splatDataTextures?.baseData?.centers) {
+        const centers: Float32Array = sm.splatDataTextures.baseData.centers;
+        const t = performance.now() * 0.001;
+        // In-place mutate Y axis only.
+        for (let i = 0; i < n; i++) {
+          const i3 = i * 3;
+          centers[i3] = base[i3];
+          centers[i3 + 1] = base[i3 + 1] + 0.05 * Math.sin(t * 2 + i * 0.001);
+          centers[i3 + 2] = base[i3 + 2];
+        }
+        // Push centers (and re-pack RGBA padded texture) to the GPU. This is the
+        // documented internal path; the lib has no `updateCenters()` public method.
+        // With gpuAcceleratedSort=true the sort kernel reads from this same texture,
+        // so no separate sort-worker refresh is needed for visual correctness.
+        sm.updateDataTexturesFromBaseData(0, n - 1);
       }
-      // Push centers (and re-pack RGBA padded texture) to the GPU. This is the
-      // documented internal path; the lib has no `updateCenters()` public method.
-      // With gpuAcceleratedSort=true the sort kernel reads from this same texture,
-      // so no separate sort-worker refresh is needed for visual correctness.
-      sm.updateDataTexturesFromBaseData(0, n - 1);
     }
     // FPS counter — measure raw R3F frame loop, not the lib's internal counter.
     frames.current++;
@@ -173,8 +185,10 @@ function SplatScene({
     }
   });
 
-  // Drop the viewer Group into the R3F scene graph.
-  return <primitive object={dropIn} />;
+  // Render the real viewer Group once the effect has built it; before then,
+  // a no-op Group placeholder keeps the scene graph valid. The placeholder is
+  // memoized so we don't churn objects across renders.
+  return viewer ? <primitive object={viewer} /> : null;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

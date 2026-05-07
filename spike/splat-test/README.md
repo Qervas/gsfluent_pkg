@@ -10,12 +10,12 @@
 3. Watch the FPS counter in the top-left for 30 seconds. Initial bake takes ~1-3 s on a laptop CPU; after the "ready" message appears, the 200k splats animate on a sin-wave Y offset and the FPS counter shows the steady-state R3F frame rate.
 4. Drag with the mouse to orbit the camera; scroll to zoom. The animation must stay smooth while orbiting (the bottleneck candidate is the per-frame data-texture upload + sort, both of which scale with splat count and camera motion).
 
-## Result
+## Result (check exactly one)
 
-- [ ] PASS — sustained >= 30 fps with 200k splats animating: proceed with this lib in Phase 3.
-- [ ] FAIL — fps drops below 30: fall back to a custom R3F shader splat renderer (~+1 week to Phase 3 budget).
+- [ ] PASS — sustained >= 30 fps for 30 seconds with 200k splats animating. Proceed with this lib in Phase 3.
+- [ ] FAIL — observed < 30 fps. Fall back to a custom R3F shader splat renderer (~+1 week to Phase 3 budget).
 
-The implementer scaffolded + booted; the human checks the box after visual verification.
+The implementer scaffolded + booted; the human checks exactly one box after visual verification.
 
 ## Confirmed API surface
 
