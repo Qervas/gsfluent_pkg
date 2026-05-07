@@ -1,5 +1,5 @@
-import { useEffect, useCallback } from "react";
-import { AppShell } from "@/components/layout/AppShell";
+import { useEffect, useCallback, useRef } from "react";
+import { AppShell, type AppShellHandle } from "@/components/layout/AppShell";
 import { Outliner } from "@/components/outliner/Outliner";
 import { Properties } from "@/components/properties/Properties";
 import { Viewport } from "@/components/viewport/Viewport";
@@ -13,6 +13,8 @@ export default function App() {
   const client = useStreamClient();
   const resetForNewRun = useStore((s) => s.resetForNewRun);
   const activeModel = useStore((s) => s.activeModel);
+  const setSimState = useStore((s) => s.setSimState);
+  const shellRef = useRef<AppShellHandle>(null);
 
   useEffect(() => {
     client.connect();
@@ -24,11 +26,10 @@ export default function App() {
   // simState back to "idle" right after resetForNewRun.
   useEffect(() => {
     if (!activeModel?.path) return;
-    const st = useStore.getState();
-    st.resetForNewRun(`_model:${activeModel.name}`);
-    st.setSimState("idle");
+    resetForNewRun(`_model:${activeModel.name}`);
+    setSimState("idle");
     client.loadModel(activeModel.path);
-  }, [activeModel, client]);
+  }, [activeModel, client, resetForNewRun, setSimState]);
 
   const subscribe = useCallback(
     (run_name: string) => client.subscribe(run_name),
@@ -79,19 +80,14 @@ export default function App() {
       document.dispatchEvent(new CustomEvent("gsfluent:open-palette"));
     },
     onRun: triggerRun,
-    onToggleInspector: () => {
-      // Phase 6+ polish — react-resizable-panels' Panel.collapse() requires
-      // an imperative ref. Stubbed for now.
-      console.log("[shortcut] toggle inspector — not implemented yet");
-    },
-    onToggleSidebar: () => {
-      console.log("[shortcut] toggle sidebar — not implemented yet");
-    },
+    onToggleInspector: () => shellRef.current?.toggleInspector(),
+    onToggleSidebar: () => shellRef.current?.toggleSidebar(),
   });
 
   return (
     <>
       <AppShell
+        ref={shellRef}
         subscribe={subscribe}
         outliner={<Outliner onLoadRun={onLoadRun} />}
         viewport={<Viewport />}
