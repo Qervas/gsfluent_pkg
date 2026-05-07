@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { AppShell } from "@/components/layout/AppShell";
+import { Outliner } from "@/components/outliner/Outliner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,23 +14,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useStreamClient } from "@/lib/use-stream";
+import { useStore } from "@/lib/store";
 
 export default function App() {
   const client = useStreamClient();
+  const resetForNewRun = useStore((s) => s.resetForNewRun);
+
   useEffect(() => {
     client.connect();
   }, [client]);
 
+  const onLoadRun = (run_name: string) => {
+    resetForNewRun(run_name);
+    client.subscribe(run_name);
+  };
+
   return (
     <AppShell
-      outliner={
-        <div className="p-3 text-xs text-text-secondary">Outliner (Task 2.5)</div>
-      }
+      outliner={<Outliner onLoadRun={onLoadRun} />}
       viewport={<div className="bg-elevated h-full" />}
       properties={
         <div className="p-3 space-y-3">
           <div className="text-xs text-text-secondary uppercase tracking-wider">
-            Sample primitives
+            Properties (Task 2.6)
           </div>
           <div>
             <Label>Recipe</Label>
