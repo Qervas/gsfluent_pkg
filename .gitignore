@@ -28,3 +28,6 @@ envs/
 
 # Crash dumps — pattern with extension only, since we have a `core/` source dir.
 core.[0-9]*
+
+# Brainstorming companion artefacts
+.superpowers/
