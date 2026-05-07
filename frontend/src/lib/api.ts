@@ -26,6 +26,10 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data, based_on }),
       }).then(j<Recipe>),
+    delete: (n: string) =>
+      fetch(`/api/recipes/${encodeURIComponent(n)}`, { method: "DELETE" }).then(
+        j<{ deleted: string }>,
+      ),
   },
   models: {
     list: () => fetch("/api/models").then(j<ModelItem[]>),

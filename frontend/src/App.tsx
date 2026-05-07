@@ -1,9 +1,11 @@
 import { useEffect, useCallback, useRef } from "react";
 import { AppShell, type AppShellHandle } from "@/components/layout/AppShell";
+import { FullWorkspaceShell } from "@/components/layout/FullWorkspaceShell";
 import { Outliner } from "@/components/outliner/Outliner";
 import { Properties } from "@/components/properties/Properties";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
+import { RecipesWorkspace } from "@/workspaces/RecipesWorkspace";
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 import { useShortcuts } from "@/lib/use-shortcuts";
@@ -14,6 +16,7 @@ export default function App() {
   const resetForNewRun = useStore((s) => s.resetForNewRun);
   const activeModel = useStore((s) => s.activeModel);
   const setSimState = useStore((s) => s.setSimState);
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
   const shellRef = useRef<AppShellHandle>(null);
 
   useEffect(() => {
@@ -86,13 +89,34 @@ export default function App() {
 
   return (
     <>
-      <AppShell
-        ref={shellRef}
-        subscribe={subscribe}
-        outliner={<Outliner onLoadRun={onLoadRun} />}
-        viewport={<Viewport />}
-        properties={<Properties />}
-      />
+      {activeWorkspace === "sim" && (
+        <AppShell
+          ref={shellRef}
+          subscribe={subscribe}
+          outliner={<Outliner onLoadRun={onLoadRun} />}
+          viewport={<Viewport />}
+          properties={<Properties />}
+        />
+      )}
+      {activeWorkspace === "recipes" && (
+        <FullWorkspaceShell subscribe={subscribe}>
+          <RecipesWorkspace />
+        </FullWorkspaceShell>
+      )}
+      {activeWorkspace === "compare" && (
+        <FullWorkspaceShell subscribe={subscribe}>
+          <div className="h-full w-full flex items-center justify-center text-text-muted">
+            Coming next.
+          </div>
+        </FullWorkspaceShell>
+      )}
+      {activeWorkspace === "render" && (
+        <FullWorkspaceShell subscribe={subscribe}>
+          <div className="h-full w-full flex items-center justify-center text-text-muted">
+            Coming next.
+          </div>
+        </FullWorkspaceShell>
+      )}
       <CommandPalette onRun={triggerRun} />
     </>
   );

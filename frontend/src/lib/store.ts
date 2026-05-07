@@ -1,9 +1,13 @@
 import { create } from "zustand";
-import type { ModelItem, StaticAttrs } from "./types";
+import type { ModelItem, StaticAttrs, Workspace } from "./types";
 
 type SimState = "idle" | "running" | "done" | "error" | "cancelled";
 
 type State = {
+  // Workspace selection
+  activeWorkspace: Workspace;
+  setActiveWorkspace: (w: Workspace) => void;
+
   // Selected items
   activeModel: ModelItem | null;
   activeRecipeName: string | null;
@@ -39,6 +43,8 @@ type State = {
 };
 
 export const useStore = create<State>((set) => ({
+  activeWorkspace: "sim",
+  setActiveWorkspace: (w) => set({ activeWorkspace: w }),
   activeModel: null,
   activeRecipeName: null,
   activeRecipeData: null,

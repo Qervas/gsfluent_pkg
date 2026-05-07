@@ -1,3 +1,5 @@
+export type Workspace = "sim" | "compare" | "render" | "recipes";
+
 export type Recipe = {
   name: string;
   source: "builtin" | "user";
