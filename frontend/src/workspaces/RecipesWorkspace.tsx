@@ -1,0 +1,227 @@
+import { useState, useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Trash2, Copy, Save, Upload } from "lucide-react";
+import { api } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+
+export function RecipesWorkspace() {
+  const qc = useQueryClient();
+  const { data: recipes = [] } = useQuery({
+    queryKey: ["recipes"],
+    queryFn: api.recipes.list,
+  });
+  const [selected, setSelected] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const builtin = recipes.filter((r) => r.source === "builtin");
+  const user = recipes.filter((r) => r.source === "user");
+  const isUser = recipes.find((r) => r.name === selected)?.source === "user";
+
+  const { data: detail } = useQuery({
+    queryKey: ["recipe", selected],
+    queryFn: () =>
+      selected ? api.recipes.get(selected) : Promise.resolve(null),
+    enabled: !!selected,
+  });
+
+  // Sync editing buffer when selection changes / detail loads.
+  useEffect(() => {
+    if (detail) {
+      setEditing(JSON.stringify(detail.data, null, 2));
+      setError(null);
+    }
+  }, [detail]);
+
+  const onDelete = async () => {
+    if (!selected || !isUser) return;
+    if (!confirm(`Delete user preset "${selected}"?`)) return;
+    try {
+      await api.recipes.delete(selected);
+      qc.invalidateQueries({ queryKey: ["recipes"] });
+      setSelected(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onDuplicate = async () => {
+    if (!detail) return;
+    const name = prompt("Duplicate as preset name:");
+    if (!name?.trim()) return;
+    try {
+      await api.recipes.save(name.trim(), detail.data, selected ?? undefined);
+      qc.invalidateQueries({ queryKey: ["recipes"] });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onRename = async () => {
+    if (!selected || !isUser || !detail) return;
+    const next = prompt(`Rename "${selected}" to:`, selected);
+    if (!next?.trim() || next.trim() === selected) return;
+    const newName = next.trim();
+    try {
+      // Save under new name carrying provenance, then delete the old file.
+      const provenance = (detail.data?._provenance as { based_on?: string } | undefined)?.based_on;
+      await api.recipes.save(newName, detail.data, provenance);
+      await api.recipes.delete(selected);
+      qc.invalidateQueries({ queryKey: ["recipes"] });
+      setSelected(newName);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onSaveEdits = async () => {
+    if (!selected || !isUser) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const data = JSON.parse(editing);
+      const provenance = (detail?.data?._provenance as { based_on?: string } | undefined)?.based_on;
+      await api.recipes.save(selected, data, provenance);
+      qc.invalidateQueries({ queryKey: ["recipes"] });
+      qc.invalidateQueries({ queryKey: ["recipe", selected] });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onImport = async () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      try {
+        const data = JSON.parse(text);
+        if (typeof data !== "object" || data === null || !("material" in data)) {
+          setError("Imported JSON must contain a 'material' key.");
+          return;
+        }
+        const name = prompt(
+          "Save as preset name:",
+          file.name.replace(/\.json$/, ""),
+        );
+        if (!name?.trim()) return;
+        await api.recipes.save(name.trim(), data);
+        qc.invalidateQueries({ queryKey: ["recipes"] });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    };
+    input.click();
+  };
+
+  return (
+    <div className="h-full flex">
+      {/* Left: list */}
+      <div className="w-[280px] border-r border-border overflow-y-auto shrink-0">
+        <div className="px-3 py-2 flex items-center justify-between">
+          <span className="text-text-muted text-[10px] uppercase tracking-wider">
+            Recipes
+          </span>
+          <button
+            type="button"
+            onClick={onImport}
+            className="text-accent text-xs flex items-center gap-1 hover:bg-elevated px-1.5 py-0.5 rounded"
+          >
+            <Upload size={11} /> Import
+          </button>
+        </div>
+        <div className="text-text-muted text-[10px] uppercase tracking-wider px-3 py-1 mt-2">
+          Built-in
+        </div>
+        {builtin.map((r) => (
+          <button
+            key={r.name}
+            type="button"
+            onClick={() => setSelected(r.name)}
+            className={
+              "w-full text-left px-3 py-1 text-xs hover:bg-elevated truncate " +
+              (selected === r.name ? "text-accent" : "text-text-primary")
+            }
+          >
+            {r.name}
+          </button>
+        ))}
+        <div className="text-text-muted text-[10px] uppercase tracking-wider px-3 py-1 mt-2">
+          User saved (★)
+        </div>
+        {user.length === 0 && (
+          <div className="px-3 py-1 text-xs text-text-muted">(none yet)</div>
+        )}
+        {user.map((r) => (
+          <button
+            key={r.name}
+            type="button"
+            onClick={() => setSelected(r.name)}
+            className={
+              "w-full text-left px-3 py-1 text-xs hover:bg-elevated truncate " +
+              (selected === r.name ? "text-accent" : "text-text-primary")
+            }
+          >
+            ★ {r.name}
+          </button>
+        ))}
+      </div>
+      {/* Right: detail */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {!selected ? (
+          <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
+            Select a recipe to inspect or edit.
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
+              <span className="font-mono text-sm text-text-primary truncate">
+                {isUser ? "★ " : ""}
+                {selected}
+              </span>
+              <span className="text-text-muted text-xs shrink-0">
+                {isUser ? "user preset" : "built-in"}
+              </span>
+              <div className="ml-auto flex gap-2 shrink-0">
+                <Button variant="secondary" onClick={onDuplicate}>
+                  <Copy size={11} /> Duplicate
+                </Button>
+                {isUser && (
+                  <>
+                    <Button variant="secondary" onClick={onRename}>
+                      Rename
+                    </Button>
+                    <Button onClick={onSaveEdits} disabled={saving}>
+                      <Save size={11} /> {saving ? "Saving…" : "Save edits"}
+                    </Button>
+                    <Button variant="destructive" onClick={onDelete}>
+                      <Trash2 size={11} /> Delete
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+            {error && (
+              <div className="px-4 py-1 text-error text-xs bg-error/10 border-b border-error/30">
+                {error}
+              </div>
+            )}
+            <textarea
+              value={editing}
+              onChange={(e) => setEditing(e.target.value)}
+              readOnly={!isUser}
+              className="flex-1 font-mono text-xs bg-canvas text-text-primary p-4 outline-none resize-none border-0"
+              spellCheck={false}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
