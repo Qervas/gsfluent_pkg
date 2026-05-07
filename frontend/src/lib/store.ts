@@ -17,6 +17,8 @@ type State = {
   simStage: string;
   simEtaSec: number | null;
   simLog: string[];
+  simStartedAt: number | null;
+  simFirstFrameAt: number | null;
 
   // Frames
   staticAttrs: StaticAttrs | null;
@@ -47,6 +49,8 @@ export const useStore = create<State>((set) => ({
   simStage: "idle",
   simEtaSec: null,
   simLog: [],
+  simStartedAt: null,
+  simFirstFrameAt: null,
   staticAttrs: null,
   frameXyz: new Map(),
   currentFrameIdx: 0,
@@ -60,7 +64,11 @@ export const useStore = create<State>((set) => ({
     set((st) => {
       const m = new Map(st.frameXyz);
       m.set(idx, xyz);
-      return { frameXyz: m, simNFrames: m.size };
+      return {
+        frameXyz: m,
+        simNFrames: m.size,
+        simFirstFrameAt: st.simFirstFrameAt ?? Date.now(),
+      };
     }),
   setStaticAttrs: (a) => set({ staticAttrs: a }),
   setCurrentFrame: (i) => set({ currentFrameIdx: i }),
@@ -75,5 +83,7 @@ export const useStore = create<State>((set) => ({
       frameXyz: new Map(),
       currentFrameIdx: 0,
       simStage: "starting",
+      simStartedAt: Date.now(),
+      simFirstFrameAt: null,
     }),
 }));
