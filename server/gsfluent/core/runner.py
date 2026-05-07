@@ -87,6 +87,7 @@ async def start_run(
     try:
         proc = await _spawn(*cmd, stdout=PIPE, stderr=STDOUT, cwd=str(PKG_ROOT))
     except Exception as e:
+        _log.exception("failed to spawn sim_one.sh for run %s", run_name)
         manifest_mod.update(
             run_dir,
             status="error",
@@ -151,7 +152,21 @@ def cancel_run(run_id: str) -> bool:
 
 
 async def _kill_after_grace(run: Run, grace_sec: float) -> None:
-    """If the subprocess hasn't exited within grace_sec of SIGTERM, SIGKILL it."""
+    """If the subprocess hasn't exited within grace_sec of SIGTERM, SIGKILL it.
+
+    KNOWN LIMITATION: This only kills the direct subprocess (e.g. bash).
+    If the subprocess spawned children (sim_one.sh -> python), those orphans
+    can keep stdout pipes open until they exit naturally, which blocks
+    `_drain`'s `async for` and prevents `wait_for_run` from returning.
+
+    TODO Phase 5/6: spawn with start_new_session=True and escalate via
+    os.killpg(os.getpgid(proc.pid), SIGKILL) so the whole process group
+    dies. Phase 1 leaves this as-is because:
+      - For direct subprocess cancellation, the current code works.
+      - The test suite uses `bash sleep 30` which exits cleanly on SIGTERM
+        but leaves an orphan `sleep`; the test still passes (manifest goes
+        to 'cancelled') just slower than ideal.
+    """
     if run.proc is None:
         return
     try:
