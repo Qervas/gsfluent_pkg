@@ -26,11 +26,13 @@ def _load_history() -> list[dict]:
         return []
     try:
         data = json.loads(HISTORY_FILE.read_text())
-        if isinstance(data, list):
-            return data
     except (json.JSONDecodeError, OSError):
-        pass
-    return []
+        return []
+    if not isinstance(data, list):
+        return []
+    # Filter out legacy non-dict entries — earlier versions wrote a list of
+    # path strings, which would crash record_model's .get() filter.
+    return [x for x in data if isinstance(x, dict) and "name" in x and "path" in x]
 
 
 def _save_history(items: list[dict]) -> None:

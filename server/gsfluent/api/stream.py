@@ -57,9 +57,10 @@ async def stream(ws: WebSocket):
 
 
 async def _pump(ws: WebSocket, run_name: str) -> None:
-    """Tail the frames/ subdir of `run_name`'s fused dir, sending each
-    new frame_*.ply as it appears. Sends static_attrs on the first
-    frame that carries the full 3DGS attribute set."""
+    """Tail `run_name`'s fused dir, sending each new frame_*.ply as it
+    appears. Frames may live directly in the run dir (sim_one.sh's
+    output) or in a frames/ subdir (newer pipeline). Sends static_attrs
+    on the first frame that carries the full 3DGS attribute set."""
     run_dir = runner.FUSED_DIR / run_name
     if not run_dir.exists():
         try:
@@ -75,9 +76,11 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
 
     sent: set[str] = set()
     sent_static = False
-    # Initial snapshot — pick up frames already on disk.
+    # Initial snapshot — look in BOTH the run root AND frames/ subdir.
+    # sim_one.sh writes frames directly into the run dir; the new pipeline
+    # may use a frames/ subdir going forward. Support both.
     try:
-        for f in sorted(run_dir.glob("frames/frame_*.ply")):
+        for f in sorted(_list_frame_plys(run_dir)):
             sent_static = await _send(ws, run_name, f, sent, sent_static)
     except WebSocketDisconnect:
         return
@@ -95,7 +98,7 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
         async for changes in awatch(run_dir):
             for _, p_str in changes:
                 p = Path(p_str)
-                if p.match("frames/frame_*.ply"):
+                if _is_frame_ply(p):
                     try:
                         sent_static = await _send(ws, run_name, p, sent, sent_static)
                     except WebSocketDisconnect:
@@ -112,6 +115,28 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
             pass
     except asyncio.CancelledError:
         raise
+
+
+def _list_frame_plys(run_dir: Path) -> list[Path]:
+    """Frames may live in <run_dir>/frame_*.ply (sim_one.sh's output) or
+    <run_dir>/frames/frame_*.ply (newer pipeline). Return both, deduped
+    by stem (frame_N), with the run-root copy winning on conflict."""
+    out: list[Path] = []
+    out.extend(run_dir.glob("frame_*.ply"))
+    out.extend(run_dir.glob("frames/frame_*.ply"))
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for p in out:
+        if p.stem not in seen:
+            deduped.append(p)
+            seen.add(p.stem)
+    return deduped
+
+
+def _is_frame_ply(p: Path) -> bool:
+    """True for any frame_*.ply landing in a watched run_dir, regardless
+    of whether it's at the root or in a frames/ subdir."""
+    return p.name.startswith("frame_") and p.name.endswith(".ply")
 
 
 async def _send(ws: WebSocket, run_name: str, ply: Path,
