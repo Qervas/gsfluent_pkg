@@ -6,6 +6,9 @@
     { type: "frame_meta", run_name, frame_idx, n }
       -- emitted right before the matching binary message
     binary message after frame_meta: Float32Array of (n, 3) xyz
+    { type: "error", code, run_name, message }
+      -- emitted on subscription-level failures (run_not_found,
+      snapshot_failed, watch_failed)
 
   Client → Server (JSON):
     { type: "subscribe", run_name }
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -22,6 +26,9 @@ from watchfiles import awatch
 
 from ..core import runner
 from ..core.frame_stream import parse_frame_xyz, parse_static_attrs
+from ..core.runner import _log_task_exception
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -37,6 +44,7 @@ async def stream(ws: WebSocket):
                 if sub_task is not None:
                     sub_task.cancel()
                 sub_task = asyncio.create_task(_pump(ws, msg["run_name"]))
+                sub_task.add_done_callback(_log_task_exception)
             elif msg.get("type") == "unsubscribe":
                 if sub_task is not None:
                     sub_task.cancel()
@@ -53,18 +61,57 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
     new frame_*.ply as it appears. Sends static_attrs on the first
     frame that carries the full 3DGS attribute set."""
     run_dir = runner.FUSED_DIR / run_name
+    if not run_dir.exists():
+        try:
+            await ws.send_json({
+                "type": "error",
+                "code": "run_not_found",
+                "run_name": run_name,
+                "message": f"run_dir does not exist: {run_dir}",
+            })
+        except WebSocketDisconnect:
+            pass
+        return
+
     sent: set[str] = set()
     sent_static = False
     # Initial snapshot — pick up frames already on disk.
-    if run_dir.exists():
+    try:
         for f in sorted(run_dir.glob("frames/frame_*.ply")):
             sent_static = await _send(ws, run_name, f, sent, sent_static)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        _log.exception("error during initial frame snapshot for %s", run_name)
+        # Try to inform the client; ignore further failures.
+        try:
+            await ws.send_json({"type": "error", "code": "snapshot_failed",
+                                "run_name": run_name, "message": str(e)})
+        except Exception:
+            pass
+
     # Watch for new frames. awatch raises asyncio.CancelledError on cancel.
-    async for changes in awatch(run_dir):
-        for _, p_str in changes:
-            p = Path(p_str)
-            if p.match("frames/frame_*.ply"):
-                sent_static = await _send(ws, run_name, p, sent, sent_static)
+    try:
+        async for changes in awatch(run_dir):
+            for _, p_str in changes:
+                p = Path(p_str)
+                if p.match("frames/frame_*.ply"):
+                    try:
+                        sent_static = await _send(ws, run_name, p, sent, sent_static)
+                    except WebSocketDisconnect:
+                        return
+                    except Exception as e:
+                        _log.warning("skipping unreadable frame %s: %s", p, e)
+                        continue
+    except (FileNotFoundError, PermissionError) as e:
+        _log.warning("watch terminated for %s: %s", run_name, e)
+        try:
+            await ws.send_json({"type": "error", "code": "watch_failed",
+                                "run_name": run_name, "message": str(e)})
+        except Exception:
+            pass
+    except asyncio.CancelledError:
+        raise
 
 
 async def _send(ws: WebSocket, run_name: str, ply: Path,
@@ -74,6 +121,9 @@ async def _send(ws: WebSocket, run_name: str, ply: Path,
     if ply.name in sent:
         return sent_static_already
     try:
+        # Mid-write heuristic: production fused plys (200k+ splats with full
+        # 3DGS attrs) are at least ~6 MB. Tests using tiny synthetic plys may
+        # need to bypass this check by writing >1024 bytes of header padding.
         if ply.stat().st_size < 1024:
             return sent_static_already   # mid-write
     except FileNotFoundError:
