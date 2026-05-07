@@ -32,9 +32,22 @@ class Run:
     proc: Optional[asyncio.subprocess.Process] = None
     state: str = "queued"
     log_lines: list[str] = field(default_factory=list)
+    drain_task: Optional[asyncio.Task] = None
 
 
 _RUNS: dict[str, Run] = {}
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Surface exceptions from background tasks (drain, watchdog) to the logger
+    instead of letting them die silently in asyncio's "Task exception was never
+    retrieved" warning."""
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is not None:
+        _log.error("background task failed: %s", exc, exc_info=exc)
 
 
 def get_run(run_id: str) -> Run | None:
@@ -71,10 +84,23 @@ async def start_run(
         "--live",
         "--no-vkgs-launch",
     ]
-    proc = await _spawn(*cmd, stdout=PIPE, stderr=STDOUT, cwd=str(PKG_ROOT))
+    try:
+        proc = await _spawn(*cmd, stdout=PIPE, stderr=STDOUT, cwd=str(PKG_ROOT))
+    except Exception as e:
+        manifest_mod.update(
+            run_dir,
+            status="error",
+            exit_code=-1,
+            finished_at=time.time(),
+            error=f"failed to spawn: {e}",
+        )
+        raise
+
     run = Run(id=run_id, name=run_name, proc=proc, state="running")
     _RUNS[run_id] = run
-    asyncio.create_task(_drain(run, run_dir))
+    drain_task = asyncio.create_task(_drain(run, run_dir))
+    drain_task.add_done_callback(_log_task_exception)
+    run.drain_task = drain_task
     return run_id
 
 
@@ -87,6 +113,10 @@ async def _drain(run: Run, run_dir: Path) -> None:
             if len(run.log_lines) > 2000:
                 run.log_lines = run.log_lines[-2000:]
     rc = await run.proc.wait()
+    # Only overwrite state if still 'running' — preserves a 'cancelled' that
+    # cancel_run set while we were tailing stdout. Without this guard, every
+    # run that gets cancelled would end up reported as 'done' (rc=0 if the
+    # subprocess exits cleanly on SIGTERM) or 'error'.
     if run.state == "running":
         run.state = "done" if rc == 0 else "error"
     manifest_mod.update(
@@ -98,13 +128,15 @@ async def _drain(run: Run, run_dir: Path) -> None:
 
 
 async def wait_for_run(run_id: str) -> None:
-    """Block until the underlying subprocess exits. Used by tests."""
+    """Block until the underlying subprocess exits AND _drain has flushed
+    the manifest. Used by tests."""
     run = _RUNS.get(run_id)
     if run is None or run.proc is None:
         return
-    await run.proc.wait()
-    # Yield once more so the _drain task can finish writing the manifest.
-    await asyncio.sleep(0.01)
+    if run.drain_task is not None:
+        await run.drain_task
+    else:
+        await run.proc.wait()
 
 
 def cancel_run(run_id: str) -> bool:
@@ -113,4 +145,22 @@ def cancel_run(run_id: str) -> bool:
         return False
     run.proc.terminate()
     run.state = "cancelled"
+    watchdog = asyncio.create_task(_kill_after_grace(run, grace_sec=5.0))
+    watchdog.add_done_callback(_log_task_exception)
     return True
+
+
+async def _kill_after_grace(run: Run, grace_sec: float) -> None:
+    """If the subprocess hasn't exited within grace_sec of SIGTERM, SIGKILL it."""
+    if run.proc is None:
+        return
+    try:
+        await asyncio.wait_for(run.proc.wait(), timeout=grace_sec)
+    except asyncio.TimeoutError:
+        if run.proc.returncode is None:
+            _log.warning(
+                "run %s ignored SIGTERM after %.1fs; sending SIGKILL",
+                run.name,
+                grace_sec,
+            )
+            run.proc.kill()

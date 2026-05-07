@@ -72,3 +72,42 @@ async def _start_and_wait(r, recipe, run_name="t_001"):
     )
     await r.wait_for_run(rid)
     return rid
+
+
+def test_runner_cancel_run_marks_cancelled(tmp_path, monkeypatch):
+    """A long-running fake sim, cancelled mid-flight, gets manifest status=cancelled."""
+    from gsfluent.core import runner as r
+
+    fake_sim = tmp_path / "long_sim.sh"
+    fake_sim.write_text(
+        "#!/bin/bash\n"
+        "echo '[fake] starting long run'\n"
+        "sleep 30\n"
+        "exit 0\n"
+    )
+    fake_sim.chmod(0o755)
+    monkeypatch.setattr(r, "SIM_ONE_SH", fake_sim)
+    monkeypatch.setattr(r, "FUSED_DIR", tmp_path / "fused")
+
+    rid = asyncio.run(_cancel_after_start(r))
+
+    out = tmp_path / "fused" / "t_cancel"
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["status"] == "cancelled"
+
+
+async def _cancel_after_start(r):
+    r._RUNS.clear()
+    rid = await r.start_run(
+        run_name="t_cancel",
+        model_dir=Path("/tmp/fake_model_dir"),
+        recipe_data={"material": "jelly"},
+        recipe_source_name="jelly",
+        particles=10000,
+    )
+    # Give the subprocess a moment to actually start.
+    await asyncio.sleep(0.2)
+    ok = r.cancel_run(rid)
+    assert ok is True
+    await r.wait_for_run(rid)
+    return rid
