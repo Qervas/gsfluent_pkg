@@ -6,6 +6,7 @@ import { Properties } from "@/components/properties/Properties";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
 import { RecipesWorkspace } from "@/workspaces/RecipesWorkspace";
+import { CompareWorkspace } from "@/workspaces/CompareWorkspace";
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 import { useShortcuts } from "@/lib/use-shortcuts";
@@ -105,9 +106,7 @@ export default function App() {
       )}
       {activeWorkspace === "compare" && (
         <FullWorkspaceShell subscribe={subscribe}>
-          <div className="h-full w-full flex items-center justify-center text-text-muted">
-            Coming next.
-          </div>
+          <CompareWorkspace />
         </FullWorkspaceShell>
       )}
       {activeWorkspace === "render" && (
