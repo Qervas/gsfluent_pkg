@@ -12,10 +12,23 @@ import { api } from "@/lib/api";
 export default function App() {
   const client = useStreamClient();
   const resetForNewRun = useStore((s) => s.resetForNewRun);
+  const activeModel = useStore((s) => s.activeModel);
 
   useEffect(() => {
     client.connect();
   }, [client]);
+
+  // When the user picks a model in the Outliner, render its static ply
+  // as a single-frame snapshot. The run-status UI shouldn't claim a sim
+  // is in progress just because we're previewing a model, so flip
+  // simState back to "idle" right after resetForNewRun.
+  useEffect(() => {
+    if (!activeModel?.path) return;
+    const st = useStore.getState();
+    st.resetForNewRun(`_model:${activeModel.name}`);
+    st.setSimState("idle");
+    client.loadModel(activeModel.path);
+  }, [activeModel, client]);
 
   const subscribe = useCallback(
     (run_name: string) => client.subscribe(run_name),
