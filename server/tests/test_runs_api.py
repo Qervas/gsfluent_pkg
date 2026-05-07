@@ -65,3 +65,56 @@ def test_cancel_unknown_run_404(client):
     runner._RUNS.clear()
     r = client.delete("/api/runs/nonexistent")
     assert r.status_code == 404
+
+
+def test_post_returns_422_when_model_path_missing(client, tmp_path):
+    body = {
+        "run_name": "test_missing",
+        "model_path": str(tmp_path / "nope"),
+        "recipe_data": {"material": "jelly"},
+        "recipe_source": "jelly",
+        "particles": 10000,
+    }
+    r = client.post("/api/runs", json=body)
+    assert r.status_code == 422
+    assert "model_path" in r.json()["detail"].lower() or "exist" in r.json()["detail"].lower()
+
+
+def test_post_returns_422_when_model_path_is_file(client, tmp_path):
+    bogus = tmp_path / "looks_like_model.txt"
+    bogus.write_text("not a directory")
+    body = {
+        "run_name": "test_file",
+        "model_path": str(bogus),
+        "recipe_data": {"material": "jelly"},
+        "recipe_source": "jelly",
+        "particles": 10000,
+    }
+    r = client.post("/api/runs", json=body)
+    assert r.status_code == 422
+
+
+def test_history_falls_back_to_dir_name_when_run_name_missing(client, tmp_path, monkeypatch):
+    from gsfluent.core import runner
+    f = tmp_path / "fused"
+    (f / "ghost_run").mkdir(parents=True)
+    # Manifest with NO run_name field
+    (f / "ghost_run" / "manifest.json").write_text('{"status":"done","started_at":1}')
+    monkeypatch.setattr(runner, "FUSED_DIR", f)
+    rr = client.get("/api/runs/history")
+    listed = [x["run_name"] for x in rr.json()]
+    assert "ghost_run" in listed
+
+
+def test_history_keeps_valid_entries_when_one_is_corrupt(client, tmp_path, monkeypatch):
+    from gsfluent.core import runner
+    f = tmp_path / "fused"
+    (f / "good").mkdir(parents=True)
+    (f / "good" / "manifest.json").write_text('{"run_name":"good","status":"done","started_at":1}')
+    (f / "bad").mkdir(parents=True)
+    (f / "bad" / "manifest.json").write_text("not valid json")
+    monkeypatch.setattr(runner, "FUSED_DIR", f)
+    rr = client.get("/api/runs/history")
+    names = [x["run_name"] for x in rr.json()]
+    assert "good" in names
+    assert "bad" not in names

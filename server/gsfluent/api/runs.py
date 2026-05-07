@@ -24,13 +24,21 @@ def list_active():
 
 @router.post("")
 async def start(req: StartRunRequest):
-    rid = await runner.start_run(
-        run_name=req.run_name,
-        model_dir=Path(req.model_path),
-        recipe_data=req.recipe_data,
-        recipe_source_name=req.recipe_source,
-        particles=req.particles,
-    )
+    model_dir = Path(req.model_path)
+    if not model_dir.exists():
+        raise HTTPException(422, f"model_path does not exist: {req.model_path}")
+    if not model_dir.is_dir():
+        raise HTTPException(422, f"model_path is not a directory: {req.model_path}")
+    try:
+        rid = await runner.start_run(
+            run_name=req.run_name,
+            model_dir=model_dir,
+            recipe_data=req.recipe_data,
+            recipe_source_name=req.recipe_source,
+            particles=req.particles,
+        )
+    except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
+        raise HTTPException(422, f"failed to start run: {e}")
     return {"run_id": rid, "run_name": req.run_name}
 
 
@@ -47,7 +55,10 @@ def history():
     if not runner.FUSED_DIR.exists():
         return out
     try:
-        entries = sorted(runner.FUSED_DIR.iterdir(), key=lambda p: -p.stat().st_mtime)
+        entries = sorted(
+            runner.FUSED_DIR.iterdir(),
+            key=lambda p: (-p.stat().st_mtime, p.name),
+        )
     except OSError:
         return out
     for d in entries:
@@ -60,5 +71,6 @@ def history():
             data = json.loads(m.read_text())
         except (json.JSONDecodeError, OSError):
             continue
+        data.setdefault("run_name", d.name)
         out.append(data)
     return out
