@@ -74,9 +74,15 @@ PARAM_HINTS = {
     "show_hint":           ("Other",    "Show hint",                  None,  None,  None),
 }
 # 3-vector keys rendered as a single native add_vector3 widget.
-VECTOR3_KEYS = {"g": ("Forces", "Gravity (x, y, z)")}
+VECTOR3_KEYS = {
+    "g":                          ("Forces",    "Gravity (x, y, z)"),
+    "mpm_space_viewpoint_center": ("Sim setup", "Viewpoint center"),
+    "mpm_space_vertical_upward_axis": ("Sim setup", "Up axis (xyz, e.g. 0 0 1)"),
+}
 # Nested dicts that get their OWN folder, expanded one level.
 NESTED_DICT_KEYS = {"particle_filling": "Particle filling"}
+# Keys rendered as 6 number inputs in pairs (min/max along x/y/z).
+BBOX6_KEYS = {"sim_area": ("Sim setup", "Sim bounds")}
 # Keys we never surface (internal / metadata).
 HIDDEN_KEYS = {"_note"}
 # Canonical material names — straight from mpm_solver_warp's branch list.
@@ -498,14 +504,14 @@ def main() -> None:
     stream = FrameStream()
 
     server = viser.ViserServer(port=args.port)
-    # Modern dark theme with a teal/cyan brand color, wider controls, and a
-    # collapsible side panel so the team can stash it when they want to focus
-    # on the 3D viewport.
+    # Modern dark theme. control_width=large gives more horizontal room
+    # for sliders + value labels; collapsible layout lets users hide the
+    # whole sidebar when they want to focus on the 3D viewport.
     server.gui.configure_theme(
         dark_mode=True,
         brand_color=(34, 211, 238),     # tailwind cyan-400
         control_layout="collapsible",
-        control_width="medium",
+        control_width="large",
         show_logo=False,
         show_share_button=False,
     )
@@ -549,10 +555,28 @@ def main() -> None:
 
     # ===== SIM tab =====
     with tab_sim:
-        server.gui.add_markdown("### Model")
-        # Recents dropdown — populated from work/_state/model_history.json.
-        # Picking an entry copies the path into Model path so the user can
-        # tweak before running.
+        # Lightweight typographic polish via a global <style> injection.
+        # add_html drops the markup into the panel; <style> rules cascade
+        # globally even though they're declared inside a component.
+        server.gui.add_html("""
+<style>
+  /* tighter section header */
+  h3 { margin: 14px 0 6px 0 !important; font-size: 13px !important;
+       letter-spacing: 0.04em; text-transform: uppercase;
+       color: rgb(34, 211, 238); }
+  /* numbered-step badge */
+  .wb-step { display: inline-block; min-width: 22px; padding: 2px 7px;
+             margin-right: 8px; border-radius: 999px;
+             background: rgba(34, 211, 238, 0.18);
+             color: rgb(34, 211, 238); font-weight: 600;
+             font-size: 11px; text-align: center; }
+</style>
+        """)
+
+        # ============================ STEP 1 — MODEL ============================
+        server.gui.add_markdown(
+            '<span class="wb-step">1</span>**Pick your building**'
+        )
         recent_models_dd = server.gui.add_dropdown(
             "Recent",
             options=["(none)"] + model_history.load(),
@@ -564,15 +588,18 @@ def main() -> None:
             icon=viser.Icon.UPLOAD,
             hint="Drop a 3DGS-trained .ply or paste an existing model dir below.",
         )
-        path_input = server.gui.add_text("Model path", initial_value="")
+        path_input = server.gui.add_text("Or paste model path", initial_value="")
         model_status = server.gui.add_text("Status", initial_value="no model loaded")
         model_status.disabled = True
 
-        server.gui.add_markdown("### Recipe")
+        # ============================ STEP 2 — PRESET ============================
+        server.gui.add_markdown(
+            '<span class="wb-step">2</span>**Pick a physics preset**'
+        )
         recipe_dd = server.gui.add_dropdown(
             "Preset", options=available_recipes,
             initial_value=available_recipes[0],
-            hint="Built-in + your saved presets (★). Save your own with the button below.",
+            hint="Built-in + your saved presets (★). Hover the params below for explanations.",
         )
         particles = server.gui.add_slider(
             "Particles", min=20_000, max=2_000_000, step=10_000,
@@ -580,38 +607,44 @@ def main() -> None:
             hint="MPM particle count. Lower = faster sim, less detail.",
         )
 
-        # Per-group folders for editable recipe params. Filled by rebuild_param_widgets.
-        group_folders: dict[str, object] = {}
-        for grp in ("Material", "Solver", "Forces", "Camera",
-                    "Particle filling", "Other"):
-            group_folders[grp] = server.gui.add_folder(grp)
-        advanced_folder = server.gui.add_folder("Advanced (raw JSON)")
+        # All recipe parameter folders go INSIDE one collapsible "Tweak parameters"
+        # parent so non-experts see only the preset dropdown by default. Power users
+        # expand this to access every knob.
         param_handles: dict[str, object] = {}
         raw_json_keys: list[str] = []
+        group_folders: dict[str, object] = {}
+        with server.gui.add_folder("Tweak parameters (optional)"):
+            for grp in ("Material", "Solver", "Forces", "Sim setup",
+                        "Camera", "Particle filling", "Other"):
+                group_folders[grp] = server.gui.add_folder(grp)
+            advanced_folder = server.gui.add_folder("Advanced (raw JSON)")
 
-        # Save-current-edits as a new preset. Stored at work/_user_recipes/<name>.json
-        # and surfaced in the Preset dropdown with a ★ prefix.
-        save_preset_name = server.gui.add_text(
-            "Save as preset", initial_value="",
-            hint="Type a name + click Save. Appears in the Preset dropdown next time.",
-        )
-        save_preset_btn = server.gui.add_button(
-            "Save preset", icon=viser.Icon.DEVICE_FLOPPY,
-        )
-        save_preset_status = server.gui.add_text("Save status", initial_value="—")
-        save_preset_status.disabled = True
+            # Save-as-preset section lives inside Tweak (since it captures the edits).
+            server.gui.add_markdown("**Save your edits as a preset**")
+            save_preset_name = server.gui.add_text(
+                "Preset name", initial_value="",
+                hint="Type a name + click Save. Appears in the Preset dropdown next time.",
+            )
+            save_preset_btn = server.gui.add_button(
+                "Save preset", icon=viser.Icon.DEVICE_FLOPPY,
+            )
+            save_preset_status = server.gui.add_text("Save status", initial_value="—")
+            save_preset_status.disabled = True
 
-        server.gui.add_markdown("### Run")
+        # ============================ STEP 3 — RUN ============================
+        server.gui.add_markdown(
+            '<span class="wb-step">3</span>**Run the simulation**'
+        )
         output_input = server.gui.add_text(
             "Output name", initial_value="(auto)",
             hint="Folder name under work/fused/. Leave (auto) for "
                  "<model>_<recipe>_<timestamp>.",
         )
-        run_btn      = server.gui.add_button("Run sim",  color="green",
+        run_btn      = server.gui.add_button("Run simulation",  color="green",
                                               icon=viser.Icon.PLAYER_PLAY)
         cancel_btn   = server.gui.add_button("Cancel",   color="red",
                                               icon=viser.Icon.PLAYER_STOP)
-        status_text  = server.gui.add_text("Status", initial_value="IDLE")
+        status_text  = server.gui.add_text("Status", initial_value="IDLE — load a model and pick a preset to start")
         status_text.disabled = True
         progress_bar = server.gui.add_progress_bar(0.0, animated=False)
         stage_text   = server.gui.add_text("Stage", initial_value="—")
@@ -750,6 +783,22 @@ def main() -> None:
                         hint=f"3-component vector for `{key}`.",
                     )
                     param_handles[f"vec3:{key}"] = h
+                continue
+            # 6-number bounding-box (min/max per axis) → 6 inputs in a sub-row layout.
+            if key in BBOX6_KEYS and isinstance(val, (list, tuple)) and len(val) == 6:
+                grp_name, label = BBOX6_KEYS[key]
+                folder = group_folders.get(grp_name, advanced_folder)
+                with folder:
+                    server.gui.add_markdown(f"**{label}** ([x_min, x_max, y_min, y_max, z_min, z_max])")
+                    for i, axis_label in enumerate([
+                        "X min", "X max", "Y min", "Y max", "Z min", "Z max",
+                    ]):
+                        h = server.gui.add_number(
+                            axis_label,
+                            initial_value=float(val[i]),
+                            step=1.0,
+                        )
+                        param_handles[f"bbox6:{key}:{i}"] = h
                 continue
             # Nested dict: expand its scalar children into a sub-folder.
             if key in NESTED_DICT_KEYS and isinstance(val, dict):
@@ -980,6 +1029,11 @@ def main() -> None:
                 _, key = handle_key.split(":", 1)
                 if isinstance(base.get(key), list) and len(base[key]) >= 3:
                     base[key] = [float(v[0]), float(v[1]), float(v[2])]
+            elif handle_key.startswith("bbox6:"):
+                # bbox6:<key>:<idx>  — 6 separate number inputs (X min, X max, ...)
+                _, key, idx = handle_key.split(":", 2)
+                if isinstance(base.get(key), list) and len(base[key]) >= 6:
+                    base[key][int(idx)] = float(v)
             elif handle_key.startswith("nested:"):
                 _, rest = handle_key.split(":", 1)
                 parent, child = rest.split(".", 1)
