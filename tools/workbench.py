@@ -461,6 +461,9 @@ def write_effective_recipe(base: dict, overrides: dict, dest: Path) -> None:
 
 # ----------------------------------------------------------------------- main
 def main() -> None:
+    print("\n[DEPRECATED] tools/workbench.py is the legacy viser workbench.", flush=True)
+    print("[DEPRECATED] Run `gsfluent serve` for the current React workbench.", flush=True)
+    print("[DEPRECATED] This file will be removed in v0.3.\n", flush=True)
     p = argparse.ArgumentParser()
     p.add_argument("--pkg-root", default=str(Path(__file__).resolve().parent.parent),
                    help="gsfluent_pkg root dir (default: parent of this script)")

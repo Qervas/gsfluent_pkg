@@ -23,7 +23,19 @@ Requirements:
 
 ## Use
 
-### Browser workbench (recommended)
+### Run (recommended: React workbench)
+
+```bash
+git clone https://github.com/Qervas/gsfluent_pkg
+cd gsfluent_pkg/server
+make build         # build frontend + install server
+gsfluent serve     # opens http://localhost:8080
+```
+
+> Deprecated: `./run-workbench.sh` (the legacy viser workbench) will be
+> removed in v0.3.
+
+### Legacy browser workbench (deprecated)
 
 One page does everything — upload model, pick recipe, tweak parameters, run sim, watch results:
 
