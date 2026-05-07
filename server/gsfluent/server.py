@@ -26,7 +26,8 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "pkg_root": str(PKG_ROOT)}
 
-    from .api import recipes as recipes_api
+    from .api import models as models_api, recipes as recipes_api
     app.include_router(recipes_api.router)
+    app.include_router(models_api.router)
 
     return app
