@@ -65,12 +65,35 @@ def history():
         if not d.is_dir():
             continue
         m = d / "manifest.json"
-        if not m.exists():
-            continue
-        try:
-            data = json.loads(m.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        data.setdefault("run_name", d.name)
-        out.append(data)
+        if m.exists():
+            try:
+                data = json.loads(m.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            data.setdefault("run_name", d.name)
+            out.append(data)
+        else:
+            # Legacy / pre-rewrite: synthesize a minimal manifest from the
+            # frame files on disk. Allows old viser-era runs to surface in
+            # the History panel without requiring a re-run.
+            frame_count = sum(
+                1 for _ in d.glob("frame_*.ply")
+            ) + sum(
+                1 for _ in d.glob("frames/frame_*.ply")
+            )
+            if frame_count == 0:
+                continue
+            try:
+                mtime = d.stat().st_mtime
+            except OSError:
+                mtime = 0
+            out.append({
+                "run_name": d.name,
+                "status": "done",
+                "started_at": mtime,
+                "finished_at": mtime,
+                "particles": None,
+                "recipe_source": None,
+                "_synthetic": True,
+            })
     return out

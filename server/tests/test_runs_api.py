@@ -118,3 +118,19 @@ def test_history_keeps_valid_entries_when_one_is_corrupt(client, tmp_path, monke
     names = [x["run_name"] for x in rr.json()]
     assert "good" in names
     assert "bad" not in names
+
+
+def test_history_includes_legacy_dirs_without_manifest(client, tmp_path, monkeypatch):
+    """Legacy fused dirs (no manifest.json) should still surface in history,
+    with a synthesized minimal entry."""
+    from gsfluent.core import runner as r
+    f = tmp_path / "fused"
+    legacy = f / "legacy_run"
+    legacy.mkdir(parents=True)
+    (legacy / "frame_0000.ply").write_text("ply")
+    (legacy / "frame_0001.ply").write_text("ply")
+    monkeypatch.setattr(r, "FUSED_DIR", f)
+    rr = client.get("/api/runs/history")
+    assert rr.status_code == 200
+    body = rr.json()
+    assert any(x["run_name"] == "legacy_run" and x.get("_synthetic") is True for x in body)
