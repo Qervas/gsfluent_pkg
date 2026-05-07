@@ -8,19 +8,27 @@
     binary message after frame_meta: Float32Array of (n, 3) xyz
     { type: "error", code, run_name, message }
       -- emitted on subscription-level failures (run_not_found,
-      snapshot_failed, watch_failed)
+      snapshot_failed, watch_failed) and on load_model failures
+      (model_not_found, model_parse_failed); for the latter the
+      "run_name" field is replaced by "path".
 
   Client → Server (JSON):
     { type: "subscribe", run_name }
     { type: "unsubscribe" }
+    { type: "load_model", path }
+      -- render <path>/point_cloud/iteration_<N>/point_cloud.ply
+      (highest N) as a single static frame; cancels any active
+      run subscription first.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import logging
+import re
 from pathlib import Path
 
+import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from watchfiles import awatch
 
@@ -49,6 +57,13 @@ async def stream(ws: WebSocket):
                 if sub_task is not None:
                     sub_task.cancel()
                 sub_task = None
+            elif msg.get("type") == "load_model":
+                # Model preview replaces any active run subscription —
+                # don't conflate the two streams of frames.
+                if sub_task is not None:
+                    sub_task.cancel()
+                sub_task = None
+                await _send_model_snapshot(ws, Path(msg["path"]))
     except WebSocketDisconnect:
         pass
     finally:
@@ -175,3 +190,110 @@ async def _send(ws: WebSocket, run_name: str, ply: Path,
     await ws.send_bytes(xyz.tobytes())
     sent.add(ply.name)
     return sent_static_already
+
+
+async def _safe_send_json(ws: WebSocket, payload: dict) -> None:
+    """ws.send_json that swallows disconnect and logs other failures —
+    used by _send_model_snapshot, where an error path shouldn't crash
+    the outer receive loop."""
+    try:
+        await ws.send_json(payload)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        _log.exception("ws.send_json failed")
+
+
+async def _send_model_snapshot(ws: WebSocket, model_path: Path) -> None:
+    """Locate <model_path>/point_cloud/iteration_<N>/point_cloud.ply
+    (highest N), parse it, and send static_attrs + frame_meta + binary
+    xyz exactly like a one-frame run. For xyz-only plys (no full 3DGS
+    attribute set) emit a synthetic gray static_attrs payload so the
+    SplatScene can still render."""
+    if not model_path.is_dir():
+        await _safe_send_json(ws, {
+            "type": "error", "code": "model_not_found",
+            "path": str(model_path),
+            "message": f"model dir does not exist: {model_path}",
+        })
+        return
+    pc_root = model_path / "point_cloud"
+    if not pc_root.is_dir():
+        await _safe_send_json(ws, {
+            "type": "error", "code": "model_not_found",
+            "path": str(model_path),
+            "message": f"missing point_cloud/ subdir under {model_path}",
+        })
+        return
+
+    iter_re = re.compile(r"^iteration_(\d+)$")
+    candidates: list[tuple[int, Path]] = []
+    for it in pc_root.iterdir():
+        if not it.is_dir():
+            continue
+        m = iter_re.match(it.name)
+        if m and (it / "point_cloud.ply").is_file():
+            candidates.append((int(m.group(1)), it / "point_cloud.ply"))
+    if not candidates:
+        await _safe_send_json(ws, {
+            "type": "error", "code": "model_not_found",
+            "path": str(model_path),
+            "message": f"no iteration_*/point_cloud.ply under {pc_root}",
+        })
+        return
+    candidates.sort(key=lambda t: -t[0])
+    ply_path = candidates[0][1]
+
+    try:
+        attrs = parse_static_attrs(ply_path)
+        xyz = parse_frame_xyz(ply_path)
+    except Exception as e:
+        _log.exception("failed to parse model ply at %s", ply_path)
+        await _safe_send_json(ws, {
+            "type": "error", "code": "model_parse_failed",
+            "path": str(model_path), "message": str(e),
+        })
+        return
+
+    n = int(xyz.shape[0])
+    run_name = f"_model:{model_path.name}"
+
+    if attrs is not None:
+        await _safe_send_json(ws, {
+            "type": "static_attrs",
+            "run_name": run_name,
+            "n": int(attrs["n"]),
+            "R_b64":      base64.b64encode(attrs["R"].tobytes()).decode("ascii"),
+            "scales_b64": base64.b64encode(attrs["scales"].tobytes()).decode("ascii"),
+            "rgb_b64":    base64.b64encode(attrs["rgb"].tobytes()).decode("ascii"),
+            "opacity_b64":base64.b64encode(attrs["opacity"].tobytes()).decode("ascii"),
+        })
+    else:
+        # xyz-only ply (e.g. raw point cloud with no SH/scale/rot fields).
+        # Synthesize a uniform gray static_attrs payload so the SplatScene
+        # has something to render — monochrome is fine for a preview.
+        rgb = np.full((n, 3), 0.6, dtype=np.float32)
+        opacity = np.full(n, 1.0, dtype=np.float32)
+        scales = np.full((n, 3), 0.005, dtype=np.float32)
+        R = np.tile(np.eye(3, dtype=np.float32), (n, 1, 1))
+        await _safe_send_json(ws, {
+            "type": "static_attrs",
+            "run_name": run_name,
+            "n": n,
+            "R_b64":      base64.b64encode(R.tobytes()).decode("ascii"),
+            "scales_b64": base64.b64encode(scales.tobytes()).decode("ascii"),
+            "rgb_b64":    base64.b64encode(rgb.tobytes()).decode("ascii"),
+            "opacity_b64":base64.b64encode(opacity.tobytes()).decode("ascii"),
+        })
+
+    await _safe_send_json(ws, {
+        "type": "frame_meta",
+        "run_name": run_name,
+        "frame_idx": 0, "n": n,
+    })
+    try:
+        await ws.send_bytes(xyz.tobytes())
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        _log.exception("ws.send_bytes failed for model snapshot %s", model_path)
