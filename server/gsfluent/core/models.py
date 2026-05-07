@@ -8,10 +8,13 @@ know about uploads vs externally-trained models.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
 from ..server import PKG_ROOT
+
+_log = logging.getLogger(__name__)
 
 UPLOADS_DIR = PKG_ROOT / "work" / "uploads"
 HISTORY_FILE = PKG_ROOT / "work" / "_state" / "model_history.json"
@@ -62,7 +65,13 @@ def wrap_ply_upload(orig_filename: str, content: bytes) -> tuple[str, Path]:
     name = f"{safe}_{uuid.uuid4().hex[:8]}"
     iter_dir = UPLOADS_DIR / name / "point_cloud" / "iteration_30000"
     iter_dir.mkdir(parents=True, exist_ok=True)
-    (iter_dir / "point_cloud.ply").write_bytes(content)
+    (iter_dir / "point_cloud.ply").write_bytes(content)  # TODO Phase 4: write to .tmp + replace for atomic .ply landing
     model_dir = UPLOADS_DIR / name
-    record_model(name, model_dir)
+    # History is a hint, not source of truth: a write here failing must NOT
+    # block the upload. We log and move on; the next listings refresh will
+    # pick up whatever is on disk.
+    try:
+        record_model(name, model_dir)
+    except Exception as e:
+        _log.warning("model %s saved to %s but history update failed: %s", name, model_dir, e)
     return name, model_dir
