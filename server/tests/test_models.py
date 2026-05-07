@@ -35,6 +35,9 @@ def test_upload_rejects_non_ply(client, tmp_path, monkeypatch):
         files={"file": ("not_a_ply.txt", io.BytesIO(b"hello"), "text/plain")},
     )
     assert r.status_code == 422
+    # no disk side-effects
+    assert not (tmp_path / "uploads").exists() or not any((tmp_path / "uploads").iterdir())
+    assert client.get("/api/models").json() == []
 
 
 def test_upload_rejects_tiny_file(client, tmp_path, monkeypatch):
@@ -46,3 +49,48 @@ def test_upload_rejects_tiny_file(client, tmp_path, monkeypatch):
         files={"file": ("empty.ply", io.BytesIO(b"x"), "application/octet-stream")},
     )
     assert r.status_code == 422
+    assert not (tmp_path / "uploads").exists() or not any((tmp_path / "uploads").iterdir())
+    assert client.get("/api/models").json() == []
+
+
+def test_upload_rejects_bad_magic(client, tmp_path, monkeypatch):
+    from gsfluent.core import models as m
+    monkeypatch.setattr(m, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(m, "HISTORY_FILE", tmp_path / "model_history.json")
+    # 100 bytes that don't start with "ply\n" or "ply\r"
+    bad = b"x" * 100
+    r = client.post(
+        "/api/models/upload",
+        files={"file": ("fake.ply", io.BytesIO(bad), "application/octet-stream")},
+    )
+    assert r.status_code == 422
+    assert "magic" in r.json()["detail"].lower() or "ply" in r.json()["detail"].lower()
+    assert not (tmp_path / "uploads").exists() or not any((tmp_path / "uploads").iterdir())
+
+
+def test_history_dedupes_by_name(client, tmp_path, monkeypatch):
+    from gsfluent.core import models as m
+    monkeypatch.setattr(m, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(m, "HISTORY_FILE", tmp_path / "model_history.json")
+    # Pre-populate history with a known name (forge an entry, simulating an earlier upload)
+    m.record_model("fake_model_1", tmp_path / "uploads" / "fake_model_1")
+    m.record_model("fake_model_2", tmp_path / "uploads" / "fake_model_2")
+    m.record_model("fake_model_1", tmp_path / "uploads" / "fake_model_1_v2")  # re-record same name
+    listed = client.get("/api/models").json()
+    names = [x["name"] for x in listed]
+    assert names == ["fake_model_1", "fake_model_2"]   # newest first, no dupes
+    # And the path should be the latest one
+    assert listed[0]["path"].endswith("fake_model_1_v2")
+
+
+def test_history_caps_at_max(client, tmp_path, monkeypatch):
+    from gsfluent.core import models as m
+    monkeypatch.setattr(m, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(m, "HISTORY_FILE", tmp_path / "model_history.json")
+    monkeypatch.setattr(m, "MAX_HISTORY", 5)  # smaller cap for the test
+    for i in range(8):
+        m.record_model(f"m_{i}", tmp_path / "uploads" / f"m_{i}")
+    listed = client.get("/api/models").json()
+    assert len(listed) == 5
+    # Newest 5: m_7, m_6, m_5, m_4, m_3
+    assert [x["name"] for x in listed] == ["m_7", "m_6", "m_5", "m_4", "m_3"]
