@@ -50,7 +50,13 @@ def parse_static_attrs(ply_path: Path) -> dict | None:
     scales = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=1)).astype(np.float32)
     quats = np.stack([v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=1).astype(np.float32)
     norms = np.linalg.norm(quats, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
+    # Replace zero, NaN, and inf norms with 1.0 so the divide is safe and
+    # produces a sensible (identity-like) rotation rather than NaN.
+    bad = ~np.isfinite(norms) | (norms == 0)
+    norms[bad] = 1.0
+    # Also zero-out any NaN/inf inside the input quat itself before the
+    # divide, so we don't propagate NaN through the matrix build.
+    quats = np.nan_to_num(quats, nan=0.0, posinf=0.0, neginf=0.0)
     quats /= norms
     qw, qx, qy, qz = quats.T
     R = np.empty((n, 3, 3), dtype=np.float32)

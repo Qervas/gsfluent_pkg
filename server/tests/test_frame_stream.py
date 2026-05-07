@@ -77,6 +77,22 @@ def test_parse_static_attrs_extracts_full_3dgs(tmp_path):
     np.testing.assert_allclose(attrs["opacity"][0], 1.0 / (1.0 + np.exp(-1.0)), atol=1e-5)
 
 
+def test_parse_static_attrs_handles_nan_quaternion(tmp_path):
+    """A NaN in the quaternion should not propagate to the rotation matrix."""
+    p = tmp_path / "nan_quat.ply"
+    _write_full_3dgs_ply(p, n=2)
+    # Inject NaN into one quaternion
+    data = PlyData.read(str(p))
+    arr = np.array(data["vertex"].data, copy=True)
+    arr["rot_0"][0] = np.nan
+    out = tmp_path / "nan_quat_2.ply"
+    PlyData([PlyElement.describe(arr, "vertex")], text=False).write(str(out))
+    attrs = parse_static_attrs(out)
+    assert attrs is not None
+    # The R matrix for the NaN row should be all-finite (identity-like, not NaN)
+    assert np.all(np.isfinite(attrs["R"][0]))
+
+
 def test_parse_static_attrs_normalizes_quaternions(tmp_path):
     """Even if the ply stores non-unit quaternions, the result rotation
     matrix should still be a proper rotation."""
