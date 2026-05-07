@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { useStore } from "@/lib/store";
@@ -29,35 +29,28 @@ export function SplatScene() {
   const positionsRef = useRef<THREE.BufferAttribute | null>(null);
   const lastAdvance = useRef<number>(0);
 
-  // Build buffers + heuristic point size when staticAttrs changes.
+  // Build buffers when staticAttrs changes. Point size is computed AFTER the
+  // first frame arrives (in the auto-fit effect below) — derived from the
+  // model's bbox diagonal, NOT from per-splat scales. The scales field is
+  // unreliable across the two emitters (Inria 3DGS plys vs our fused
+  // frames) and led to invisible-on-static, sometimes-OK-on-sim renders.
+  // Bbox-relative sizing is scale-invariant and always produces a visible
+  // point cloud.
   const built = useMemo(() => {
     if (!staticAttrs) return null;
     const n = staticAttrs.n;
     if (n === 0) return null;
-
-    const positions = new Float32Array(n * 3);
-    const colors = new Float32Array(staticAttrs.rgb);
-
-    // Heuristic point size: median of `max(sx,sy,sz)` × 6 across a sample of
-    // the splats, giving a size that scales with model size. Fall back to a
-    // small default for synthetic / xyz-only plys whose scales are uniform.
-    let pointSize = 0.01;
-    if (staticAttrs.scales && staticAttrs.scales.length >= 3 * n) {
-      const sample: number[] = [];
-      const stride = Math.max(1, Math.floor(n / 256));
-      for (let i = 0; i < n; i += stride) {
-        const sx = staticAttrs.scales[i * 3 + 0];
-        const sy = staticAttrs.scales[i * 3 + 1];
-        const sz = staticAttrs.scales[i * 3 + 2];
-        sample.push(Math.max(sx, sy, sz));
-      }
-      sample.sort((a, b) => a - b);
-      const med = sample[Math.floor(sample.length / 2)] || 0.01;
-      pointSize = Math.max(0.001, med * 6);
-    }
-
-    return { positions, colors, pointSize, n };
+    return {
+      positions: new Float32Array(n * 3),
+      colors: new Float32Array(staticAttrs.rgb),
+      n,
+    };
   }, [staticAttrs]);
+
+  // Live point size — set by the auto-fit effect, mutated by the user later.
+  // Default chosen so a brand-new scene doesn't render as a single dot before
+  // the bbox calculation completes.
+  const [pointSize, setPointSize] = useState<number>(0.05);
 
   // Seed the position buffer from frame 0 the moment it arrives. Without this,
   // the geometry would render at all-zeros until the playback loop advances.
@@ -113,6 +106,12 @@ export function SplatScene() {
       controls.update?.();
     }
 
+    // Bbox-derived point size: 0.4% of the diagonal. Scale-invariant — works
+    // for a 30-unit-diag building or a 30,000-unit-diag city. Tuned so a
+    // typical 200k-splat building reads as a continuous surface, not pixels.
+    const newPointSize = Math.max(diag * 0.004, 0.005);
+    setPointSize(newPointSize);
+
     fittedFor.current = staticAttrs;
     // eslint-disable-next-line no-console
     console.log("[SplatScene] auto-fit camera:", {
@@ -120,7 +119,7 @@ export function SplatScene() {
       center: center.toArray(),
       size: size.toArray(),
       diag,
-      pointSize: built.pointSize,
+      pointSize: newPointSize,
     });
   }, [built, frameXyz, staticAttrs, camera, controls]);
 
@@ -157,7 +156,7 @@ export function SplatScene() {
         />
       </bufferGeometry>
       <pointsMaterial
-        size={built.pointSize}
+        size={pointSize}
         vertexColors
         sizeAttenuation
         transparent={false}
