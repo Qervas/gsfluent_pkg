@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gsfluent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.30",
+  "websockets>=12",
+  "watchfiles>=0.21",
+  "plyfile>=1.0",
+  "pydantic>=2.6",
+  "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+
+[project.scripts]
+gsfluent = "gsfluent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gsfluent"]
+include = ["gsfluent/static/**"]
