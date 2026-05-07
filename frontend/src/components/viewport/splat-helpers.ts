@@ -61,3 +61,57 @@ export function packForSplats(attrs: StaticAttrs, xyz: Float32Array) {
   }
   return { positions, scales, rotations, colors };
 }
+
+/**
+ * Pack StaticAttrs + xyz into the standard `.splat` 32-byte-per-splat
+ * binary format that @mkkellogg/gaussian-splats-3d's
+ * `SplatParser.parseStandardSplatToUncompressedSplatArray` consumes.
+ *
+ * Layout per splat (verified against parser source at module.js:4273):
+ *   bytes 0..11   xyz       Float32 (3 x 4 bytes)
+ *   bytes 12..23  scale     Float32 (3 x 4 bytes; raw scale, not log)
+ *   bytes 24..27  RGBA      Uint8   (color + opacity)
+ *   bytes 28..31  rotation  Uint8   (qw, qx, qy, qz; encoded as q*128 + 128,
+ *                                    decoded by parser as (b - 128) / 128)
+ *
+ * Reuses packForSplats for R->quat + color packing so we don't drift the
+ * conversion logic.
+ */
+export function packToSplatBuffer(attrs: StaticAttrs, xyz: Float32Array): ArrayBuffer {
+  const n = attrs.n;
+  const buf = new ArrayBuffer(n * 32);
+  const f32 = new Float32Array(buf);
+  const u8 = new Uint8Array(buf);
+  const { rotations, colors } = packForSplats(attrs, xyz);
+
+  for (let i = 0; i < n; i++) {
+    const fOff = i * 8; // 32 bytes / 4 = 8 floats per splat
+    const bOff = i * 32;
+    // xyz
+    f32[fOff + 0] = xyz[i * 3 + 0];
+    f32[fOff + 1] = xyz[i * 3 + 1];
+    f32[fOff + 2] = xyz[i * 3 + 2];
+    // scales (raw)
+    f32[fOff + 3] = attrs.scales[i * 3 + 0];
+    f32[fOff + 4] = attrs.scales[i * 3 + 1];
+    f32[fOff + 5] = attrs.scales[i * 3 + 2];
+    // RGBA u8
+    u8[bOff + 24] = colors[i * 4 + 0];
+    u8[bOff + 25] = colors[i * 4 + 1];
+    u8[bOff + 26] = colors[i * 4 + 2];
+    u8[bOff + 27] = colors[i * 4 + 3];
+    // rotation u8: byte = clamp(round(q * 128 + 128), 0, 255).
+    // Order is (qw, qx, qy, qz) matching the parser's inRotation[0..3].
+    u8[bOff + 28] = clampU8(Math.round(rotations[i * 4 + 0] * 128 + 128));
+    u8[bOff + 29] = clampU8(Math.round(rotations[i * 4 + 1] * 128 + 128));
+    u8[bOff + 30] = clampU8(Math.round(rotations[i * 4 + 2] * 128 + 128));
+    u8[bOff + 31] = clampU8(Math.round(rotations[i * 4 + 3] * 128 + 128));
+  }
+  return buf;
+}
+
+function clampU8(v: number): number {
+  if (v < 0) return 0;
+  if (v > 255) return 255;
+  return v;
+}

@@ -3,7 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import * as Splat from "@mkkellogg/gaussian-splats-3d";
 import * as THREE from "three";
 import { useStore } from "@/lib/store";
-import { packForSplats } from "./splat-helpers";
+import { packToSplatBuffer } from "./splat-helpers";
 
 /**
  * SplatScene — renders the active 3DGS splats inside the R3F scene.
@@ -33,7 +33,6 @@ export function SplatScene() {
   // Set up viewer once when staticAttrs first arrives.
   useEffect(() => {
     if (!staticAttrs) return;
-    let cancelled = false;
     const dropIn = new (Splat as any).DropInViewer({
       gpuAcceleratedSort: true,
       sharedMemoryForWorkers: false,
@@ -45,15 +44,12 @@ export function SplatScene() {
     initialFrameSent.current = false;
 
     return () => {
-      cancelled = true;
       dropIn.dispose?.().catch(() => {});
       if (viewerRef.current === dropIn) {
         viewerRef.current = null;
       }
       setViewer(null);
       initialFrameSent.current = false;
-      // Suppress unused-var warning if cancelled is consulted later.
-      void cancelled;
     };
   }, [staticAttrs]);
 
@@ -62,19 +58,14 @@ export function SplatScene() {
     if (!viewerRef.current || !staticAttrs || initialFrameSent.current) return;
     const f0 = frameXyz.get(0);
     if (!f0) return;
-    const { positions, scales, rotations, colors } = packForSplats(staticAttrs, f0);
-    // Build the splat array via the lib's UncompressedSplatArray + standard generator.
+    // Build via the exported SplatParser path. UncompressedSplatArray is
+    // defined inside the lib but never re-exported, so we cannot call its
+    // constructor from outside; instead we pack to the standard .splat
+    // 32-bytes-per-splat binary format and let the parser materialise the
+    // array for us.
     const SplatNs = Splat as any;
-    const arr = new SplatNs.UncompressedSplatArray(0);
-    const n = staticAttrs.n;
-    for (let i = 0; i < n; i++) {
-      arr.addSplatFromComonents(
-        positions[i * 3 + 0], positions[i * 3 + 1], positions[i * 3 + 2],
-        scales[i * 3 + 0], scales[i * 3 + 1], scales[i * 3 + 2],
-        rotations[i * 4 + 0], rotations[i * 4 + 1], rotations[i * 4 + 2], rotations[i * 4 + 3],
-        colors[i * 4 + 0], colors[i * 4 + 1], colors[i * 4 + 2], colors[i * 4 + 3],
-      );
-    }
+    const splatBuf = packToSplatBuffer(staticAttrs, f0);
+    const arr = SplatNs.SplatParser.parseStandardSplatToUncompressedSplatArray(splatBuf);
     const generator = SplatNs.SplatBufferGenerator.getStandardGenerator(
       0, 0, 0, new THREE.Vector3(),
     );
