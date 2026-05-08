@@ -66,7 +66,13 @@ export function ComparePane({
         infiniteGrid
         rotation={[-Math.PI / 2, 0, 0]}
       />
-      <OrbitControls makeDefault />
+      <OrbitControls
+        makeDefault
+        enableDamping
+        dampingFactor={0.08}
+        minPolarAngle={0.01}
+        maxPolarAngle={Math.PI - 0.01}
+      />
       <GizmoHelper alignment="bottom-left" margin={[40, 40]}>
         <GizmoViewport
           axisColors={["#f87171", "#34d399", "#22d3ee"]}
