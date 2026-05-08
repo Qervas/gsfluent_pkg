@@ -171,14 +171,19 @@ async def _send(ws: WebSocket, run_name: str, ply: Path,
     if not sent_static_already:
         attrs = parse_static_attrs(ply)
         if attrs is not None:
+            # Only send fields the Three.js Points renderer actually consumes.
+            # R + opacity were ~33 MB + 3.6 MB base64 for a 683k-splat scene
+            # and pushed the static_attrs JSON over WebSocket message-size
+            # limits in some browsers — but neither is rendered. scales is
+            # also unused (point size is bbox-derived). Send only rgb.
             await ws.send_json({
                 "type": "static_attrs",
                 "run_name": run_name,
                 "n": int(attrs["n"]),
-                "R_b64":      base64.b64encode(attrs["R"].tobytes()).decode("ascii"),
-                "scales_b64": base64.b64encode(attrs["scales"].tobytes()).decode("ascii"),
+                "R_b64":      "",
+                "scales_b64": "",
                 "rgb_b64":    base64.b64encode(attrs["rgb"].tobytes()).decode("ascii"),
-                "opacity_b64":base64.b64encode(attrs["opacity"].tobytes()).decode("ascii"),
+                "opacity_b64":"",
             })
             sent_static_already = True
     xyz = parse_frame_xyz(ply)
@@ -258,32 +263,34 @@ async def _send_model_snapshot(ws: WebSocket, model_path: Path) -> None:
     n = int(xyz.shape[0])
     run_name = f"_model:{model_path.name}"
 
+    # Only send fields the Three.js Points renderer actually consumes (rgb).
+    # For a 683k-splat model, R alone was 24 MB raw / 33 MB base64 — pushing
+    # the static_attrs JSON past WebSocket message-size limits in some
+    # browsers and silently dropping the message. Result: empty viewport.
+    # The Points renderer doesn't use R or opacity, and point size is now
+    # bbox-derived (so scales is unused too). Send rgb only.
     if attrs is not None:
         await _safe_send_json(ws, {
             "type": "static_attrs",
             "run_name": run_name,
             "n": int(attrs["n"]),
-            "R_b64":      base64.b64encode(attrs["R"].tobytes()).decode("ascii"),
-            "scales_b64": base64.b64encode(attrs["scales"].tobytes()).decode("ascii"),
+            "R_b64":      "",
+            "scales_b64": "",
             "rgb_b64":    base64.b64encode(attrs["rgb"].tobytes()).decode("ascii"),
-            "opacity_b64":base64.b64encode(attrs["opacity"].tobytes()).decode("ascii"),
+            "opacity_b64":"",
         })
     else:
         # xyz-only ply (e.g. raw point cloud with no SH/scale/rot fields).
-        # Synthesize a uniform gray static_attrs payload so the SplatScene
-        # has something to render — monochrome is fine for a preview.
+        # Synthesize a uniform gray rgb so the SplatScene has color to use.
         rgb = np.full((n, 3), 0.6, dtype=np.float32)
-        opacity = np.full(n, 1.0, dtype=np.float32)
-        scales = np.full((n, 3), 0.005, dtype=np.float32)
-        R = np.tile(np.eye(3, dtype=np.float32), (n, 1, 1))
         await _safe_send_json(ws, {
             "type": "static_attrs",
             "run_name": run_name,
             "n": n,
-            "R_b64":      base64.b64encode(R.tobytes()).decode("ascii"),
-            "scales_b64": base64.b64encode(scales.tobytes()).decode("ascii"),
+            "R_b64":      "",
+            "scales_b64": "",
             "rgb_b64":    base64.b64encode(rgb.tobytes()).decode("ascii"),
-            "opacity_b64":base64.b64encode(opacity.tobytes()).decode("ascii"),
+            "opacity_b64":"",
         })
 
     await _safe_send_json(ws, {
