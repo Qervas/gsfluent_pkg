@@ -30,6 +30,12 @@ type State = {
   currentFrameIdx: number;
   playing: boolean;
 
+  // Scene scale — diag of the active model's bbox. Used by the Grid + camera
+  // far/fade so they follow the model whether it lives at world (3, 3, 3) or
+  // (3460, 29045, 5). Set by SplatScene's auto-fit effect.
+  sceneScale: number;
+  sceneCenter: [number, number, number];
+
   // Setters
   setActiveModel: (m: ModelItem | null) => void;
   setActiveRecipe: (n: string | null, d: Record<string, unknown> | null) => void;
@@ -39,6 +45,7 @@ type State = {
   setStaticAttrs: (a: StaticAttrs) => void;
   setCurrentFrame: (i: number) => void;
   setPlaying: (p: boolean) => void;
+  setSceneScale: (diag: number, center: [number, number, number]) => void;
   resetForNewRun: (name: string) => void;
 };
 
@@ -61,6 +68,8 @@ export const useStore = create<State>((set) => ({
   frameXyz: new Map(),
   currentFrameIdx: 0,
   playing: true,
+  sceneScale: 10,
+  sceneCenter: [0, 0, 0],
 
   setActiveModel: (m) => set({ activeModel: m }),
   setActiveRecipe: (n, d) => set({ activeRecipeName: n, activeRecipeData: d }),
@@ -79,6 +88,7 @@ export const useStore = create<State>((set) => ({
   setStaticAttrs: (a) => set({ staticAttrs: a }),
   setCurrentFrame: (i) => set({ currentFrameIdx: i }),
   setPlaying: (p) => set({ playing: p }),
+  setSceneScale: (diag, center) => set({ sceneScale: diag, sceneCenter: center }),
   resetForNewRun: (name) =>
     set({
       simRunName: name,
