@@ -97,7 +97,13 @@ export function SplatScene() {
     );
     camera.position.copy(camPos);
     camera.near = Math.max(diag * 0.001, 0.01);
-    camera.far = diag * 100;
+    // far must cover the camera-to-origin distance too — drei's Grid is
+    // anchored at world origin and gets clipped if far is shorter than the
+    // distance from the camera to (0,0,0). For a model at (3460, 29045, 5)
+    // the camera ends up ~29000 units from origin; far needs to comfortably
+    // exceed that.
+    const distToOrigin = camPos.length();
+    camera.far = Math.max(diag * 100, distToOrigin * 2);
     camera.updateProjectionMatrix();
     camera.lookAt(center);
 
@@ -111,6 +117,9 @@ export function SplatScene() {
     // typical 200k-splat building reads as a continuous surface, not pixels.
     const newPointSize = Math.max(diag * 0.004, 0.005);
     setPointSize(newPointSize);
+
+    // Publish sceneScale + center so the Grid can scale to match.
+    useStore.getState().setSceneScale(diag, [center.x, center.y, center.z]);
 
     fittedFor.current = staticAttrs;
     // eslint-disable-next-line no-console
