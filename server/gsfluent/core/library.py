@@ -521,6 +521,152 @@ class Sequence:
 # --- helpers shared with migration / endpoints ------------------------------
 
 
+# Required attribute set for a "full" 3DGS .ply (positions live in
+# `vertex.x/y/z` always; we additionally demand SH DC, scales, rotations,
+# and opacity). xyz-only frames (sim per-frame position updates) lack
+# these, so this set distinguishes "first frame is a real model" from
+# "first frame is a position-only delta".
+_FULL_3DGS_ATTRS = (
+    "f_dc_0", "f_dc_1", "f_dc_2",
+    "scale_0", "scale_1", "scale_2",
+    "rot_0", "rot_1", "rot_2", "rot_3",
+    "opacity",
+)
+
+
+def _is_full_3dgs_ply(ply_path: Path) -> tuple[bool, list[str]]:
+    """Return (is_full, missing_attrs).
+
+    A full 3DGS .ply has positions plus SH DC + scales + rotations + opacity.
+    On read failure returns (False, ["<error>"]) — caller treats as not-full.
+    """
+    try:
+        from plyfile import PlyData
+        v = PlyData.read(str(ply_path))["vertex"]
+        names = {p.name for p in v.properties}
+        missing = [a for a in _FULL_3DGS_ATTRS if a not in names]
+        return (len(missing) == 0, missing)
+    except Exception as e:
+        return (False, [f"<read error: {e}>"])
+
+
+def import_sequence(
+    folder_path: Path,
+    name: Optional[str] = None,
+    convert_y_up: bool = False,
+) -> "Sequence":
+    """Register an external folder of `frame_*.ply` as a Sequence.
+
+    Symlinks `<library>/sequences/<name>/frames` -> `folder_path`. No frames
+    are copied — the source folder remains the source of truth. If it moves
+    or is deleted, `Sequence.load()` still reads `_meta.json` but
+    `frame_paths()` returns `[]`; callers should treat this as "broken
+    source" (see `Sequence.is_broken`).
+
+    Validation:
+      - `folder_path` must be an existing directory
+      - must contain at least one `frame_*.ply`
+      - the lowest-numeric `frame_*.ply` must be a full 3DGS .ply
+        (positions + SH DC + scales + rotations + opacity)
+      - `frame_count` is the number of matching files, regardless of gaps
+
+    `name` defaults to `folder_path.name`. If a sequence with that name
+    already exists, raises `FileExistsError` — caller can pass an explicit
+    `name` for the rename case.
+
+    `convert_y_up=True` is reserved for Phase 4 (will materialize converted
+    frames inside the library instead of symlinking). For now raises
+    `NotImplementedError` so callers don't silently get the wrong output.
+    """
+    if convert_y_up:
+        raise NotImplementedError("convert_y_up is Phase 4")
+
+    folder_path = Path(folder_path)
+    if not folder_path.exists():
+        raise FileNotFoundError(f"folder does not exist: {folder_path}")
+    if not folder_path.is_dir():
+        raise NotADirectoryError(f"not a directory: {folder_path}")
+
+    # Collect frame files, sorted by integer index parsed from the name.
+    frames: list[tuple[int, Path]] = []
+    for p in folder_path.iterdir():
+        if not p.is_file():
+            continue
+        m = _FRAME_RE.match(p.name)
+        if m:
+            frames.append((int(m.group(1)), p))
+    if not frames:
+        raise ImportError(
+            f"no frame_*.ply files found in {folder_path}"
+        )
+    frames.sort(key=lambda t: t[0])
+    frame0 = frames[0][1]
+
+    # Validate frame 0 is a full 3DGS ply.
+    is_full, missing = _is_full_3dgs_ply(frame0)
+    if not is_full:
+        raise ImportError(
+            f"frame 0 ({frame0.name}) is not a full 3DGS .ply: missing "
+            f"attrs {missing}"
+        )
+
+    seq_name = name if name is not None else folder_path.name
+    if not seq_name or seq_name.startswith(".") or "/" in seq_name:
+        raise ValueError(f"invalid sequence name: {seq_name!r}")
+
+    # Refuse to clobber an existing sequence — the caller must decide
+    # whether to delete-then-reimport or pick a fresh name.
+    if Sequence.exists(seq_name):
+        raise FileExistsError(
+            f"sequence already exists: {seq_name}"
+        )
+
+    seq_dir = SEQUENCES_DIR / seq_name
+    seq_dir.mkdir(parents=True)
+
+    # Symlink frames/ -> source folder. No fallback to copy — explicit
+    # error is better than a 100GB silent copy on Windows-without-admin.
+    frames_link = seq_dir / "frames"
+    try:
+        os.symlink(
+            str(folder_path.resolve()),
+            str(frames_link),
+            target_is_directory=True,
+        )
+    except OSError as e:
+        # Roll back the empty seq_dir so a retry with a different name
+        # doesn't leave half-built dirs behind.
+        try:
+            shutil.rmtree(seq_dir)
+        except OSError:
+            pass
+        raise OSError(
+            f"failed to create symlink {frames_link} -> {folder_path}: {e}"
+        )
+
+    # bbox + count from frame 0.
+    n_splats, bbox = read_ply_bbox_and_count(frame0)
+
+    Sequence.write_meta(
+        name=seq_name,
+        source="import",
+        source_path=str(folder_path.resolve()),
+        model_ref=None,
+        frame_count=len(frames),
+        fps_hint=24,
+        n_splats=n_splats,
+        bbox_initial=bbox,
+        coord_convention="z-up",
+        first_frame_full=True,
+        created_at=_now_iso(),
+    )
+
+    seq = Sequence.load(seq_name)
+    if seq is None:  # pragma: no cover — write_meta + dir creation succeeded
+        raise RuntimeError(f"failed to load freshly-imported sequence {seq_name}")
+    return seq
+
+
 def read_ply_bbox_and_count(ply_path: Path) -> tuple[Optional[int], Optional[list[list[float]]]]:
     """Read a .ply and return (n_splats, bbox). Tolerant of unreadable
     files — returns (None, None) on any failure so callers can degrade
