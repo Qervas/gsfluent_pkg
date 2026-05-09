@@ -18,10 +18,11 @@ import { useStore } from "@/lib/store";
  *      ordering tracks the new geometry.
  *
  * Coordinate system: world is Z-up (set by <UpAxisSync> in Viewport).
- *   - Static model .ply is COLMAP-native (+Y down): the mesh is rotated
- *     by Rx(-π/2) on load to match the WS pump's points-mode rotation.
- *   - Sim mode bootstraps from frame/0.ply and streams xyz, both already
- *     in sim Z-up world coords — no mesh rotation, identity transform.
+ * Both static-model and sim plys land in our store as-is — they're
+ * already in Z-up convention. The WS pump's old `applyYUpRotation`
+ * heuristic in ws.ts assumes Inria-style Y-up but our captures are
+ * Z-up COLMAP, so the rotation it applies for points-mode model preview
+ * is actually wrong for our data; splat mode just renders the raw .ply.
  */
 export function GaussianSplatScene() {
   const activeModel = useStore((s) => s.activeModel);
@@ -80,27 +81,10 @@ export function GaussianSplatScene() {
       console.log("[GaussianSplatScene] loading", { isSimRun, url });
     }
 
-    // Static-model .ply is COLMAP-native (+Y points DOWN). Apply the same
-    // Rx(-π/2) the WS pump applies to xyz for points mode (see ws.ts:117).
-    // We pass it as a quaternion to the lib's addSplatScene `rotation`
-    // option — that path goes through the lib's internal scene transform
-    // which correctly rotates BOTH splat centers AND each ellipsoid's
-    // orientation. Setting THREE's mesh.rotation.x alone rotates only the
-    // wrapper Object3D, leaving the per-splat orientations un-rotated, so
-    // the building stays visually lying down even though positions move.
-    // Sim mode skips this — its bootstrap .ply and per-frame xyz are
-    // already in Z-up sim coords; rotating would double-rotate.
-    const rxNeg90 = new THREE.Quaternion().setFromAxisAngle(
-      new THREE.Vector3(1, 0, 0),
-      -Math.PI / 2,
-    );
-    const splatRotation = isSimRun ? undefined : rxNeg90.toArray();
-
     viewer
       .addSplatScene(url, {
         format: SceneFormat.Ply,
         showLoadingUI: false,
-        ...(splatRotation ? { rotation: splatRotation } : {}),
       })
       .then(() => {
         if (cancelled) return;
@@ -108,20 +92,15 @@ export function GaussianSplatScene() {
         if (!mesh) return;
         mesh.frustumCulled = false;
 
-        // Sample splat centers in the rotated frame so the bbox matches
-        // what the user sees. The lib's scene transform is INSIDE
-        // SplatMesh as a child object, so mesh.matrixWorld doesn't
-        // include it — apply the rotation manually here.
-        const xformMat = !isSimRun
-          ? new THREE.Matrix4().makeRotationFromQuaternion(rxNeg90)
-          : null;
+        // Sample splat centers as-is — the .ply is already Z-up
+        // (verified empirically: training plys for our captures have
+        // largest extent along Z, matching world up).
         const n = mesh.getSplatCount();
         const bbox = new THREE.Box3();
         const c = new THREE.Vector3();
         const stride = Math.max(1, Math.floor(n / 5000));
         for (let i = 0; i < n; i += stride) {
           mesh.getSplatCenter(i, c);
-          if (xformMat) c.applyMatrix4(xformMat);
           bbox.expandByPoint(c);
         }
         if (bbox.isEmpty()) return;
