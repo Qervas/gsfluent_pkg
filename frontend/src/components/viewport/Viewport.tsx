@@ -13,24 +13,25 @@ import { RenderModeToggle } from "./RenderModeToggle";
 import { FpsIndicator } from "./FpsIndicator";
 
 /**
- * Single source of truth for camera.up. Each scene component used to set
- * camera.up itself, but SplatScene's assignment was gated on the auto-fit
- * effect which only fires when staticAttrs is loaded; if the user toggled
- * Splat → Points before the WS pump delivered staticAttrs, the camera
- * stayed Y-up while the grid rotated to Z-up. Mounting one effect here,
- * driven by effectiveMode, makes the up-axis invariant of any scene's
- * internal state.
+ * Single source of truth for camera.up. Both modes are Z-up: our team's
+ * 3DGS captures (and most COLMAP-derived scans) bake gravity into the
+ * world's +Z axis. Splat mode used to default to Y-up matching a stale
+ * "splat-test.html" config, which made Z-up buildings render lying on
+ * their side. Unifying to Z-up keeps the building upright and removes
+ * the orientation flip on Splat ↔ Points toggle.
+ *
+ * If a future Y-up dataset shows up (e.g. PhysGaussian ficus) we'll add
+ * a per-model up-axis override on the ModelItem rather than re-globalize.
  */
-function UpAxisSync({ mode }: { mode: "splat" | "points" }) {
+function UpAxisSync() {
   const { camera, controls } = useThree() as unknown as {
     camera: THREE.PerspectiveCamera;
     controls: OrbitControlsImpl | null;
   };
   useEffect(() => {
-    if (mode === "splat") camera.up.set(0, 1, 0);
-    else camera.up.set(0, 0, 1);
+    camera.up.set(0, 0, 1);
     controls?.update?.();
-  }, [mode, camera, controls]);
+  }, [camera, controls]);
   return null;
 }
 
@@ -69,10 +70,8 @@ export function Viewport() {
           up: [0, 0, 1],
         }}
       >
-        {/* Grid orientation tracks the active up-axis convention.
-            Points mode = Z-up (rotated +π/2 around X to lie on XY).
-            Splat mode = Y-up (drei's default; lies on XZ, no rotation).
-            sceneFloor is bbox.min along the up axis in the active mode. */}
+        {/* Grid is always Z-up: rotated +π/2 around X to lie on XY plane,
+            with sceneFloor as bbox.min along world Z. */}
         <Grid
           args={[200, 200]}
           cellSize={cellSize}
@@ -84,16 +83,8 @@ export function Viewport() {
           fadeStrength={1}
           followCamera={false}
           infiniteGrid
-          rotation={
-            effectiveMode === "splat"
-              ? [0, 0, 0]
-              : [Math.PI / 2, 0, 0]
-          }
-          position={
-            effectiveMode === "splat"
-              ? [sceneCenter[0], sceneFloor, sceneCenter[2]]
-              : [sceneCenter[0], sceneCenter[1], sceneFloor]
-          }
+          rotation={[Math.PI / 2, 0, 0]}
+          position={[sceneCenter[0], sceneCenter[1], sceneFloor]}
           side={DoubleSide}
         />
         <OrbitControls
@@ -111,7 +102,7 @@ export function Viewport() {
             labelColor="#0d1117"
           />
         </GizmoHelper>
-        <UpAxisSync mode={effectiveMode} />
+        <UpAxisSync />
         {/* In-place mode swap: same canvas, same camera, same world.
             Grid + gizmo + controls stay; only the data renderer changes. */}
         {staticAttrs && effectiveMode === "points" && <SplatScene />}
