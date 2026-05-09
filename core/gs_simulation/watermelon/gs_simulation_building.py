@@ -253,10 +253,31 @@ if __name__ == "__main__":
     if preprocessing_params["sim_area"] is not None:
         boundary = preprocessing_params["sim_area"]
         assert len(boundary) == 6
+        # sim_area is interpreted as ABSOLUTE WORLD COORDS (matches the
+        # canonical GaussianFluent recipe convention; see R7.M_jelly_cluster.json
+        # for an example: [3440, 3480, 29030, 29060, -25, 35] for a building
+        # at world (~3460, ~29045, ~5)). Workbench recipes that want
+        # model-local semantics must translate sim_area by the model bbox
+        # at recipe-load time before invoking this script.
         mask = torch.ones(rotated_pos.shape[0], dtype=torch.bool).to(device="cuda")
         for i in range(3):
             mask = torch.logical_and(mask, rotated_pos[:, i] > boundary[2 * i])
             mask = torch.logical_and(mask, rotated_pos[:, i] < boundary[2 * i + 1])
+
+        kept = int(mask.sum().item())
+        if kept == 0:
+            # Fail loud rather than crash with an inscrutable IndexError
+            # downstream. Most likely cause: sim_area was specified in
+            # model-local coords but the model lives far from world origin;
+            # workbench should translate first, or recipe should use world coords.
+            model_center = rotated_pos.mean(dim=0)
+            raise RuntimeError(
+                f"sim_area filter rejected all {rotated_pos.shape[0]} splats. "
+                f"sim_area={boundary} (interpreted as world coords); "
+                f"model center is at {model_center.tolist()}. "
+                f"If the recipe assumed model-local sim_area, the workbench "
+                f"loader needs to translate it to world before invoking the sim."
+            )
 
         unselected_pos = init_pos[~mask, :]
         unselected_cov = init_cov[~mask, :]
@@ -267,6 +288,19 @@ if __name__ == "__main__":
         init_cov = init_cov[mask, :]
         init_opacity = init_opacity[mask, :]
         init_shs = init_shs[mask, :]
+
+        # The earlier opacity-threshold filter (line ~213) shrunk both the
+        # init_* tensors AND the gaussians._* tensors in lockstep. The
+        # sim_area filter was missing the second half — so downstream code
+        # that reads e.g. `gaussians._scaling` (line 376) ended up with a
+        # different particle count than `init_opacity`, blowing up
+        # element-wise multiply with a non-singleton-dim mismatch.
+        gaussians._xyz           = gaussians._xyz[mask, :]
+        gaussians._features_dc   = gaussians._features_dc[mask, :]
+        gaussians._features_rest = gaussians._features_rest[mask, :]
+        gaussians._opacity       = gaussians._opacity[mask, :]
+        gaussians._scaling       = gaussians._scaling[mask, :]
+        gaussians._rotation      = gaussians._rotation[mask, :]
 
     transformed_pos, scale_origin, original_mean_pos = transform2origin(rotated_pos)
     transformed_pos = shift2center111(transformed_pos)
@@ -643,41 +677,48 @@ if __name__ == "__main__":
         # frame = 21 +frame
         if frame > 30 :
             delta = frame - 30
-        if _cam_traj is not None:
-            _a, _e, _r = float(_cam_traj[frame, 0]), float(_cam_traj[frame, 1]), float(_cam_traj[frame, 2])
-            current_camera = get_camera_view(
-                model_path,
-                default_camera_index=camera_params["default_camera_index"],
-                center_view_world_space=viewpoint_center_worldspace,
-                observant_coordinates=observant_coordinates,
-                show_hint=camera_params["show_hint"],
-                init_azimuthm=_a, init_elevation=_e, init_radius=_r,
-                move_camera=False, current_frame=0,
-                delta_a=0, delta_e=0, delta_r=0,
-                width=int(args.resolution.split("x")[0]),
-                height=int(args.resolution.split("x")[1])
+        # Camera + rasterizer setup is render-only. Skipping when --render_img
+        # is off makes cameras.json a true optional (sim physics doesn't need
+        # any camera info; the file was previously a hard dep only because
+        # this block ran every frame regardless).
+        current_camera = None
+        rasterize = None
+        if args.render_img:
+            if _cam_traj is not None:
+                _a, _e, _r = float(_cam_traj[frame, 0]), float(_cam_traj[frame, 1]), float(_cam_traj[frame, 2])
+                current_camera = get_camera_view(
+                    model_path,
+                    default_camera_index=camera_params["default_camera_index"],
+                    center_view_world_space=viewpoint_center_worldspace,
+                    observant_coordinates=observant_coordinates,
+                    show_hint=camera_params["show_hint"],
+                    init_azimuthm=_a, init_elevation=_e, init_radius=_r,
+                    move_camera=False, current_frame=0,
+                    delta_a=0, delta_e=0, delta_r=0,
+                    width=int(args.resolution.split("x")[0]),
+                    height=int(args.resolution.split("x")[1])
+                )
+            else:
+                current_camera = get_camera_view(
+                    model_path,
+                    default_camera_index=camera_params["default_camera_index"],
+                    center_view_world_space=viewpoint_center_worldspace,
+                    observant_coordinates=observant_coordinates,
+                    show_hint=camera_params["show_hint"],
+                    init_azimuthm=camera_params["init_azimuthm"],
+                    init_elevation=camera_params["init_elevation"],
+                    init_radius=camera_params["init_radius"],
+                    move_camera=camera_params["move_camera"],
+                    current_frame=frame,
+                    delta_a=camera_params["delta_a"],
+                    delta_e=camera_params["delta_e"],
+                    delta_r=camera_params["delta_r"],
+                    width=int(args.resolution.split("x")[0]),
+                    height=int(args.resolution.split("x")[1])
+                )
+            rasterize = initialize_resterize(
+                current_camera, gaussians, pipeline, background
             )
-        else:
-            current_camera = get_camera_view(
-                model_path,
-                default_camera_index=camera_params["default_camera_index"],
-                center_view_world_space=viewpoint_center_worldspace,
-                observant_coordinates=observant_coordinates,
-                show_hint=camera_params["show_hint"],
-                init_azimuthm=camera_params["init_azimuthm"],
-                init_elevation=camera_params["init_elevation"],
-                init_radius=camera_params["init_radius"],
-                move_camera=camera_params["move_camera"],
-                current_frame=frame,
-                delta_a=camera_params["delta_a"],
-                delta_e=camera_params["delta_e"],
-                delta_r=camera_params["delta_r"],
-                width=int(args.resolution.split("x")[0]),
-                height=int(args.resolution.split("x")[1])
-            )
-        rasterize = initialize_resterize(
-            current_camera, gaussians, pipeline, background
-        )
         
         
         
