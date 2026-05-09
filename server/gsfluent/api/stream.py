@@ -32,6 +32,7 @@ import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from watchfiles import awatch
 
+from ..core import library as lib
 from ..core import runner
 from ..core.frame_stream import parse_frame_xyz, parse_static_attrs
 from ..core.runner import _log_task_exception
@@ -71,23 +72,80 @@ async def stream(ws: WebSocket):
             sub_task.cancel()
 
 
+def _resolve_run_dir(run_name: str) -> Path | None:
+    """Locate the on-disk dir for `run_name`. Library wins; legacy
+    fused dir only used as a fallback (tests + pre-migration data).
+    Returns None if the run isn't found anywhere."""
+    seq_dir = lib.SEQUENCES_DIR / run_name
+    if seq_dir.is_dir():
+        return seq_dir
+    legacy = runner.FUSED_DIR / run_name
+    if legacy.is_dir():
+        return legacy
+    return None
+
+
 async def _pump(ws: WebSocket, run_name: str) -> None:
-    """Tail `run_name`'s fused dir, sending each new frame_*.ply as it
-    appears. Frames may live directly in the run dir (sim_one.sh's
-    output) or in a frames/ subdir (newer pipeline). Sends static_attrs
-    on the first frame that carries the full 3DGS attribute set."""
-    run_dir = runner.FUSED_DIR / run_name
-    if not run_dir.exists():
+    """Tail `run_name`'s sequence dir, sending each new frame_*.ply as
+    it appears. Canonical layout is `<seq>/frames/frame_*.ply` (Phase 1
+    library). The legacy layouts (frames at run root, or in `<run>/`
+    only) are still accepted for tests + pre-migration data; we collapse
+    them into the same dedup pass.
+
+    Sends static_attrs on the first frame that carries the full 3DGS
+    attribute set (frame 0 in the canonical layout)."""
+    run_dir = _resolve_run_dir(run_name)
+    if run_dir is None:
         try:
             await ws.send_json({
                 "type": "error",
                 "code": "run_not_found",
                 "run_name": run_name,
-                "message": f"run_dir does not exist: {run_dir}",
+                "message": f"run dir does not exist for {run_name}",
             })
         except WebSocketDisconnect:
             pass
         return
+
+    # Replay the persisted run.log so the user sees output even after the
+    # subprocess is gone. For an errored run this is the only way to find
+    # out WHY it failed — the in-memory Run.log_lines disappear with the
+    # process. New lines appended during a live run still get pumped via
+    # the awatch loop below.
+    log_path = run_dir / "run.log"
+    if log_path.is_file():
+        try:
+            with log_path.open() as fh:
+                for line in fh:
+                    await ws.send_json({
+                        "type": "log",
+                        "run_name": run_name,
+                        "line": line.rstrip("\n"),
+                    })
+        except WebSocketDisconnect:
+            return
+        except Exception as e:
+            _log.warning("failed to replay run.log for %s: %s", run_name, e)
+    # Tell the client the run's terminal status if the manifest knows it.
+    # Without this, past errored runs stay forever in "running" state on
+    # the client and the StatusStrip never settles into the replay layout.
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            import json as _json
+            with manifest_path.open() as fh:
+                m = _json.load(fh)
+            status = m.get("status")
+            if status in ("done", "error", "cancelled"):
+                await ws.send_json({
+                    "type": "status",
+                    "run_name": run_name,
+                    "state": status,
+                })
+        except WebSocketDisconnect:
+            return
+        except Exception as e:
+            _log.warning("failed to read manifest for %s: %s", run_name, e)
 
     sent: set[str] = set()
     sent_static = False
@@ -95,7 +153,13 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
     # sim_one.sh writes frames directly into the run dir; the new pipeline
     # may use a frames/ subdir going forward. Support both.
     try:
-        for f in sorted(_list_frame_plys(run_dir)):
+        # Numeric-by-frame-idx sort. Path's default sort is lexicographic —
+        # which orders frame_10 before frame_2 — making the initial snapshot
+        # arrive out of playback order. The viewer's currentFrameIdx then
+        # points at frames that haven't streamed yet (Map.get returns
+        # undefined), causing visible jumps and the progress bar to climb
+        # erratically.
+        for f in sorted(_list_frame_plys(run_dir), key=_frame_idx_for_sort):
             sent_static = await _send(ws, run_name, f, sent, sent_static)
     except WebSocketDisconnect:
         return
@@ -108,7 +172,11 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
         except Exception:
             pass
 
-    # Watch for new frames. awatch raises asyncio.CancelledError on cancel.
+    # Track how many bytes of run.log we've already sent so live tails
+    # only emit new lines.
+    log_offset = log_path.stat().st_size if log_path.is_file() else 0
+
+    # Watch for new frames AND log appends. awatch raises CancelledError on cancel.
     try:
         async for changes in awatch(run_dir):
             for _, p_str in changes:
@@ -121,6 +189,40 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
                     except Exception as e:
                         _log.warning("skipping unreadable frame %s: %s", p, e)
                         continue
+                elif p.name == "run.log":
+                    # Tail-read new lines appended since last offset.
+                    try:
+                        with log_path.open() as fh:
+                            fh.seek(log_offset)
+                            chunk = fh.read()
+                            log_offset = fh.tell()
+                        for line in chunk.splitlines():
+                            await ws.send_json({
+                                "type": "log",
+                                "run_name": run_name,
+                                "line": line,
+                            })
+                    except WebSocketDisconnect:
+                        return
+                    except Exception as e:
+                        _log.warning("failed to tail run.log for %s: %s", run_name, e)
+                elif p.name == "manifest.json":
+                    # Manifest update — re-read status and emit if terminal.
+                    try:
+                        import json as _json
+                        with manifest_path.open() as fh:
+                            m = _json.load(fh)
+                        status = m.get("status")
+                        if status in ("done", "error", "cancelled"):
+                            await ws.send_json({
+                                "type": "status",
+                                "run_name": run_name,
+                                "state": status,
+                            })
+                    except WebSocketDisconnect:
+                        return
+                    except Exception as e:
+                        _log.warning("failed to re-read manifest for %s: %s", run_name, e)
     except (FileNotFoundError, PermissionError) as e:
         _log.warning("watch terminated for %s: %s", run_name, e)
         try:
@@ -133,12 +235,15 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
 
 
 def _list_frame_plys(run_dir: Path) -> list[Path]:
-    """Frames may live in <run_dir>/frame_*.ply (sim_one.sh's output) or
-    <run_dir>/frames/frame_*.ply (newer pipeline). Return both, deduped
-    by stem (frame_N), with the run-root copy winning on conflict."""
+    """Return the run's frame_*.ply files.
+
+    Canonical layout (post-Phase-1 library): `<run_dir>/frames/frame_*.ply`.
+    Legacy layouts (frames at the run root) are still accepted for tests
+    and any pre-migration data — deduplicated by stem so we don't emit a
+    frame twice if both copies exist."""
     out: list[Path] = []
-    out.extend(run_dir.glob("frame_*.ply"))
     out.extend(run_dir.glob("frames/frame_*.ply"))
+    out.extend(run_dir.glob("frame_*.ply"))
     seen: set[str] = set()
     deduped: list[Path] = []
     for p in out:
@@ -152,6 +257,17 @@ def _is_frame_ply(p: Path) -> bool:
     """True for any frame_*.ply landing in a watched run_dir, regardless
     of whether it's at the root or in a frames/ subdir."""
     return p.name.startswith("frame_") and p.name.endswith(".ply")
+
+
+def _frame_idx_for_sort(p: Path) -> int:
+    """Parse the integer N from a frame_<N>.ply filename. Used to sort the
+    initial snapshot in numeric (playback) order rather than lexicographic
+    order. Returns a large sentinel for malformed names so they sort last
+    instead of crashing the snapshot send."""
+    try:
+        return int(p.stem.split("_", 1)[1])
+    except (IndexError, ValueError):
+        return 10**9
 
 
 async def _send(ws: WebSocket, run_name: str, ply: Path,
