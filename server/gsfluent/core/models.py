@@ -1,9 +1,22 @@
-"""Model uploads + history.
+"""Model uploads + listing, library-backed.
 
-A "model" is a 3DGS scan. The sim core expects layout
+A "model" is a 3DGS scan. The sim core expects the canonical layout
 `<dir>/point_cloud/iteration_<N>/point_cloud.ply`. We auto-wrap raw .ply
-uploads into that layout so the rest of the pipeline doesn't need to
-know about uploads vs externally-trained models.
+uploads into that layout and write a `_meta.json` so the rest of the
+pipeline (and future spec phases) doesn't need to know about uploads vs
+externally-trained models.
+
+The on-disk root is `work/library/models/<name>/` (per the 2026-05-09
+sequence-workflow spec). External `register_local_model` paths stay where
+they are on disk and get tracked through `library._registered.json`.
+
+Backwards-compatible API:
+  - `list_models() -> list[dict]` still returns at least `name` + `path`
+    for each entry, so the frontend's `ModelItem` contract holds.
+  - `wrap_ply_upload`, `register_local_model` keep their signatures.
+  - `UPLOADS_DIR`, `HISTORY_FILE`, `MAX_HISTORY` symbols are kept as
+    legacy aliases for tests that monkeypatch them; new code should
+    import from `core.library` instead.
 """
 from __future__ import annotations
 
@@ -12,48 +25,38 @@ import logging
 import uuid
 from pathlib import Path
 
-from ..server import PKG_ROOT
+from . import library as lib
+from .library import MODELS_DIR, Model, read_ply_bbox_and_count
 
 _log = logging.getLogger(__name__)
 
-UPLOADS_DIR = PKG_ROOT / "work" / "uploads"
-HISTORY_FILE = PKG_ROOT / "work" / "_state" / "model_history.json"
-MAX_HISTORY = 20
-
-
-def _load_history() -> list[dict]:
-    if not HISTORY_FILE.exists():
-        return []
-    try:
-        data = json.loads(HISTORY_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
-        return []
-    if not isinstance(data, list):
-        return []
-    # Filter out legacy non-dict entries — earlier versions wrote a list of
-    # path strings, which would crash record_model's .get() filter.
-    return [x for x in data if isinstance(x, dict) and "name" in x and "path" in x]
-
-
-def _save_history(items: list[dict]) -> None:
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = HISTORY_FILE.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(items, indent=2))
-        tmp.replace(HISTORY_FILE)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+# Legacy aliases — pre-Phase-1 callers/tests poked these. Kept so the
+# external contract doesn't change in this commit; future phases can
+# switch consumers to `library.MODELS_DIR` etc directly.
+UPLOADS_DIR = MODELS_DIR
+HISTORY_FILE = lib._REGISTERED_INDEX  # only used by external-register path
+MAX_HISTORY = 20  # unused under library-backed list, but kept for compat
 
 
 def list_models() -> list[dict]:
-    return _load_history()
+    """Return all models in the library (internal + registered external).
 
-
-def record_model(name: str, path: Path) -> None:
-    items = [x for x in _load_history() if x.get("name") != name]
-    items.insert(0, {"name": name, "path": str(path)})
-    _save_history(items[:MAX_HISTORY])
+    Each entry carries at minimum `name` and `path`, plus whatever fields
+    the model's `_meta.json` defined. Sorted by `imported_at` desc (ISO-8601
+    UTC timestamps sort lexicographically into chronological order); entries
+    without `imported_at` sort last, alphabetically.
+    """
+    out: list[dict] = []
+    for name in Model.list():
+        m = Model.load(name)
+        if m is None:
+            continue
+        out.append(m.meta_dict())
+    with_ts = [d for d in out if d.get("imported_at")]
+    no_ts = [d for d in out if not d.get("imported_at")]
+    with_ts.sort(key=lambda d: d.get("imported_at", ""), reverse=True)
+    no_ts.sort(key=lambda d: d.get("name", ""))
+    return with_ts + no_ts
 
 
 def wrap_ply_upload(
@@ -67,20 +70,22 @@ def wrap_ply_upload(
     model's cameras.json (e.g. the original COLMAP output). Otherwise a
     minimal synthetic one is generated from the ply's bbox.
 
-    Returns (model_name, model_dir_path)."""
+    Writes `_meta.json` alongside (kind=model, source=upload, n_splats and
+    bbox derived from the ply, coord_convention=z-up).
+
+    Returns (model_name, model_dir_path).
+    """
     base = Path(orig_filename).stem or "model"
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in base)
     if not safe:
         safe = "model"
     name = f"{safe}_{uuid.uuid4().hex[:8]}"
-    iter_dir = UPLOADS_DIR / name / "point_cloud" / "iteration_30000"
+    iter_dir = MODELS_DIR / name / "point_cloud" / "iteration_30000"
     iter_dir.mkdir(parents=True, exist_ok=True)
     ply_path = iter_dir / "point_cloud.ply"
-    ply_path.write_bytes(content)  # TODO Phase 4: write to .tmp + replace for atomic .ply landing
-    model_dir = UPLOADS_DIR / name
-    # The sim core (utils/camera_view_utils.py:get_camera_view) opens
-    # `<model_dir>/cameras.json` unconditionally. Prefer the real file if
-    # the uploader provided one; otherwise synthesize from the ply bbox.
+    ply_path.write_bytes(content)  # TODO Phase 4: stream via tmp + replace for atomic landing on >1GB plys
+    model_dir = MODELS_DIR / name
+
     if cameras_json_bytes is not None:
         try:
             (model_dir / "cameras.json").write_bytes(cameras_json_bytes)
@@ -91,20 +96,32 @@ def wrap_ply_upload(
             _ensure_cameras_json(model_dir, ply_path)
         except Exception as e:
             _log.warning("could not generate cameras.json for %s: %s", name, e)
-    # History is a hint, not source of truth: a write here failing must NOT
-    # block the upload. We log and move on; the next listings refresh will
-    # pick up whatever is on disk.
+
+    # Read ply for n_splats / bbox. Tolerant of failures — the meta file
+    # gets written either way; missing fields are harmless to consumers.
+    n_splats, bbox = read_ply_bbox_and_count(ply_path)
     try:
-        record_model(name, model_dir)
+        Model.write_meta(
+            name=name,
+            source="upload",
+            source_path=None,
+            n_splats=n_splats,
+            bbox=bbox,
+            coord_convention="z-up",
+        )
     except Exception as e:
-        _log.warning("model %s saved to %s but history update failed: %s", name, model_dir, e)
+        _log.warning("model %s wrote ply but _meta.json failed: %s", name, e)
+
     return name, model_dir
 
 
 def register_local_model(path: Path) -> tuple[str, Path]:
-    """Register an existing local 3DGS model directory in history without
-    copying anything. Validates the path structure: must contain
-    `point_cloud/iteration_*/point_cloud.ply`. Returns (name, path).
+    """Register an existing local 3DGS model directory in the library
+    without copying anything. Validates the path structure (must contain
+    `point_cloud/iteration_*/point_cloud.ply`), writes `_meta.json` AT
+    that path (or in a sidecar `<external>/.gsfluent_meta.json` if the
+    main meta path is read-only), and adds an entry to the registered
+    index. Returns (name, path).
 
     Raises FileNotFoundError if the path doesn't exist or doesn't have
     the expected layout.
@@ -114,23 +131,21 @@ def register_local_model(path: Path) -> tuple[str, Path]:
     pc_root = path / "point_cloud"
     if not pc_root.is_dir():
         raise FileNotFoundError(f"missing point_cloud/ subdir under {path}")
-    # Look for any iteration_<N>/point_cloud.ply.
     iters = sorted(pc_root.glob("iteration_*"))
     if not iters:
         raise FileNotFoundError(
             f"no iteration_*/ subdir under {pc_root}. "
             f"3DGS model layout requires <model>/point_cloud/iteration_<N>/point_cloud.ply"
         )
-    # At least one iteration must have a point_cloud.ply.
     if not any((it / "point_cloud.ply").is_file() for it in iters):
         raise FileNotFoundError(
             f"no point_cloud.ply found under {pc_root}/iteration_*/. "
             f"Are you pointing at a 3DGS training output dir?"
         )
     name = path.name  # use the directory name verbatim — no uuid suffix needed
+
     # Sim core needs cameras.json. If the user's external dir doesn't have
-    # one, write a synthetic one in-place. We pick the highest-iteration
-    # ply for the bbox.
+    # one, write a synthetic one in-place against the highest-iteration ply.
     if not (path / "cameras.json").exists():
         best_ply = None
         best_iter = -1
@@ -149,7 +164,38 @@ def register_local_model(path: Path) -> tuple[str, Path]:
                 _ensure_cameras_json(path, best_ply)
             except Exception as e:
                 _log.warning("could not generate cameras.json for %s: %s", path, e)
-    record_model(name, path)
+
+    # Compute meta from the highest-iteration ply we just identified.
+    n_splats = bbox = None
+    iter_re_match = sorted(
+        ((int(it.name.split("_")[1]), it) for it in pc_root.glob("iteration_*")
+         if (it / "point_cloud.ply").is_file()),
+        key=lambda t: -t[0],
+    )
+    if iter_re_match:
+        n_splats, bbox = read_ply_bbox_and_count(iter_re_match[0][1] / "point_cloud.ply")
+
+    try:
+        meta_path = Model.write_meta(
+            name=name,
+            source="register",
+            source_path=str(path),
+            n_splats=n_splats,
+            bbox=bbox,
+            coord_convention="z-up",
+            path=path,
+        )
+        _log.info("registered model %s; meta at %s", name, meta_path)
+    except Exception as e:
+        _log.warning("registered model %s but _meta.json write failed: %s", name, e)
+
+    # Track in the registered index so list_models() includes it even
+    # though the dir lives outside MODELS_DIR.
+    try:
+        lib.register_external(name, path)
+    except Exception as e:
+        _log.warning("registered model %s but index update failed: %s", name, e)
+
     return name, path
 
 
