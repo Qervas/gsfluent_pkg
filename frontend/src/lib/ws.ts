@@ -20,6 +20,13 @@ export class StreamClient {
   private currentRun: string | null = null;
   private pendingLoadModel: string | null = null;
   private reconnectTimer: number | null = null;
+  // Was: rotate incoming xyz from Y-up (Inria) to Z-up. Verified
+  // empirically (bbox inspection of cluster_6_15) that our captures are
+  // already Z-up COLMAP, so this rotation was wrong for our data — it
+  // tipped model-preview buildings onto their side in points mode the
+  // same way it did in splat mode. Left as a stub so a future per-model
+  // up-axis override can re-enable it for genuine Y-up datasets.
+  private applyYUpRotation = false;
 
   constructor(private h: Handlers) {}
 
@@ -45,6 +52,7 @@ export class StreamClient {
   subscribe(run_name: string): void {
     this.currentRun = run_name;
     this.pendingLoadModel = null;
+    this.applyYUpRotation = false;
     if (this.ws?.readyState === WebSocket.OPEN) {
       this._send({ type: "subscribe", run_name });
     }
@@ -52,6 +60,7 @@ export class StreamClient {
 
   unsubscribe(): void {
     this.currentRun = null;
+    this.applyYUpRotation = false;
     if (this.ws?.readyState === WebSocket.OPEN) {
       this._send({ type: "unsubscribe" });
     }
@@ -62,6 +71,7 @@ export class StreamClient {
    *  the request for the next onopen. */
   loadModel(path: string): void {
     this.currentRun = null;
+    this.applyYUpRotation = false;
     if (this.ws?.readyState === WebSocket.OPEN) {
       this._send({ type: "load_model", path });
     } else {
@@ -92,6 +102,9 @@ export class StreamClient {
       if (msg.type === "frame_meta") {
         this.pendingMeta = msg;
       } else if (msg.type === "static_attrs") {
+        // Disabled: our captures are Z-up COLMAP (verified via bbox).
+        // Re-enable per model when we onboard a Y-up dataset.
+        this.applyYUpRotation = false;
         this.h.onStaticAttrs?.({ run_name: msg.run_name, attrs: decodeStatic(msg) });
       } else if (msg.type === "status") {
         this.h.onStatus?.(msg);
@@ -102,6 +115,18 @@ export class StreamClient {
       }
     } else if (ev.data instanceof ArrayBuffer && this.pendingMeta) {
       const xyz = new Float32Array(ev.data);
+      if (this.applyYUpRotation) {
+        // Inria 3DGS pipelines preserve COLMAP's coordinate convention:
+        // +Y points DOWN (into the ground), not up. So the building's
+        // sky direction is -Y, and we want -Y → +Z. Rx(-π/2) does that:
+        // (x, y, z) → (x, z, -y).
+        for (let i = 0; i < xyz.length; i += 3) {
+          const y = xyz[i + 1];
+          const z = xyz[i + 2];
+          xyz[i + 1] = z;
+          xyz[i + 2] = -y;
+        }
+      }
       this.h.onFrame?.(this.pendingMeta, xyz);
       this.pendingMeta = null;
     }
