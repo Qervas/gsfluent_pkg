@@ -1,0 +1,547 @@
+"""On-disk library: typed access to `work/library/{models,sequences}/`.
+
+This module is the single source of truth for the new layout introduced by
+the 2026-05-09 sequence-workflow spec. Both endpoints (api/models.py,
+api/runs.py) and the migration script (tools/migrate_to_library.py) go
+through `Model` / `Sequence` rather than poking the filesystem directly.
+
+Layout (all paths Z-up by convention; conversion happens at import time):
+
+    work/library/
+    ├── models/<name>/
+    │   ├── point_cloud/iteration_<N>/point_cloud.ply   # required
+    │   ├── cameras.json                                # optional
+    │   └── _meta.json                                  # required
+    ├── models/_registered.json                         # external paths
+    └── sequences/<name>/
+        ├── frames/frame_NNNN.ply                       # required
+        ├── _meta.json                                  # required
+        └── recipe.json                                 # if source=sim
+
+`_meta.json` is read tolerantly (missing/corrupt -> None + warning); written
+atomically (tmp + replace) so a partial write can't poison the library.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, ClassVar, Optional
+
+from pydantic import BaseModel, Field
+
+from ..server import PKG_ROOT
+
+_log = logging.getLogger(__name__)
+
+LIBRARY_ROOT = PKG_ROOT / "work" / "library"
+MODELS_DIR = LIBRARY_ROOT / "models"
+SEQUENCES_DIR = LIBRARY_ROOT / "sequences"
+
+# Path to the small JSON index that tracks externally-registered models
+# (i.e. paths NOT physically inside MODELS_DIR — the user has a 3DGS dir
+# elsewhere on disk and just wants it visible in the library without copy).
+_REGISTERED_INDEX = MODELS_DIR / "_registered.json"
+
+_ITER_RE = re.compile(r"^iteration_(\d+)$")
+_FRAME_RE = re.compile(r"^frame_(\d+)\.ply$")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write `payload` as pretty-printed JSON via tmp + os.replace.
+
+    Atomic on the same filesystem; safe against partial writes that would
+    leave a half-written `_meta.json` and crash subsequent reads.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2))
+        os.replace(str(tmp), str(path))
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _read_meta_tolerant(path: Path) -> Optional[dict]:
+    """Read `_meta.json` returning a dict, or None on missing/corrupt.
+
+    Tolerance is the point: callers iterate over many entries, and a
+    single bad meta shouldn't crash the listing — just log and skip.
+    """
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        _log.warning("could not parse meta at %s: %s", path, e)
+        return None
+    if not isinstance(data, dict):
+        _log.warning("meta at %s is not a JSON object", path)
+        return None
+    return data
+
+
+def _check_coord(meta: dict, where: str) -> None:
+    """Validate `coord_convention == "z-up"`. Logs a warning if not, but
+    never rejects — migration tolerance: existing data may lack the
+    field; we treat absent-or-not-z-up as a soft signal, not a hard fail.
+    """
+    cc = meta.get("coord_convention")
+    if cc is not None and cc != "z-up":
+        _log.warning("%s has coord_convention=%r (expected z-up)", where, cc)
+
+
+# --- Pydantic shapes --------------------------------------------------------
+#
+# We use pydantic for validation only at the meta-write boundary. Internally
+# `Model` / `Sequence` are thin path+meta wrappers — the dataclass-style
+# instances the spec asks for. Pydantic gives us field-name validation
+# without forcing every consumer of `meta_dict()` to learn a new type.
+
+
+class _ModelMeta(BaseModel):
+    name: str
+    kind: str = Field(default="model")
+    source: str  # "upload" | "register" | "import"
+    source_path: Optional[str] = None
+    n_splats: Optional[int] = None
+    bbox: Optional[list[list[float]]] = None  # [[xmin,ymin,zmin],[xmax,ymax,zmax]]
+    coord_convention: str = Field(default="z-up")
+    imported_at: Optional[str] = None
+
+
+class _SequenceMeta(BaseModel):
+    name: str
+    kind: str = Field(default="sequence")
+    source: str  # "sim" | "import"
+    source_path: Optional[str] = None
+    model_ref: Optional[str] = None
+    frame_count: int = 0
+    fps_hint: int = 24
+    n_splats: Optional[int] = None
+    bbox_initial: Optional[list[list[float]]] = None
+    coord_convention: str = Field(default="z-up")
+    first_frame_full: bool = True
+    created_at: Optional[str] = None
+
+
+# --- Registered-externals index --------------------------------------------
+
+
+def _load_registered() -> list[dict]:
+    """Returns the list of registered external models (name, path).
+
+    Tolerant of a missing/corrupt index — that's user data we should never
+    crash on. Also drops legacy non-dict entries silently.
+    """
+    if not _REGISTERED_INDEX.is_file():
+        return []
+    try:
+        data = json.loads(_REGISTERED_INDEX.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        _log.warning("could not parse registered index: %s", e)
+        return []
+    if not isinstance(data, list):
+        return []
+    return [
+        x for x in data
+        if isinstance(x, dict) and "name" in x and "path" in x
+    ]
+
+
+def _save_registered(items: list[dict]) -> None:
+    _atomic_write_json(_REGISTERED_INDEX, items)
+
+
+def register_external(name: str, path: Path) -> None:
+    """Add (or refresh) an external model entry in the registered index."""
+    items = [x for x in _load_registered() if x.get("name") != name]
+    items.insert(0, {"name": name, "path": str(path)})
+    _save_registered(items)
+
+
+def unregister_external(name: str) -> bool:
+    items = _load_registered()
+    new = [x for x in items if x.get("name") != name]
+    if len(new) == len(items):
+        return False
+    _save_registered(new)
+    return True
+
+
+def get_registered_path(name: str) -> Optional[Path]:
+    """Resolve a registered-external name to its on-disk path, or None."""
+    for x in _load_registered():
+        if x.get("name") == name:
+            try:
+                return Path(x["path"])
+            except Exception:
+                return None
+    return None
+
+
+# --- Model -----------------------------------------------------------------
+
+
+class Model:
+    """A 3DGS model directory backed by `work/library/models/<name>/` (or
+    an external registered path). Thin wrapper: holds `name`, resolved
+    `path`, and `meta` (None if not yet written)."""
+
+    KIND: ClassVar[str] = "model"
+
+    def __init__(self, name: str, path: Path, meta: Optional[dict] = None):
+        self.name = name
+        self.path = path
+        self.meta = meta
+
+    # ---- discovery / construction ----
+
+    @classmethod
+    def _resolve_path(cls, name: str) -> Path:
+        """Map a name to its on-disk path. Internal layout wins over the
+        registered-externals index, so a name collision falls back to the
+        in-library copy (which the user has explicit control over)."""
+        local = MODELS_DIR / name
+        if local.is_dir():
+            return local
+        ext = get_registered_path(name)
+        if ext is not None and ext.is_dir():
+            return ext
+        # Default to the local path even if it doesn't exist yet — callers
+        # that need existence should ask `Model.exists(name)` first.
+        return local
+
+    @classmethod
+    def exists(cls, name: str) -> bool:
+        local = MODELS_DIR / name
+        if local.is_dir():
+            return True
+        ext = get_registered_path(name)
+        return ext is not None and ext.is_dir()
+
+    @classmethod
+    def load(cls, name: str) -> Optional["Model"]:
+        if not cls.exists(name):
+            return None
+        path = cls._resolve_path(name)
+        meta = _read_meta_tolerant(cls._meta_path_for(path))
+        if meta is not None:
+            _check_coord(meta, f"model {name}")
+        return cls(name=name, path=path, meta=meta)
+
+    @classmethod
+    def list(cls) -> list[str]:
+        """Return all known model names (internal + registered-external),
+        de-duplicated, internal copies preferred. Sorted lexicographically.
+        """
+        names: set[str] = set()
+        if MODELS_DIR.is_dir():
+            for child in MODELS_DIR.iterdir():
+                if child.is_dir() and not child.name.startswith("_"):
+                    names.add(child.name)
+        for entry in _load_registered():
+            n = entry.get("name")
+            p = entry.get("path")
+            if not n or not p:
+                continue
+            try:
+                if Path(p).is_dir():
+                    names.add(n)
+            except Exception:
+                continue
+        return sorted(names)
+
+    # ---- meta IO ----
+
+    @staticmethod
+    def _meta_path_for(model_dir: Path) -> Path:
+        """Return the meta file path for a model dir.
+
+        Inside the library we always write `_meta.json`. For an external
+        registered dir, we still prefer `_meta.json` at the root — but if
+        that fails (read-only mount), we fall back to `.gsfluent_meta.json`
+        as a sidecar. Read-side accepts either.
+        """
+        return model_dir / "_meta.json"
+
+    @classmethod
+    def write_meta(
+        cls,
+        name: str,
+        *,
+        source: str,
+        source_path: Optional[str] = None,
+        n_splats: Optional[int] = None,
+        bbox: Optional[list[list[float]]] = None,
+        coord_convention: str = "z-up",
+        imported_at: Optional[str] = None,
+        path: Optional[Path] = None,
+    ) -> Path:
+        """Write `_meta.json` for the model.
+
+        For registered externals, pass `path=` explicitly. The function
+        attempts the main meta path first; on PermissionError/OSError it
+        falls back to a sidecar (`<external>/.gsfluent_meta.json`).
+        Returns the path that was actually written.
+        """
+        target_dir = path if path is not None else MODELS_DIR / name
+        payload = _ModelMeta(
+            name=name,
+            kind="model",
+            source=source,
+            source_path=source_path,
+            n_splats=n_splats,
+            bbox=bbox,
+            coord_convention=coord_convention,
+            imported_at=imported_at or _now_iso(),
+        ).model_dump()
+        primary = cls._meta_path_for(target_dir)
+        try:
+            _atomic_write_json(primary, payload)
+            return primary
+        except (PermissionError, OSError) as e:
+            sidecar = target_dir / ".gsfluent_meta.json"
+            _log.warning(
+                "could not write %s (%s); falling back to sidecar %s",
+                primary, e, sidecar,
+            )
+            _atomic_write_json(sidecar, payload)
+            return sidecar
+
+    def meta_dict(self) -> dict:
+        """Frontend-facing dict. Always contains at least `name` + `path`
+        so the existing `ModelItem` type contract holds. Falls back to
+        synthesized fields if the on-disk meta is missing."""
+        if self.meta is not None:
+            d = dict(self.meta)
+        else:
+            d = {"name": self.name, "kind": self.KIND, "source": "unknown"}
+        d.setdefault("name", self.name)
+        d["path"] = str(self.path)
+        return d
+
+    # ---- delete ----
+
+    @classmethod
+    def delete(cls, name: str, *, unlink_only_if_registered: bool = True) -> bool:
+        """Remove a model from the library.
+
+        If the model is a registered external (path lives outside MODELS_DIR
+        and is in `_registered.json`), and `unlink_only_if_registered=True`,
+        we only drop the registry entry — never touch user files outside
+        our library root. For internal copies we shutil.rmtree the dir.
+        """
+        if not cls.exists(name):
+            return False
+        local = MODELS_DIR / name
+        is_internal = local.is_dir()
+        if is_internal:
+            try:
+                shutil.rmtree(local)
+            except OSError as e:
+                _log.warning("failed to delete model dir %s: %s", local, e)
+                return False
+            unregister_external(name)
+            return True
+        # External — only drop the registry entry; never delete user files.
+        if unlink_only_if_registered:
+            return unregister_external(name)
+        return unregister_external(name)
+
+    # ---- ply discovery ----
+
+    def highest_iteration_ply(self) -> Optional[Path]:
+        """Locate `<path>/point_cloud/iteration_<N>/point_cloud.ply` with
+        the highest N. Returns None if no candidate exists."""
+        pc_root = self.path / "point_cloud"
+        if not pc_root.is_dir():
+            return None
+        best: Optional[tuple[int, Path]] = None
+        for it in pc_root.iterdir():
+            if not it.is_dir():
+                continue
+            m = _ITER_RE.match(it.name)
+            if not m:
+                continue
+            ply = it / "point_cloud.ply"
+            if ply.is_file():
+                n = int(m.group(1))
+                if best is None or n > best[0]:
+                    best = (n, ply)
+        return None if best is None else best[1]
+
+
+# --- Sequence --------------------------------------------------------------
+
+
+class Sequence:
+    """A time-sampled .ply collection backed by
+    `work/library/sequences/<name>/frames/`."""
+
+    KIND: ClassVar[str] = "sequence"
+
+    def __init__(self, name: str, path: Path, meta: Optional[dict] = None):
+        self.name = name
+        self.path = path
+        self.meta = meta
+
+    # ---- discovery ----
+
+    @classmethod
+    def exists(cls, name: str) -> bool:
+        return (SEQUENCES_DIR / name).is_dir()
+
+    @classmethod
+    def load(cls, name: str) -> Optional["Sequence"]:
+        if not cls.exists(name):
+            return None
+        path = SEQUENCES_DIR / name
+        meta = _read_meta_tolerant(path / "_meta.json")
+        if meta is not None:
+            _check_coord(meta, f"sequence {name}")
+        return cls(name=name, path=path, meta=meta)
+
+    @classmethod
+    def list(cls) -> list[str]:
+        if not SEQUENCES_DIR.is_dir():
+            return []
+        out: list[str] = []
+        for child in SEQUENCES_DIR.iterdir():
+            if child.is_dir() and not child.name.startswith("_"):
+                out.append(child.name)
+        return sorted(out)
+
+    # ---- meta IO ----
+
+    @classmethod
+    def write_meta(
+        cls,
+        name: str,
+        *,
+        source: str,
+        source_path: Optional[str] = None,
+        model_ref: Optional[str] = None,
+        frame_count: int = 0,
+        fps_hint: int = 24,
+        n_splats: Optional[int] = None,
+        bbox_initial: Optional[list[list[float]]] = None,
+        coord_convention: str = "z-up",
+        first_frame_full: bool = True,
+        created_at: Optional[str] = None,
+    ) -> Path:
+        target_dir = SEQUENCES_DIR / name
+        payload = _SequenceMeta(
+            name=name,
+            kind="sequence",
+            source=source,
+            source_path=source_path,
+            model_ref=model_ref,
+            frame_count=frame_count,
+            fps_hint=fps_hint,
+            n_splats=n_splats,
+            bbox_initial=bbox_initial,
+            coord_convention=coord_convention,
+            first_frame_full=first_frame_full,
+            created_at=created_at or _now_iso(),
+        ).model_dump()
+        meta_path = target_dir / "_meta.json"
+        _atomic_write_json(meta_path, payload)
+        return meta_path
+
+    def meta_dict(self) -> dict:
+        if self.meta is not None:
+            d = dict(self.meta)
+        else:
+            d = {"name": self.name, "kind": self.KIND, "source": "unknown"}
+        d.setdefault("name", self.name)
+        d["path"] = str(self.path)
+        return d
+
+    # ---- frames ----
+
+    def frames_dir(self) -> Path:
+        return self.path / "frames"
+
+    def frame_paths(self) -> list[Path]:
+        """Sorted list of frame_NNNN.ply paths. Sort key is the integer
+        frame index parsed from the filename — lexicographic order would
+        put frame_10 before frame_2 and break playback."""
+        d = self.frames_dir()
+        if not d.is_dir():
+            return []
+        out: list[tuple[int, Path]] = []
+        for p in d.iterdir():
+            if not p.is_file():
+                continue
+            m = _FRAME_RE.match(p.name)
+            if m:
+                out.append((int(m.group(1)), p))
+        out.sort(key=lambda t: t[0])
+        return [p for _, p in out]
+
+    def frame_count(self) -> int:
+        return len(self.frame_paths())
+
+    def is_live(self) -> bool:
+        """True iff a writer process is still appending frames.
+
+        Phase 1: always returns False. Live-sim wiring (the runner-driven
+        per-sequence flag) is Phase 2's responsibility.
+        """
+        return False
+
+    # ---- delete ----
+
+    @classmethod
+    def delete(cls, name: str) -> bool:
+        if not cls.exists(name):
+            return False
+        target = SEQUENCES_DIR / name
+        try:
+            shutil.rmtree(target)
+        except OSError as e:
+            _log.warning("failed to delete sequence dir %s: %s", target, e)
+            return False
+        return True
+
+
+# --- helpers shared with migration / endpoints ------------------------------
+
+
+def read_ply_bbox_and_count(ply_path: Path) -> tuple[Optional[int], Optional[list[list[float]]]]:
+    """Read a .ply and return (n_splats, bbox). Tolerant of unreadable
+    files — returns (None, None) on any failure so callers can degrade
+    gracefully (the meta still gets written, just without these fields).
+    """
+    try:
+        from plyfile import PlyData
+        import numpy as np
+
+        v = PlyData.read(str(ply_path))["vertex"].data
+        n = int(v.shape[0])
+        x = np.asarray(v["x"], dtype=np.float64)
+        y = np.asarray(v["y"], dtype=np.float64)
+        z = np.asarray(v["z"], dtype=np.float64)
+        if n == 0:
+            return n, None
+        bbox = [
+            [float(x.min()), float(y.min()), float(z.min())],
+            [float(x.max()), float(y.max()), float(z.max())],
+        ]
+        return n, bbox
+    except Exception as e:
+        _log.warning("could not read bbox/count from %s: %s", ply_path, e)
+        return None, None
