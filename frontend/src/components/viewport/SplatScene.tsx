@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { useStore } from "@/lib/store";
 
 /**
@@ -66,11 +67,17 @@ export function SplatScene() {
   // Auto-fit the camera to the model's bbox on first frame.
   const { camera, controls } = useThree() as unknown as {
     camera: THREE.PerspectiveCamera;
-    controls: any;  // OrbitControls instance from drei (makeDefault)
+    controls: OrbitControlsImpl | null;  // wired by drei <OrbitControls makeDefault>
   };
 
   useEffect(() => {
     if (!built) return;
+    // OrbitControls (set via makeDefault) becomes available a tick after
+    // mount; if we run auto-fit before then we'd update camera.position
+    // but never controls.target, and OrbitControls.update() each frame
+    // would yank the camera back toward its default target (world origin).
+    // Skip until controls is wired; effect re-runs on the controls dep.
+    if (!controls) return;
     if (fittedFor.current === staticAttrs) return;
     const f0 = frameXyz.get(0);
     if (!f0 || f0.length !== built.positions.length) return;
@@ -91,7 +98,8 @@ export function SplatScene() {
 
     // Place the camera 1.5× the diagonal away from the center, looking down
     // and at an angle so we see all three axes. Z-up world: position above-
-    // and-to-the-side of the centroid.
+    // and-to-the-side of the centroid. Up-axis itself is owned by
+    // <UpAxisSync> in Viewport — it's invariant of staticAttrs timing.
     const camPos = center.clone().add(
       new THREE.Vector3(diag * 1.0, diag * 1.0, diag * 0.7)
     );
@@ -107,10 +115,9 @@ export function SplatScene() {
     camera.updateProjectionMatrix();
     camera.lookAt(center);
 
-    if (controls && typeof controls.target?.copy === "function") {
-      controls.target.copy(center);
-      controls.update?.();
-    }
+    if (typeof controls.target?.copy !== "function") return;
+    controls.target.copy(center);
+    controls.update?.();
 
     // Bbox-derived point size: 0.4% of the diagonal. Scale-invariant — works
     // for a 30-unit-diag building or a 30,000-unit-diag city. Tuned so a
@@ -120,16 +127,22 @@ export function SplatScene() {
 
     // Publish sceneScale + center so the Grid can scale to match.
     useStore.getState().setSceneScale(diag, [center.x, center.y, center.z]);
+    // Publish the bbox bottom (world Z) so the Grid sits underneath the
+    // model. Using bbox.min.z instead of 0 ensures the grid acts as a
+    // floor — visible from above even when the model has negative-Z extent.
+    useStore.getState().setSceneFloor(bbox.min.z);
 
     fittedFor.current = staticAttrs;
-    // eslint-disable-next-line no-console
-    console.log("[SplatScene] auto-fit camera:", {
-      n: built.n,
-      center: center.toArray(),
-      size: size.toArray(),
-      diag,
-      pointSize: newPointSize,
-    });
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.log("[SplatScene] auto-fit camera:", {
+        n: built.n,
+        center: center.toArray(),
+        size: size.toArray(),
+        diag,
+        pointSize: newPointSize,
+      });
+    }
   }, [built, frameXyz, staticAttrs, camera, controls]);
 
   // Per render: advance frame + update buffer in place.
@@ -152,7 +165,15 @@ export function SplatScene() {
   if (!built) return null;
 
   return (
-    <points key={built.n /* force remount when model changes */}>
+    // frustumCulled={false}: the geometry's boundingSphere is computed from
+    // the INITIAL position buffer (all zeros — at world origin, radius 0)
+    // and is NOT recomputed when we mutate positions in useFrame. So with
+    // culling enabled, Three.js drops the whole point cloud whenever world
+    // origin is outside the view frustum — which is most of the time for
+    // models living at large world coords like (3460, 29045, 5). Disabling
+    // is the cheap, correct fix for our case (~200k-700k points always
+    // intended to be visible when in viewport).
+    <points key={built.n /* force remount when model changes */} frustumCulled={false}>
       <bufferGeometry>
         <bufferAttribute
           ref={positionsRef}
