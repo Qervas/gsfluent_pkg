@@ -1,4 +1,5 @@
 import { useEffect, useCallback, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { AppShell, type AppShellHandle } from "@/components/layout/AppShell";
 import { FullWorkspaceShell } from "@/components/layout/FullWorkspaceShell";
 import { Outliner } from "@/components/outliner/Outliner";
@@ -12,6 +13,7 @@ import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 import { useShortcuts } from "@/lib/use-shortcuts";
 import { api } from "@/lib/api";
+import type { SequenceItem } from "@/lib/types";
 
 export default function App() {
   const client = useStreamClient();
@@ -19,11 +21,34 @@ export default function App() {
   const activeModel = useStore((s) => s.activeModel);
   const setSimState = useStore((s) => s.setSimState);
   const activeWorkspace = useStore((s) => s.activeWorkspace);
+  const simRunName = useStore((s) => s.simRunName);
+  const setFpsHint = useStore((s) => s.setFpsHint);
   const shellRef = useRef<AppShellHandle>(null);
 
   useEffect(() => {
     client.connect();
   }, [client]);
+
+  // Phase 3: keep fpsHint in sync with the active sequence's _meta.json
+  // value. We subscribe to the same cached `["sequences"]` query the
+  // SequenceTree uses, so this is essentially free — no extra fetches.
+  // Falls back to 24 fps when the active run isn't a known sequence
+  // (model preview, mid-load before the list arrives).
+  const { data: sequences = [] } = useQuery({
+    queryKey: ["sequences"],
+    queryFn: api.sequences.list,
+    refetchInterval: 5_000,
+  });
+  useEffect(() => {
+    if (!simRunName) {
+      setFpsHint(24);
+      return;
+    }
+    const seq = (sequences as SequenceItem[]).find(
+      (s) => s.name === simRunName,
+    );
+    setFpsHint(seq?.fps_hint ?? 24);
+  }, [simRunName, sequences, setFpsHint]);
 
   // When the user picks a model in the Outliner, render its static ply
   // as a single-frame snapshot. The run-status UI shouldn't claim a sim
