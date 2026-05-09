@@ -25,7 +25,12 @@ GSFLUENT_ENV="${GSFLUENT_ENV:-mpm}"
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R7_DIR="$(cd "$TOOLS_DIR/.." && pwd)"
 RECIPES_DIR="$TOOLS_DIR/recipes"
-VK_PLYS_DIR="$R7_DIR/vk_plys"
+# Fused output goes to work/fused/<run_name>/ — the canonical run dir
+# where runner.py also writes manifest.json + run.log. Keeping all per-run
+# artifacts in one directory means the WS pump finds frames + manifest +
+# logs in the same place. (vk_plys/ used to be the destination but the
+# split caused the workbench to subscribe and find no frames.)
+VK_PLYS_DIR="$R7_DIR/work/fused"
 DRY_RUN=0
 SKIP_FUSE=0
 SKIP_VKGS_CMD=0
@@ -138,7 +143,15 @@ fi
 
 SIM_OUTPUT_DIR="$GSFLUENT_HOME/output/$OUTPUT_NAME"
 SIM_PLY_DIR="$SIM_OUTPUT_DIR/simulation_ply"
-FUSED_DIR="$VK_PLYS_DIR/$OUTPUT_NAME"
+# Phase-1 library layout: fused frames now land at
+#   work/library/sequences/<run>/frames/frame_*.ply
+# alongside _meta.json (and recipe.json copied from CONFIG_PATH).
+# The legacy work/fused/<run>/ dir is still where runner.py writes
+# manifest.json + run.log; we copy manifest into the library at the
+# end of the run for the history endpoint to merge.
+LIBRARY_SEQ_DIR="$R7_DIR/work/library/sequences/$OUTPUT_NAME"
+LEGACY_FUSED_DIR="$VK_PLYS_DIR/$OUTPUT_NAME"
+FUSED_DIR="$LIBRARY_SEQ_DIR/frames"
 
 # --- print plan --------------------------------------------------------------
 if [[ $LIVE -eq 1 && $BENCH -eq 1 ]]; then
@@ -191,6 +204,14 @@ else
 fi
 
 mkdir -p "$SIM_OUTPUT_DIR"
+mkdir -p "$LIBRARY_SEQ_DIR" "$FUSED_DIR"
+# Preserve the recipe early (before sim) so a crash doesn't lose it.
+# Copy CONFIG_PATH (the recipe the user invoked) verbatim into the
+# library entry as recipe.json.
+if [[ $DRY_RUN -eq 0 && -f "$CONFIG_PATH" ]]; then
+    cp -f "$CONFIG_PATH" "$LIBRARY_SEQ_DIR/recipe.json" || \
+        echo "WARN: could not copy recipe to $LIBRARY_SEQ_DIR/recipe.json" >&2
+fi
 [[ $LIVE -eq 1 ]] && mkdir -p "$SIM_PLY_DIR" "$FUSED_DIR"
 
 # --- live mode: spin up watchers BEFORE sim ---------------------------------
@@ -201,7 +222,15 @@ cleanup_live() {
         kill "$FUSE_PID" 2>/dev/null || true
         wait "$FUSE_PID" 2>/dev/null || true
     fi
-    [[ -n "$VKGS_PID" ]] && echo "[live] vkgs (pid $VKGS_PID) left running — close the window to exit it."
+    if [[ -n "$VKGS_PID" ]]; then
+        echo "[live] vkgs (pid $VKGS_PID) left running — close the window to exit it."
+    fi
+    # Force a successful exit status — the EXIT trap inherits the last
+    # statement's exit code under `set -e`, and a `[[ -n "" ]]` short-
+    # circuit (when VKGS_PID is empty under --no-vkgs-launch) returns 1,
+    # poisoning the wrapper's exit code and making runner.py mark the
+    # run as "error" despite a clean simulation. Always return 0.
+    return 0
 }
 if [[ $LIVE -eq 1 && $DRY_RUN -eq 0 ]]; then
     trap cleanup_live EXIT INT TERM
@@ -220,12 +249,26 @@ if [[ $LIVE -eq 1 && $DRY_RUN -eq 0 ]]; then
         VKGS_PID=$!
         echo "[live] vkgs pid: $VKGS_PID  (log: $SIM_OUTPUT_DIR/vkgs.log)"
     fi
+    # Extract frame_num from the recipe so fuse can exit as soon as it has
+    # produced that many frames — without this, fuse sits idle on its 600s
+    # watch_quiet_seconds timer after the sim is done, blocking sim_one.sh's
+    # step 2/3 wait. Falls back to 0 (= no limit, watch_quiet_seconds applies).
+    EXPECTED_FRAMES=$(python -c "import json,sys; print(json.load(open('$CONFIG_PATH')).get('frame_num', 0))" 2>/dev/null || echo 0)
+    # Process substitution: fuse stdout/stderr is teed to fuse.log AND
+    # piped through sed (line-buffered with -u) to prefix every line with
+    # "[fuse] " before it hits the wrapper's stdout. The wrapper's stdout
+    # is captured by the workbench's log pump, so fuse activity is now
+    # visible in the React console live as frames are produced.
+    # `$!` correctly returns python's PID (not tee/sed) because process
+    # substitution attaches to python via FD redirection, not pipeline.
     python "$TOOLS_DIR/fuse_to_full_ply.py" \
         --reference_ply "$REFERENCE_PLY" \
         --sim_dir "$SIM_PLY_DIR" \
         --out_dir "$FUSED_DIR" \
-        --watch --watch_quiet_seconds 600 \
-        > "$SIM_OUTPUT_DIR/fuse.log" 2>&1 &
+        --watch --watch_quiet_seconds 30 \
+        --max_frames "$EXPECTED_FRAMES" \
+        --xyz_only_after_first \
+        > >(tee "$SIM_OUTPUT_DIR/fuse.log" | sed -u 's/^/[fuse] /') 2>&1 &
     FUSE_PID=$!
     echo "[live] fuse pid: $FUSE_PID  (log: $SIM_OUTPUT_DIR/fuse.log)"
     echo "[live] both watching $FUSED_DIR — sim starts now"
@@ -292,6 +335,75 @@ Or to compare with other cells in $VK_PLYS_DIR:
         --cells_dir $VK_PLYS_DIR
 
 EOF
+fi
+
+# --- finalize: write library/sequences/<run>/_meta.json ----------------------
+# Computes n_splats and bbox_initial from frame_0000.ply, infers model_ref
+# from the model dir name. Best-effort: a write failure here doesn't fail
+# the sim — frames + recipe.json are already on disk and reach playback.
+if [[ $DRY_RUN -eq 0 && $BENCH -eq 0 ]]; then
+    MODEL_NAME="$(basename "$MODEL_PATH")"
+    python - "$LIBRARY_SEQ_DIR" "$MODEL_NAME" "$OUTPUT_NAME" <<'PY' || \
+        echo "WARN: failed to write library _meta.json" >&2
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+seq_dir = Path(sys.argv[1])
+model_ref = sys.argv[2]
+name = sys.argv[3]
+
+frames_dir = seq_dir / "frames"
+frames = sorted(frames_dir.glob("frame_*.ply")) if frames_dir.is_dir() else []
+frame_count = len(frames)
+
+n_splats = None
+bbox = None
+if frames:
+    try:
+        from plyfile import PlyData
+        v = PlyData.read(str(frames[0]))["vertex"].data
+        n_splats = int(v.shape[0])
+        if n_splats > 0:
+            xs = v["x"].astype(float)
+            ys = v["y"].astype(float)
+            zs = v["z"].astype(float)
+            bbox = [
+                [float(xs.min()), float(ys.min()), float(zs.min())],
+                [float(xs.max()), float(ys.max()), float(zs.max())],
+            ]
+    except Exception as e:
+        sys.stderr.write(f"WARN: bbox/count read failed: {e}\n")
+
+payload = {
+    "name": name,
+    "kind": "sequence",
+    "source": "sim",
+    "source_path": None,
+    "model_ref": model_ref,
+    "frame_count": frame_count,
+    "fps_hint": 24,
+    "n_splats": n_splats,
+    "bbox_initial": bbox,
+    "coord_convention": "z-up",
+    "first_frame_full": True,
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+meta_path = seq_dir / "_meta.json"
+tmp = meta_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(payload, indent=2))
+tmp.replace(meta_path)
+print(f"wrote {meta_path}")
+PY
+
+    # Copy manifest.json from the runner's location into the library entry
+    # so /api/runs/history can merge particles + recipe_source + status
+    # alongside _meta.json. Best-effort; a sim launched outside the runner
+    # (no runner-written manifest) just skips this step.
+    if [[ -f "$LEGACY_FUSED_DIR/manifest.json" ]]; then
+        cp -f "$LEGACY_FUSED_DIR/manifest.json" "$LIBRARY_SEQ_DIR/manifest.json" 2>/dev/null || true
+    fi
 fi
 
 echo ""
