@@ -503,6 +503,22 @@ class Sequence:
         """
         return False
 
+    @property
+    def is_broken(self) -> bool:
+        """True iff `frames/` is a symlink whose target no longer exists.
+
+        Sim-produced sequences (where `frames/` is a real directory) are
+        never broken — only symlinked imports become broken when the user
+        moves or deletes the source folder.
+        """
+        frames = self.path / "frames"
+        if not frames.is_symlink():
+            return False
+        try:
+            return not frames.resolve(strict=False).exists()
+        except OSError:
+            return True
+
     # ---- delete ----
 
     @classmethod
