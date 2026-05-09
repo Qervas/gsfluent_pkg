@@ -33,9 +33,10 @@ export const api = {
   },
   models: {
     list: () => fetch("/api/models").then(j<ModelItem[]>),
-    upload: (file: File) => {
+    upload: (ply: File, camerasJson?: File) => {
       const fd = new FormData();
-      fd.append("file", file);
+      fd.append("ply", ply);
+      if (camerasJson) fd.append("cameras_json", camerasJson);
       return fetch("/api/models/upload", { method: "POST", body: fd }).then(j<ModelItem>);
     },
     register: (path: string) =>
@@ -64,6 +65,10 @@ export const api = {
       fetch(`/api/runs/${encodeURIComponent(id)}`, { method: "DELETE" }).then(
         j<{ status: string }>,
       ),
+    deleteHistory: (run_name: string) =>
+      fetch(`/api/runs/history/${encodeURIComponent(run_name)}`, {
+        method: "DELETE",
+      }).then(j<{ deleted: string }>),
   },
   schemas: {
     boundaries: () => fetch("/api/schemas/boundaries").then(j<BCSchemas>),

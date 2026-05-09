@@ -6,13 +6,16 @@ import { useStore } from "@/lib/store";
 /**
  * Window-level drag-drop overlay for .ply uploads.
  *
+ * Accepts a single .ply file, optionally accompanied by a cameras.json
+ * dropped together in the same drag. If cameras.json is omitted a
+ * synthetic placeholder is generated server-side from the ply bbox.
+ *
  * Listens on `window` for dragover/dragleave/drop so the user can drop
  * anywhere in the app, not just on the viewport. While a drag is in
  * progress, the component renders a translucent cyan overlay across
- * the viewport with a "Drop .ply to upload" hint. On drop, the .ply
- * is uploaded via api.models.upload, the resulting model is set
- * active in the store, and the models query is invalidated so the
- * Outliner refreshes.
+ * the viewport with a hint. On drop the files are uploaded via
+ * api.models.upload, the resulting model is set active in the store,
+ * and the models query is invalidated so the Outliner refreshes.
  */
 export function DropZone() {
   const [isOver, setIsOver] = useState(false);
@@ -46,15 +49,17 @@ export function DropZone() {
       dragCounter = 0;
       setIsOver(false);
       setError(null);
-      const f = e.dataTransfer?.files?.[0];
-      if (!f) return;
-      if (!f.name.toLowerCase().endsWith(".ply")) {
-        setError(`expected .ply, got ${f.name}`);
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (files.length === 0) return;
+      const ply = files.find((f) => f.name.toLowerCase().endsWith(".ply"));
+      const cam = files.find((f) => f.name.toLowerCase() === "cameras.json");
+      if (!ply) {
+        setError(`expected a .ply file, got ${files.map((f) => f.name).join(", ")}`);
         setTimeout(() => setError(null), 4000);
         return;
       }
       try {
-        const m = await api.models.upload(f);
+        const m = await api.models.upload(ply, cam);
         setActiveModel(m);
         qc.invalidateQueries({ queryKey: ["models"] });
       } catch (e) {
@@ -89,7 +94,9 @@ export function DropZone() {
 
   return (
     <div className="absolute inset-0 bg-accent/10 border-2 border-accent border-dashed rounded pointer-events-none flex items-center justify-center backdrop-blur-sm">
-      <div className="text-accent font-medium text-sm">Drop .ply to upload</div>
+      <div className="text-accent font-medium text-sm">
+        Drop .ply (optionally with cameras.json) to upload
+      </div>
     </div>
   );
 }
