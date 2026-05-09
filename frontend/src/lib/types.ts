@@ -19,6 +19,23 @@ export type HistoryEntry = {
   recipe_source?: string;
 };
 
+// Library sequence — both sim-produced (source="sim") and externally
+// imported (source="import") variants share this shape. Mirrors the
+// dict returned by /api/sequences and /api/sequences/import.
+export type SequenceItem = {
+  name: string;
+  source: "sim" | "import" | string;
+  source_path?: string | null;
+  model_ref?: string | null;
+  frame_count: number;
+  fps_hint: number;
+  n_splats: number | null;
+  coord_convention: "z-up";
+  first_frame_full: boolean;
+  is_broken: boolean;
+  created_at: string | null;
+};
+
 export type StaticAttrs = {
   n: number;
   R: Float32Array;       // (n, 3, 3)
