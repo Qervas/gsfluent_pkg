@@ -17,10 +17,11 @@ import { useStore } from "@/lib/store";
  *      lib's GPU sort is forced to refresh after each upload so depth
  *      ordering tracks the new geometry.
  *
- * Coordinate system: render in the .ply's native frame, no per-mesh
- * rotation. Our captures bake gravity into +Z, so Viewport's <UpAxisSync>
- * sets camera.up = (0,0,1) and the grid lies on XY. Earlier code defaulted
- * to Y-up which made Z-up buildings render lying on their side.
+ * Coordinate system: world is Z-up (set by <UpAxisSync> in Viewport).
+ *   - Static model .ply is COLMAP-native (+Y down): the mesh is rotated
+ *     by Rx(-π/2) on load to match the WS pump's points-mode rotation.
+ *   - Sim mode bootstraps from frame/0.ply and streams xyz, both already
+ *     in sim Z-up world coords — no mesh rotation, identity transform.
  */
 export function GaussianSplatScene() {
   const activeModel = useStore((s) => s.activeModel);
@@ -90,13 +91,27 @@ export function GaussianSplatScene() {
         if (!mesh) return;
         mesh.frustumCulled = false;
 
-        // Sample splat centers (raw, COLMAP coords) for camera framing.
+        // Static-model .ply is COLMAP-native (+Y points DOWN). Apply the
+        // same Rx(-π/2) the WS pump applies to xyz for points mode (see
+        // ws.ts:117-128). Sim mode skips this rotation: its bootstrap
+        // .ply and per-frame xyz are both already in Z-up sim world
+        // coords, so rotating the mesh would double-rotate everything.
+        if (!isSimRun) {
+          mesh.rotation.x = -Math.PI / 2;
+          mesh.updateMatrixWorld(true);
+        }
+
+        // Sample splat centers in WORLD space (post-rotation) so the bbox
+        // matches what the user sees. Sampling in mesh-local would put
+        // the camera in the wrong place after rotation — that's the
+        // "silent invisibility" trap earlier comments warned about.
         const n = mesh.getSplatCount();
         const bbox = new THREE.Box3();
         const c = new THREE.Vector3();
         const stride = Math.max(1, Math.floor(n / 5000));
         for (let i = 0; i < n; i += stride) {
           mesh.getSplatCenter(i, c);
+          c.applyMatrix4(mesh.matrixWorld);
           bbox.expandByPoint(c);
         }
         if (bbox.isEmpty()) return;
