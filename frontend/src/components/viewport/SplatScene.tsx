@@ -22,13 +22,10 @@ export function SplatScene() {
   const staticAttrs = useStore((s) => s.staticAttrs);
   const frameXyz = useStore((s) => s.frameXyz);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
-  const playing = useStore((s) => s.playing);
-  const setCurrentFrame = useStore((s) => s.setCurrentFrame);
 
   // We snap the camera ONCE per (staticAttrs identity) — track via ref.
   const fittedFor = useRef<unknown>(null);
   const positionsRef = useRef<THREE.BufferAttribute | null>(null);
-  const lastAdvance = useRef<number>(0);
 
   // Build buffers when staticAttrs changes. Point size is computed AFTER the
   // first frame arrives (in the auto-fit effect below) — derived from the
@@ -145,17 +142,12 @@ export function SplatScene() {
     }
   }, [built, frameXyz, staticAttrs, camera, controls]);
 
-  // Per render: advance frame + update buffer in place.
-  useFrame(({ clock }) => {
+  // Per render: copy the current frame's xyz into the position buffer.
+  // The frame-advance logic itself moved to <PlaybackDriver/> in Phase 3
+  // — this loop is now purely a data-pump: read currentFrameIdx, write
+  // bytes. Both points and splat renderers read the SAME store value.
+  useFrame(() => {
     if (!built) return;
-    if (playing && frameXyz.size > 1) {
-      const now = clock.elapsedTime;
-      if (now - lastAdvance.current > 1 / 24) {
-        const next = (currentFrameIdx + 1) % frameXyz.size;
-        setCurrentFrame(next);
-        lastAdvance.current = now;
-      }
-    }
     const xyz = frameXyz.get(currentFrameIdx);
     if (!xyz || xyz.length !== built.positions.length) return;
     built.positions.set(xyz);

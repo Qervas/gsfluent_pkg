@@ -11,6 +11,9 @@ import { EmptyState } from "./EmptyState";
 import { DropZone } from "./DropZone";
 import { RenderModeToggle } from "./RenderModeToggle";
 import { FpsIndicator } from "./FpsIndicator";
+import { PlaybackDriver } from "./PlaybackDriver";
+import { PlaybackBar } from "./PlaybackBar";
+import { PlaybackKeybinds } from "./PlaybackKeybinds";
 
 /**
  * Single source of truth for camera.up. Both modes are Z-up: our team's
@@ -103,6 +106,11 @@ export function Viewport() {
           />
         </GizmoHelper>
         <UpAxisSync />
+        {/* Phase 3 single-source frame advance loop. Mounts inside <Canvas>
+            so it shares R3F's clock with the renderers, but is independent
+            of which renderer is active — both points and splat read the
+            same currentFrameIdx that this driver mutates. */}
+        <PlaybackDriver />
         {/* In-place mode swap: same canvas, same camera, same world.
             Grid + gizmo + controls stay; only the data renderer changes. */}
         {staticAttrs && effectiveMode === "points" && <SplatScene />}
@@ -112,6 +120,8 @@ export function Viewport() {
       <DropZone />
       <RenderModeToggle splatAvailable={splatAvailable} />
       <FpsIndicator />
+      <PlaybackBar />
+      <PlaybackKeybinds />
     </div>
   );
 }
