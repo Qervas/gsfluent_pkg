@@ -17,9 +17,10 @@ import { useStore } from "@/lib/store";
  *      lib's GPU sort is forced to refresh after each upload so depth
  *      ordering tracks the new geometry.
  *
- * Coordinate system: COLMAP-native (Y-up), no per-mesh rotation. Earlier
- * Z-up rotation attempts caused silent invisibility — this matches the
- * working splat-test.html config. Viewport flips R3F camera.up alongside.
+ * Coordinate system: render in the .ply's native frame, no per-mesh
+ * rotation. Our captures bake gravity into +Z, so Viewport's <UpAxisSync>
+ * sets camera.up = (0,0,1) and the grid lies on XY. Earlier code defaulted
+ * to Y-up which made Z-up buildings render lying on their side.
  */
 export function GaussianSplatScene() {
   const activeModel = useStore((s) => s.activeModel);
@@ -117,9 +118,11 @@ export function GaussianSplatScene() {
           });
         }
 
-        // Camera framing. Up-axis is owned by <UpAxisSync> in Viewport.
+        // Camera framing. Up-axis is owned by <UpAxisSync> in Viewport
+        // (Z-up). Position above-and-to-the-side of the centroid so all
+        // three axes are visible — same recipe as SplatScene's auto-fit.
         camera.position.copy(
-          center.clone().add(new THREE.Vector3(diag, diag * 0.5, diag)),
+          center.clone().add(new THREE.Vector3(diag * 1.0, diag * 1.0, diag * 0.7)),
         );
         camera.near = Math.max(diag * 0.001, 0.01);
         camera.far = Math.max(diag * 100, camera.position.length() * 2);
@@ -130,7 +133,8 @@ export function GaussianSplatScene() {
           controls.update?.();
         }
         setSceneScale(diag, [center.x, center.y, center.z]);
-        setSceneFloor(bbox.min.y);
+        // Z-up world: floor sits at bbox.min along Z.
+        setSceneFloor(bbox.min.z);
 
         setSplatMesh(mesh);
       })
