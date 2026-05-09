@@ -4,6 +4,7 @@ import type {
   ModelItem,
   HistoryEntry,
   RunStatus,
+  SequenceItem,
   BCSchemas,
   MaterialDefaults,
 } from "./types";
@@ -73,5 +74,18 @@ export const api = {
   schemas: {
     boundaries: () => fetch("/api/schemas/boundaries").then(j<BCSchemas>),
     materials:  () => fetch("/api/schemas/materials").then(j<MaterialDefaults>),
+  },
+  sequences: {
+    list: () => fetch("/api/sequences").then(j<SequenceItem[]>),
+    import: (folder_path: string, name?: string) =>
+      fetch("/api/sequences/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder_path, name }),
+      }).then(j<SequenceItem>),
+    delete: (name: string) =>
+      fetch(`/api/sequences/${encodeURIComponent(name)}`, { method: "DELETE" }).then(
+        j<{ deleted: string }>,
+      ),
   },
 };
