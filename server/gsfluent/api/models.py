@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -20,6 +20,7 @@ def list_endpoint():
 async def upload(
     ply: UploadFile = File(..., description=".ply file"),
     cameras_json: UploadFile | None = File(None, description="optional cameras.json"),
+    convert_y_up: bool = Form(False, description="rewrite Y-up source to Z-up at import"),
 ):
     if not (ply.filename or "").lower().endswith(".ply"):
         raise HTTPException(422, "ply field must be a .ply file")
@@ -41,21 +42,36 @@ async def upload(
         if not isinstance(parsed, list):
             raise HTTPException(422, "cameras.json must be a JSON list")
 
-    name, path = m.wrap_ply_upload(ply.filename, content, cam_bytes)
+    try:
+        name, path = m.wrap_ply_upload(
+            ply.filename, content, cam_bytes, convert_y_up=convert_y_up,
+        )
+    except Exception as e:
+        msg = str(e)
+        # plyfile parse errors during the conversion pass: client should
+        # see a 422 not 500 — the bytes they uploaded weren't a valid ply.
+        if convert_y_up and ("ply" in msg.lower() or "header" in msg.lower()):
+            raise HTTPException(422, f"failed to parse ply for conversion: {msg}")
+        raise
     return {"name": name, "path": str(path)}
 
 
 class RegisterRequest(BaseModel):
     path: str
+    convert_y_up: bool = False
 
 
 @router.post("/register")
 async def register(req: RegisterRequest):
     try:
-        name, path = m.register_local_model(Path(req.path))
+        name, path, mode = m.register_local_model(
+            Path(req.path), convert_y_up=req.convert_y_up,
+        )
     except FileNotFoundError as e:
         raise HTTPException(422, str(e))
-    return {"name": name, "path": str(path)}
+    except FileExistsError as e:
+        raise HTTPException(409, str(e))
+    return {"name": name, "path": str(path), "mode": mode}
 
 
 _ITER_RE = re.compile(r"^iteration_(\d+)$")
