@@ -20,11 +20,23 @@ Method:
 import argparse
 import os
 import re
+import sys
 import time
 from pathlib import Path
 import numpy as np
 from plyfile import PlyData, PlyElement
 from scipy.spatial import cKDTree
+
+# Make `gsfluent` importable when this script runs from a checkout without
+# pip install. Mirrors the pattern in tools/migrate_to_library.py.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT / "server") not in sys.path:
+    sys.path.insert(0, str(_ROOT / "server"))
+
+from gsfluent.core.coord_convert import (  # noqa: E402
+    rotate_normals_y_up_to_z_up as _rotate_norm,
+    rotate_quaternions_y_up_to_z_up as _rotate_quat,
+)
 
 
 _SIM_RE = re.compile(r"sim_(\d+)\.ply$")
@@ -35,19 +47,63 @@ def _sim_idx(path):
     return int(m.group(1)) if m else None
 
 
-def _write_frame_atomic(static_attrs, kept_sim_idx, sim_xyz, args, out_path, text_mode):
-    """Write a fused frame ply atomically (tmp + rename so vkgs --watch_dir
-    polling never sees a partially-written file)."""
-    out = static_attrs.copy()
-    sx = sim_xyz[kept_sim_idx, 0]
-    sy = sim_xyz[kept_sim_idx, 1]
-    sz = sim_xyz[kept_sim_idx, 2]
+def _transform_sim_xyz(sim_xyz, args):
+    """Apply --center_at_origin shift + --zup_to_yup permutation to sim
+    positions. Returns (n, 3) array in the final output coord system."""
+    sx = sim_xyz[:, 0].astype(np.float32, copy=True)
+    sy = sim_xyz[:, 1].astype(np.float32, copy=True)
+    sz = sim_xyz[:, 2].astype(np.float32, copy=True)
     if args.center_at_origin:
-        sx = sx - 1.0; sy = sy - 1.0; sz = sz - 0.5
+        sx -= 1.0; sy -= 1.0; sz -= 0.5
     if args.zup_to_yup:
-        out["x"] = sx; out["y"] = sz; out["z"] = -sy
-    else:
-        out["x"] = sx; out["y"] = sy; out["z"] = sz
+        return np.stack([sx, sz, -sy], axis=1)
+    return np.stack([sx, sy, sz], axis=1)
+
+
+def _write_frame_atomic(full_attrs, nn_idx, kept_sim_idx, sim_xyz, args, out_path, text_mode):
+    """Write a fused frame ply atomically (tmp + rename so vkgs --watch_dir
+    polling never sees a partially-written file).
+
+    `full_attrs` is the FULL reference splat array (n_ref splats, with
+    scale/rotation/normal permutations already applied and rest positions
+    pre-baked). For each frame we copy it and overlay the moving subset's
+    positions on the reference indices that the sim particles claimed
+    (`nn_idx`). Reference splats outside `sim_area` keep their rest
+    positions, so the output ply contains the WHOLE building per frame.
+
+    Frame 0 is always the FULL ply (~161 MB for 683k splats) — needed by
+    the workbench splat-mode bootstrap and any external viewers like vkgs
+    that read all attrs once. Frames 1+ are xyz-only (~8 MB) when
+    `args.xyz_only_after_first` is set: the WS pump only reads x/y/z
+    per frame, and the in-browser splat mesh's static attrs come from
+    frame 0. 20× disk savings, no quality loss for the workbench path."""
+    out = full_attrs.copy()
+    sim_kept_xyz = _transform_sim_xyz(sim_xyz[kept_sim_idx], args)
+    out["x"][nn_idx] = sim_kept_xyz[:, 0]
+    out["y"][nn_idx] = sim_kept_xyz[:, 1]
+    out["z"][nn_idx] = sim_kept_xyz[:, 2]
+    tmp_path = Path(str(out_path) + ".tmp")
+    PlyData([PlyElement.describe(out, "vertex")], text=text_mode).write(tmp_path)
+    os.replace(tmp_path, out_path)
+
+
+def _write_frame_xyz_only(full_attrs, nn_idx, kept_sim_idx, sim_xyz, args, out_path, text_mode):
+    """Write an xyz-only ply for frames 1+. ~20× smaller than the full
+    ply — only the per-frame-changing positions, no scales/rotations/SH/etc.
+    Composed of (n_ref, 3) floats. Compatible with the existing
+    parse_frame_xyz parser; parse_static_attrs returns None for these,
+    so no spurious static_attrs re-sends."""
+    # Same overlay logic as the full writer, but we extract only x/y/z
+    # into a minimal (x,y,z) structured array.
+    sim_kept_xyz = _transform_sim_xyz(sim_xyz[kept_sim_idx], args)
+    n = len(full_attrs)
+    out = np.empty(n, dtype=[("x", np.float32), ("y", np.float32), ("z", np.float32)])
+    out["x"] = full_attrs["x"]
+    out["y"] = full_attrs["y"]
+    out["z"] = full_attrs["z"]
+    out["x"][nn_idx] = sim_kept_xyz[:, 0]
+    out["y"][nn_idx] = sim_kept_xyz[:, 1]
+    out["z"][nn_idx] = sim_kept_xyz[:, 2]
     tmp_path = Path(str(out_path) + ".tmp")
     PlyData([PlyElement.describe(out, "vertex")], text=text_mode).write(tmp_path)
     os.replace(tmp_path, out_path)
@@ -76,6 +132,19 @@ def main():
                    help="Exit watch mode after this many seconds with no new frames "
                         "(default 300s = 5min, which covers Warp+Taichi kernel "
                         "compilation + first-frame latency on cold caches).")
+    p.add_argument("--max_frames", type=int, default=0,
+                   help="If >0, exit watch mode as soon as this many fused frames "
+                        "have been produced. Lets sim_one.sh wrap up immediately "
+                        "after the sim's expected frame count is reached, instead "
+                        "of waiting for the quiet-seconds timeout.")
+    p.add_argument("--xyz_only_after_first", action="store_true", default=False,
+                   help="Frame 0 is the full ~161 MB ply with all attrs (used "
+                        "by the workbench to bootstrap the splat renderer); "
+                        "frames 1+ are xyz-only (~8 MB each, ~20× smaller). "
+                        "The WS pump only reads x/y/z per frame so this loses "
+                        "no info on the workbench path. Disable if you need "
+                        "external viewers (e.g. vkgs) to read every frame's "
+                        "full attrs from disk.")
     args = p.parse_args()
 
     print(f"Loading reference: {args.reference_ply}")
@@ -125,52 +194,72 @@ def main():
     _, nn_idx = tree.query(sim_xyz_t0[kept_sim_idx], k=1, workers=-1)
     print(f"  NN map ready ({len(nn_idx)} matches)")
 
-    # Build the static attribute structured array (one row per kept particle)
-    # Use the same dtype as ref_v but with our subsampled count
+    # Build the FULL reference attribute array (one row per ref splat).
+    # Output frames will start as a copy of this and overlay sim positions
+    # only on the matched indices — so the static remainder (splats not
+    # claimed by any sim particle) keeps its rest position and the viewer
+    # sees the whole building per frame.
     out_dtype = ref_v.dtype
-    static_attrs = np.empty(len(kept_sim_idx), dtype=out_dtype)
+    full_attrs = np.empty(len(ref_v), dtype=out_dtype)
     for field in out_dtype.names:
-        static_attrs[field] = ref_v[field][nn_idx]
+        full_attrs[field] = ref_v[field]
 
     # Adjust scale_0/1/2: sim is in normalized space, scales must shrink by log(scale_origin)
     log_scale_shift = float(np.log(scale_origin))
     print(f"  scale shift (log-space): {log_scale_shift:.4f}")
     for k in ("scale_0", "scale_1", "scale_2"):
-        if k in static_attrs.dtype.names:
-            static_attrs[k] = static_attrs[k] + log_scale_shift
+        if k in full_attrs.dtype.names:
+            full_attrs[k] = full_attrs[k] + log_scale_shift
 
     # Z-up -> Y-up axis permutation. Sim has +Z up; vkSplatting (and most viewers)
     # expect +Y up. The change of basis is (x, y, z) -> (x, z, -y), which is
-    # equivalent to a -90 deg rotation around the X axis. We need to apply it to:
+    # equivalent to a -90 deg rotation around the X axis (Rx(-pi/2)). We need
+    # to apply it to:
     #   - positions (per-frame, below)
     #   - per-gaussian rotation quaternions (here, once)
     #   - normals (here, once)
+    #
+    # The math lives in core/coord_convert.py — it's the same Rx(-pi/2)
+    # used by the import-time Y-up -> Z-up converter. Both directions
+    # share this matrix because the (x,y,z)->(x,z,-y) permutation is
+    # numerically identical regardless of the semantic label.
     if args.zup_to_yup:
-        # -90 deg around X axis (Z-up -> Y-up, right-handed: cross(x,z)=-y so
-        # new_z = -old_y). Quaternion (w, x, y, z) layout.
-        c = np.cos(-np.pi / 4); s = np.sin(-np.pi / 4)
-        q_axis = np.array([c, s, 0.0, 0.0], dtype=np.float32)  # (w, x, y, z)
-        # Compose: q_new = q_axis * q_old (Hamilton product, broadcast over particles)
-        wA, xA, yA, zA = q_axis
-        wB = static_attrs["rot_0"]; xB = static_attrs["rot_1"]
-        yB = static_attrs["rot_2"]; zB = static_attrs["rot_3"]
-        new_w = wA*wB - xA*xB - yA*yB - zA*zB
-        new_x = wA*xB + xA*wB + yA*zB - zA*yB
-        new_y = wA*yB - xA*zB + yA*wB + zA*xB
-        new_z = wA*zB + xA*yB - yA*xB + zA*wB
-        static_attrs["rot_0"] = new_w
-        static_attrs["rot_1"] = new_x
-        static_attrs["rot_2"] = new_y
-        static_attrs["rot_3"] = new_z
+        # Quaternions (rot_0..rot_3 in w,x,y,z order). Pack into (N, 4),
+        # rotate, unpack back into the structured array.
+        q = np.stack([
+            full_attrs["rot_0"],
+            full_attrs["rot_1"],
+            full_attrs["rot_2"],
+            full_attrs["rot_3"],
+        ], axis=1).astype(np.float32)
+        new_q = _rotate_quat(q)
+        full_attrs["rot_0"] = new_q[:, 0]
+        full_attrs["rot_1"] = new_q[:, 1]
+        full_attrs["rot_2"] = new_q[:, 2]
+        full_attrs["rot_3"] = new_q[:, 3]
         # Permute normals likewise (these are all 0 in 3DGS plys but be defensive)
-        nx = static_attrs["nx"].copy() if "nx" in static_attrs.dtype.names else None
-        ny = static_attrs["ny"].copy() if "ny" in static_attrs.dtype.names else None
-        nz = static_attrs["nz"].copy() if "nz" in static_attrs.dtype.names else None
-        if nx is not None:
-            static_attrs["nx"] = nx
-            static_attrs["ny"] = nz
-            static_attrs["nz"] = -ny
+        if all(k in full_attrs.dtype.names for k in ("nx", "ny", "nz")):
+            n = np.stack([
+                full_attrs["nx"],
+                full_attrs["ny"],
+                full_attrs["nz"],
+            ], axis=1).astype(np.float32)
+            new_n = _rotate_norm(n)
+            full_attrs["nx"] = new_n[:, 0]
+            full_attrs["ny"] = new_n[:, 1]
+            full_attrs["nz"] = new_n[:, 2]
         print(f"  Z-up -> Y-up permutation applied to rotations + normals")
+
+    # Bake REST positions into full_attrs in the final output coord space.
+    # Per-frame fuse will copy full_attrs and overwrite x/y/z only on the
+    # ref indices claimed by sim particles; the rest stay at these rest
+    # positions. (`ref_xyz_norm` is in normalized sim space — same coord
+    # system the sim outputs land in.)
+    rest_xyz = _transform_sim_xyz(ref_xyz_norm, args)
+    full_attrs["x"] = rest_xyz[:, 0]
+    full_attrs["y"] = rest_xyz[:, 1]
+    full_attrs["z"] = rest_xyz[:, 2]
+    print(f"  rest positions baked: {len(full_attrs)} ref splats in output space")
 
     # Per-frame: replace x/y/z with sim positions and write
     out_dir = Path(args.out_dir)
@@ -183,11 +272,13 @@ def main():
         v = PlyData.read(str(sp))["vertex"].data
         sim_xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float32)
         out_path = out_dir / f"frame_{idx:04d}.ply"
-        # Sim particles live in normalized [0,2]^3 with center (1,1,1) and
-        # the slip floor at z=0.5; --center_at_origin subtracts (1,1,0.5).
-        # --zup_to_yup permutes (x,y,z) -> (x,z,-y) so sim +Z (up) becomes
-        # viewer +Y.
-        _write_frame_atomic(static_attrs, kept_sim_idx, sim_xyz, args, out_path, text_mode)
+        # Frame 0 always full (workbench/vkgs bootstrap); frames 1+ slim
+        # to xyz-only when the flag is set — same overlay logic, smaller
+        # disk write.
+        if idx == 0 or not args.xyz_only_after_first:
+            _write_frame_atomic(full_attrs, nn_idx, kept_sim_idx, sim_xyz, args, out_path, text_mode)
+        else:
+            _write_frame_xyz_only(full_attrs, nn_idx, kept_sim_idx, sim_xyz, args, out_path, text_mode)
         return out_path
 
     # Initial pass: process whatever's already on disk.
@@ -200,12 +291,21 @@ def main():
             print(f"  wrote {len(processed)}/{len(sim_plys)}: {out_path.name}")
     print(f"Initial batch done: {len(processed)} fused plys in {out_dir}")
 
-    # Watch loop: keep polling sim_dir for new sim_*.ply files until quiet timeout.
+    # Watch loop: keep polling sim_dir for new sim_*.ply files until quiet timeout
+    # or max_frames is reached.
     if args.watch:
+        if args.max_frames > 0 and len(processed) >= args.max_frames:
+            print(f"[watch] already at {len(processed)} >= max_frames={args.max_frames}, skipping watch")
+            return
         print(f"[watch] polling {sim_dir} every 0.5s for new frames "
-              f"(exits after {args.watch_quiet_seconds:.0f}s of silence)...")
+              f"(exits after {args.watch_quiet_seconds:.0f}s of silence"
+              f"{f' or after {args.max_frames} total frames' if args.max_frames > 0 else ''})...")
         quiet_t = 0.0
         while quiet_t < args.watch_quiet_seconds:
+            if args.max_frames > 0 and len(processed) >= args.max_frames:
+                print(f"[watch] reached max_frames={args.max_frames}, exiting "
+                      f"({len(processed)} total frames in {out_dir})")
+                return
             current = sorted(sim_dir.glob("sim_*.ply"))
             new_plys = [sp for sp in current if sp not in processed]
             if not new_plys:
