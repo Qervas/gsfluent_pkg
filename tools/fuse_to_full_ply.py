@@ -8,6 +8,14 @@ Input:
 Output:
     out_dir/frame_NNN.ply (one per sim frame, full 3DGS format vkSplatting can render)
 
+Coordinate convention:
+    The fuse output is **Z-up** by default — matching the workbench's
+    "all stored data is Z-up" invariant. The simulator emits Y-up
+    natively, so this script applies Rx(-pi/2) to positions, per-gaussian
+    rotation quaternions, and normals on the way out (math lives in
+    `gsfluent.core.coord_convert`). Pass `--no_zup` (alias `--keep_y_up`)
+    to opt out and write the sim's native Y-up frame straight through.
+
 Method:
     1. Read reference -> raw_xyz, attrs
     2. Normalize reference xyz: longest axis -> 1.0, center -> (1,1,1)
@@ -35,6 +43,7 @@ if str(_ROOT / "server") not in sys.path:
 
 from gsfluent.core.coord_convert import (  # noqa: E402
     rotate_normals_y_up_to_z_up as _rotate_norm,
+    rotate_positions_y_up_to_z_up as _rotate_pos,
     rotate_quaternions_y_up_to_z_up as _rotate_quat,
 )
 
@@ -48,16 +57,21 @@ def _sim_idx(path):
 
 
 def _transform_sim_xyz(sim_xyz, args):
-    """Apply --center_at_origin shift + --zup_to_yup permutation to sim
-    positions. Returns (n, 3) array in the final output coord system."""
+    """Apply --center_at_origin shift + Y-up -> Z-up rotation to sim
+    positions. Returns (n, 3) array in the final output coord system.
+
+    The simulator emits Y-up. By default we rotate to Z-up via
+    Rx(-pi/2) (delegated to coord_convert). Pass --no_zup / --keep_y_up
+    to skip the rotation."""
     sx = sim_xyz[:, 0].astype(np.float32, copy=True)
     sy = sim_xyz[:, 1].astype(np.float32, copy=True)
     sz = sim_xyz[:, 2].astype(np.float32, copy=True)
     if args.center_at_origin:
         sx -= 1.0; sy -= 1.0; sz -= 0.5
-    if args.zup_to_yup:
-        return np.stack([sx, sz, -sy], axis=1)
-    return np.stack([sx, sy, sz], axis=1)
+    stacked = np.stack([sx, sy, sz], axis=1)
+    if args.zup:
+        return _rotate_pos(stacked)
+    return stacked
 
 
 def _write_frame_atomic(full_attrs, nn_idx, kept_sim_idx, sim_xyz, args, out_path, text_mode):
@@ -116,10 +130,15 @@ def main():
     p.add_argument("--out_dir", required=True)
     p.add_argument("--subsample", type=int, default=None,
                    help="If set, subsample to N gaussians per frame (for performance)")
-    p.add_argument("--zup_to_yup", action="store_true", default=True,
-                   help="Permute axes from sim's Z-up convention to viewer's Y-up "
-                        "(swap so output (x, y, z) = (sim_x, sim_z, -sim_y))")
-    p.add_argument("--no-zup_to_yup", dest="zup_to_yup", action="store_false")
+    # Default: rotate sim's Y-up output to the workbench's Z-up convention
+    # (Rx(-pi/2)). Opt out via --no_zup / --keep_y_up if you want raw Y-up.
+    p.add_argument("--zup", action="store_true", default=True,
+                   help="Rotate sim's native Y-up frame to Z-up via Rx(-pi/2). "
+                        "On by default; pass --no_zup to keep Y-up.")
+    p.add_argument("--no_zup", "--keep_y_up", dest="zup", action="store_false",
+                   help="Skip the Y-up -> Z-up rotation; write sim's native "
+                        "Y-up frame straight through (positions, quaternions, "
+                        "and normals).")
     p.add_argument("--center_at_origin", action="store_true", default=True,
                    help="Translate so building base sits at (0,0,0) instead of "
                         "the simulator's normalized (1,1,1)")
@@ -211,19 +230,16 @@ def main():
         if k in full_attrs.dtype.names:
             full_attrs[k] = full_attrs[k] + log_scale_shift
 
-    # Z-up -> Y-up axis permutation. Sim has +Z up; vkSplatting (and most viewers)
-    # expect +Y up. The change of basis is (x, y, z) -> (x, z, -y), which is
-    # equivalent to a -90 deg rotation around the X axis (Rx(-pi/2)). We need
-    # to apply it to:
-    #   - positions (per-frame, below)
+    # Y-up -> Z-up axis rotation. The sim emits Y-up; the workbench's
+    # invariant says all stored data is Z-up. Rx(-pi/2) maps
+    # (x, y, z) -> (x, z, -y) and applies to:
+    #   - positions (per-frame, in _transform_sim_xyz)
     #   - per-gaussian rotation quaternions (here, once)
     #   - normals (here, once)
     #
-    # The math lives in core/coord_convert.py — it's the same Rx(-pi/2)
-    # used by the import-time Y-up -> Z-up converter. Both directions
-    # share this matrix because the (x,y,z)->(x,z,-y) permutation is
-    # numerically identical regardless of the semantic label.
-    if args.zup_to_yup:
+    # Math lives in core/coord_convert.py — same Rx(-pi/2) the
+    # import-time Y-up -> Z-up converter uses.
+    if args.zup:
         # Quaternions (rot_0..rot_3 in w,x,y,z order). Pack into (N, 4),
         # rotate, unpack back into the structured array.
         q = np.stack([
@@ -248,7 +264,7 @@ def main():
             full_attrs["nx"] = new_n[:, 0]
             full_attrs["ny"] = new_n[:, 1]
             full_attrs["nz"] = new_n[:, 2]
-        print(f"  Z-up -> Y-up permutation applied to rotations + normals")
+        print(f"  Y-up -> Z-up rotation applied to quaternions + normals")
 
     # Bake REST positions into full_attrs in the final output coord space.
     # Per-frame fuse will copy full_attrs and overwrite x/y/z only on the
