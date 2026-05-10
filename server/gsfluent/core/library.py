@@ -120,6 +120,10 @@ class _ModelMeta(BaseModel):
     bbox: Optional[list[list[float]]] = None  # [[xmin,ymin,zmin],[xmax,ymax,zmax]]
     coord_convention: str = Field(default="z-up")
     imported_at: Optional[str] = None
+    # Phase 4: Y-up source rewritten at import. Audit-only; downstream
+    # code reads `coord_convention` (which is always "z-up") for
+    # routing decisions.
+    converted_from: Optional[str] = None  # "y-up" | None
 
 
 class _SequenceMeta(BaseModel):
@@ -293,6 +297,7 @@ class Model:
         coord_convention: str = "z-up",
         imported_at: Optional[str] = None,
         path: Optional[Path] = None,
+        converted_from: Optional[str] = None,
     ) -> Path:
         """Write `_meta.json` for the model.
 
@@ -311,6 +316,7 @@ class Model:
             bbox=bbox,
             coord_convention=coord_convention,
             imported_at=imported_at or _now_iso(),
+            converted_from=converted_from,
         ).model_dump()
         primary = cls._meta_path_for(target_dir)
         try:
