@@ -63,6 +63,7 @@ def wrap_ply_upload(
     orig_filename: str,
     content: bytes,
     cameras_json_bytes: bytes | None = None,
+    convert_y_up: bool = False,
 ) -> tuple[str, Path]:
     """Wrap a raw .ply upload into the 3DGS directory layout the sim expects.
 
@@ -72,6 +73,13 @@ def wrap_ply_upload(
 
     Writes `_meta.json` alongside (kind=model, source=upload, n_splats and
     bbox derived from the ply, coord_convention=z-up).
+
+    `convert_y_up=True`: bytes are written to a tmp path, then rewritten
+    Y-up -> Z-up (positions, per-gaussian quaternions, normals) into the
+    final point_cloud.ply via `core.coord_convert.convert_full_3dgs_ply`.
+    The synthetic cameras.json is generated AFTER conversion so its
+    bbox reflects the converted ply. Sets `_meta.json:converted_from =
+    "y-up"` for audit.
 
     Returns (model_name, model_dir_path).
     """
@@ -83,7 +91,25 @@ def wrap_ply_upload(
     iter_dir = MODELS_DIR / name / "point_cloud" / "iteration_30000"
     iter_dir.mkdir(parents=True, exist_ok=True)
     ply_path = iter_dir / "point_cloud.ply"
-    ply_path.write_bytes(content)  # TODO Phase 4: stream via tmp + replace for atomic landing on >1GB plys
+
+    if convert_y_up:
+        # Write bytes to a sibling tmp path, then convert into the final
+        # target ply. The converter does its own atomic tmp+replace on
+        # the OUTPUT side, so we just need a stable read source and the
+        # tmp deleted afterwards regardless of success/failure.
+        from .coord_convert import convert_full_3dgs_ply
+
+        src_tmp = iter_dir / "_yup_source.ply.tmp"
+        src_tmp.write_bytes(content)
+        try:
+            convert_full_3dgs_ply(src_tmp, ply_path)
+        finally:
+            try:
+                src_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    else:
+        ply_path.write_bytes(content)  # TODO Phase 4: stream via tmp + replace for atomic landing on >1GB plys
     model_dir = MODELS_DIR / name
 
     if cameras_json_bytes is not None:
@@ -108,6 +134,7 @@ def wrap_ply_upload(
             n_splats=n_splats,
             bbox=bbox,
             coord_convention="z-up",
+            converted_from="y-up" if convert_y_up else None,
         )
     except Exception as e:
         _log.warning("model %s wrote ply but _meta.json failed: %s", name, e)
@@ -115,13 +142,23 @@ def wrap_ply_upload(
     return name, model_dir
 
 
-def register_local_model(path: Path) -> tuple[str, Path]:
+def register_local_model(
+    path: Path, convert_y_up: bool = False,
+) -> tuple[str, Path, str]:
     """Register an existing local 3DGS model directory in the library
     without copying anything. Validates the path structure (must contain
     `point_cloud/iteration_*/point_cloud.ply`), writes `_meta.json` AT
     that path (or in a sidecar `<external>/.gsfluent_meta.json` if the
     main meta path is read-only), and adds an entry to the registered
-    index. Returns (name, path).
+    index. Returns (name, path, mode).
+
+    `mode` is "registered" by default, or "copied-and-converted" when
+    `convert_y_up=True`: register's no-copy invariant breaks for
+    converted models because we can't legally rewrite bytes inside the
+    user's external directory. So the convert path materializes a fresh
+    copy under `library/models/<name>/` (effectively switching to import
+    semantics), and the API response surfaces the mode flag so the
+    frontend can be honest about what happened.
 
     Raises FileNotFoundError if the path doesn't exist or doesn't have
     the expected layout.
@@ -143,6 +180,70 @@ def register_local_model(path: Path) -> tuple[str, Path]:
             f"Are you pointing at a 3DGS training output dir?"
         )
     name = path.name  # use the directory name verbatim — no uuid suffix needed
+
+    # Convert-on-register branch: copy the entire structure into the
+    # library, rewriting every iteration_*/point_cloud.ply Y-up -> Z-up.
+    # Past this branch the function returns a different (mode, path)
+    # contract; the caller (api/models.register) surfaces the mode.
+    if convert_y_up:
+        from .coord_convert import convert_full_3dgs_ply
+        import shutil as _sh
+
+        if MODELS_DIR.exists() and (MODELS_DIR / name).exists():
+            raise FileExistsError(
+                f"a model named {name!r} already exists in the library; "
+                "delete it or rename your source dir to convert."
+            )
+        target = MODELS_DIR / name
+        target.mkdir(parents=True)
+        try:
+            # Copy the cameras.json verbatim if present (camera intrinsics
+            # are coord-system-agnostic in our pipeline; conversion of
+            # poses would be a larger change we don't take on here).
+            if (path / "cameras.json").is_file():
+                _sh.copy2(path / "cameras.json", target / "cameras.json")
+            for it in pc_root.glob("iteration_*"):
+                src_ply = it / "point_cloud.ply"
+                if not src_ply.is_file():
+                    continue
+                dst_iter = target / "point_cloud" / it.name
+                dst_iter.mkdir(parents=True)
+                convert_full_3dgs_ply(src_ply, dst_iter / "point_cloud.ply")
+        except Exception:
+            try:
+                _sh.rmtree(target)
+            except OSError:
+                pass
+            raise
+
+        # Compute meta from the converted highest-iteration ply.
+        n_splats = bbox = None
+        m = Model(name=name, path=target)
+        best = m.highest_iteration_ply()
+        if best is not None:
+            n_splats, bbox = read_ply_bbox_and_count(best)
+            # Make sure cameras.json exists post-convert (synthetic if missing).
+            if not (target / "cameras.json").exists():
+                try:
+                    _ensure_cameras_json(target, best)
+                except Exception as e:
+                    _log.warning("could not generate cameras.json for %s: %s", target, e)
+
+        try:
+            Model.write_meta(
+                name=name,
+                source="register",
+                source_path=str(path),
+                n_splats=n_splats,
+                bbox=bbox,
+                coord_convention="z-up",
+                converted_from="y-up",
+            )
+        except Exception as e:
+            _log.warning(
+                "converted-register %s wrote ply but _meta.json failed: %s", name, e,
+            )
+        return name, target, "copied-and-converted"
 
     # Sim core needs cameras.json. If the user's external dir doesn't have
     # one, write a synthetic one in-place against the highest-iteration ply.
@@ -196,7 +297,7 @@ def register_local_model(path: Path) -> tuple[str, Path]:
     except Exception as e:
         _log.warning("registered model %s but index update failed: %s", name, e)
 
-    return name, path
+    return name, path, "registered"
 
 
 def _ensure_cameras_json(model_dir: Path, ply_path: Path) -> None:
