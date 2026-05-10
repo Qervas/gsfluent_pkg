@@ -116,26 +116,23 @@ def test_parse_static_attrs_no_basis_composition_on_zup_file(tmp_path: Path):
     assert attrs is not None
 
     # The convert step composed the identity quat with the axis quat
-    # (cos(-pi/4), sin(-pi/4), 0, 0). The corresponding rotation
-    # matrix is Rx(-pi/2):
-    #   [1, 0, 0]
-    #   [0, 0, 1]
-    #   [0, -1, 0]
+    # (cos(+pi/4), sin(+pi/4), 0, 0). The corresponding rotation
+    # matrix is Rx(+pi/2):
+    #   [1,  0,  0]
+    #   [0,  0, -1]
+    #   [0,  1,  0]
     expected_R = np.array(
         [[1.0, 0.0, 0.0],
-         [0.0, 0.0, 1.0],
-         [0.0, -1.0, 0.0]],
+         [0.0, 0.0, -1.0],
+         [0.0, 1.0, 0.0]],
         dtype=np.float32,
     )
     np.testing.assert_allclose(attrs["R"][0], expected_R, atol=1e-6)
 
-    # Sanity: the OLD behaviour would have left-multiplied this by
-    # M_YUP_TO_ZUP = [[1,0,0],[0,0,-1],[0,1,0]], giving
-    #   [1, 0, 0]
-    #   [0, 1, 0]
-    #   [0, 0, 1]
-    # i.e. identity. So the assertion above also doubles as a
-    # regression guard against re-introducing the composition.
+    # Sanity: the OLD parse_static_attrs would have left-multiplied this
+    # by M_YUP_TO_ZUP. With that composition the rotation would land at
+    # something different from the matrix we just asserted; this guards
+    # against re-introducing the display-time composition.
     old_legacy_M = np.array(
         [[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float32
     )

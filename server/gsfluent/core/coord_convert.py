@@ -1,17 +1,20 @@
 """Y-up -> Z-up coordinate conversion for 3DGS data at IMPORT time.
 
 The workbench is Z-up. External datasets that ship Y-up (PhysGaussian
-ficus, some Inria 3DGS exports) get rewritten on the way IN; the display
-pipeline never sees Y-up data after that point. This module is the
-single place where Rx(-pi/2) math lives -- formerly duplicated across
-ws.ts (deleted), fuse_to_full_ply.py (delegates here now), and ad-hoc
-patches in display code (gone after Phase 3).
+ficus, some Inria 3DGS exports, our sim's native output) get rewritten
+on the way IN; the display pipeline never sees Y-up data after that
+point. This module is the single place where the math lives.
 
-Rx(-pi/2) maps:
-  positions: (x, y, z) -> (x, z, -y)
-  +Y  -> -Z   (down in Y-up becomes -Z in Z-up; ground sinks below grid)
-  -Y  -> +Z   (up in Y-up becomes +Z in Z-up; sky goes up)
-  +Z  -> +Y   (forward stays in horizontal plane)
+Convention: "Y-up" here means +Y is the SKY direction (PhysGaussian /
+sim convention). The earlier Rx(-pi/2) math in this file matched the
+COLMAP convention (+Y down) and produced inverted output for sim data;
+that bug got papered over by a follow-up recover_zup_migration.py pass.
+
+Rx(+pi/2) maps:
+  positions: (x, y, z) -> (x, -z, y)
+  +Y  -> +Z   (sky goes up, as expected)
+  +X  -> +X
+  +Z  -> -Y   (forward stays in horizontal plane)
 """
 from __future__ import annotations
 
@@ -21,28 +24,29 @@ import numpy as np
 
 
 def rotate_positions_y_up_to_z_up(xyz: np.ndarray) -> np.ndarray:
-    """Apply Rx(-pi/2) to an (N, 3) positions array. Returns a NEW array.
+    """Apply Rx(+pi/2) to an (N, 3) positions array. Returns a NEW array.
 
-    Math: (x, y, z) -> (x, z, -y). dtype preserved.
+    Math: (x, y, z) -> (x, -z, y). dtype preserved.
+    +Y (sky in Y-up) -> +Z (sky in Z-up).
     """
     out = np.empty_like(xyz)
     out[:, 0] = xyz[:, 0]
-    out[:, 1] = xyz[:, 2]
-    out[:, 2] = -xyz[:, 1]
+    out[:, 1] = -xyz[:, 2]
+    out[:, 2] = xyz[:, 1]
     return out
 
 
 def rotate_quaternions_y_up_to_z_up(quats_wxyz: np.ndarray) -> np.ndarray:
-    """Compose each quaternion with the Rx(-pi/2) axis rotation.
+    """Compose each quaternion with the Rx(+pi/2) axis rotation.
 
     Input/output are (N, 4) arrays in (w, x, y, z) order -- matching the
     3DGS .ply convention (rot_0=w, rot_1=x, rot_2=y, rot_3=z).
 
     Hamilton product: q_new = q_axis * q_old, where
-      q_axis = (cos(-pi/4), sin(-pi/4)*1, 0, 0) = (sqrt(2)/2, -sqrt(2)/2, 0, 0)
+      q_axis = (cos(+pi/4), sin(+pi/4)*1, 0, 0) = (sqrt(2)/2, sqrt(2)/2, 0, 0)
     """
-    c = float(np.cos(-np.pi / 4))
-    s = float(np.sin(-np.pi / 4))
+    c = float(np.cos(np.pi / 4))
+    s = float(np.sin(np.pi / 4))
     wA, xA, yA, zA = c, s, 0.0, 0.0
     wB = quats_wxyz[:, 0]
     xB = quats_wxyz[:, 1]
