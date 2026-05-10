@@ -34,17 +34,21 @@ export const api = {
   },
   models: {
     list: () => fetch("/api/models").then(j<ModelItem[]>),
-    upload: (ply: File, camerasJson?: File) => {
+    upload: (ply: File, camerasJson?: File, convertYUp?: boolean) => {
       const fd = new FormData();
       fd.append("ply", ply);
       if (camerasJson) fd.append("cameras_json", camerasJson);
+      // FastAPI Form(bool) coerces the "true"/"false" string. Only
+      // append when truthy to keep the multipart body small for the
+      // overwhelming default-off case.
+      if (convertYUp) fd.append("convert_y_up", "true");
       return fetch("/api/models/upload", { method: "POST", body: fd }).then(j<ModelItem>);
     },
-    register: (path: string) =>
+    register: (path: string, convertYUp?: boolean) =>
       fetch("/api/models/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
+        body: JSON.stringify({ path, convert_y_up: !!convertYUp }),
       }).then(j<ModelItem>),
   },
   runs: {
@@ -77,11 +81,11 @@ export const api = {
   },
   sequences: {
     list: () => fetch("/api/sequences").then(j<SequenceItem[]>),
-    import: (folder_path: string, name?: string) =>
+    import: (folder_path: string, name?: string, convertYUp?: boolean) =>
       fetch("/api/sequences/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder_path, name }),
+        body: JSON.stringify({ folder_path, name, convert_y_up: !!convertYUp }),
       }).then(j<SequenceItem>),
     delete: (name: string) =>
       fetch(`/api/sequences/${encodeURIComponent(name)}`, { method: "DELETE" }).then(

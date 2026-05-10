@@ -6,7 +6,18 @@ export type Recipe = {
   data: Record<string, unknown>;
 };
 export type RecipeListItem = { name: string; source: "builtin" | "user" };
-export type ModelItem = { name: string; path: string };
+export type ModelItem = {
+  name: string;
+  path: string;
+  // Phase 4: present when the model was rewritten Y-up -> Z-up at
+  // import time. Audit-only; the workbench never branches on this.
+  converted_from?: "y-up" | null;
+  // /api/models/register may report whether convert_y_up forced an
+  // import-by-copy ("copied-and-converted") vs the no-copy default
+  // ("registered"). Optional because /api/models list responses don't
+  // carry a mode.
+  mode?: "registered" | "copied-and-converted";
+};
 export type RunState = "queued" | "running" | "done" | "error" | "cancelled";
 export type RunStatus = { id: string; name: string; state: RunState };
 
@@ -34,6 +45,9 @@ export type SequenceItem = {
   first_frame_full: boolean;
   is_broken: boolean;
   created_at: string | null;
+  // Phase 4: present when frames were rewritten Y-up -> Z-up at
+  // import time (frames/ is materialized rather than symlinked).
+  converted_from?: "y-up" | null;
 };
 
 export type StaticAttrs = {
