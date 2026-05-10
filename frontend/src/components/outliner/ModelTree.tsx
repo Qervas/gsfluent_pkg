@@ -12,6 +12,7 @@ export function ModelTree() {
   const setActiveModel = useStore((s) => s.setActiveModel);
   const qc = useQueryClient();
   const [path, setPath] = useState("");
+  const [convertYUp, setConvertYUp] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -21,7 +22,7 @@ export function ModelTree() {
     setBusy(true);
     setError(null);
     try {
-      const m = await api.models.register(p);
+      const m = await api.models.register(p, convertYUp);
       setActiveModel(m);
       qc.invalidateQueries({ queryKey: ["models"] });
       setPath("");
@@ -54,10 +55,29 @@ export function ModelTree() {
           onClick={onAddPath}
           disabled={busy || !path.trim()}
           className="bg-elevated hover:bg-border border border-border text-accent text-[11px] px-2 rounded disabled:opacity-30"
-          title="Register the local path (no copy)"
+          title={
+            convertYUp
+              ? "Convert + copy into the library (rewrites Y-up source to Z-up)"
+              : "Register the local path (no copy)"
+          }
         >
           {busy ? "…" : "+"}
         </button>
+      </div>
+      <div className="px-2 pb-1">
+        <label
+          className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-text-muted hover:text-text-primary cursor-pointer select-none"
+          title="Source is Y-up (PhysGaussian/Inria); convert to Z-up at import. Forces a copy into the library since we cannot rewrite the user's external dir in place."
+        >
+          <input
+            type="checkbox"
+            checked={convertYUp}
+            disabled={busy}
+            onChange={(e) => setConvertYUp(e.target.checked)}
+            className="accent-accent"
+          />
+          Y-up
+        </label>
       </div>
       {error && (
         <div className="px-3 pb-1 text-error text-[10px]">{error}</div>
