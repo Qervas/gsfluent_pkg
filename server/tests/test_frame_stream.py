@@ -42,14 +42,17 @@ def _write_full_3dgs_ply(path, n=10):
     PlyData([el], text=False).write(str(path))
 
 
-def test_parse_frame_xyz_rotates_yup_to_zup(tmp_path):
+def test_parse_frame_xyz_returns_positions_unchanged(tmp_path):
+    """Stored data is Z-up at rest (workbench invariant); the parser
+    must return positions exactly as they sit on disk, no display-time
+    rotation."""
     p = tmp_path / "frame_0000.ply"
     _write_minimal_ply(p, n=3)
     xyz = parse_frame_xyz(p)
     assert xyz.shape == (3, 3)
     assert xyz.dtype == np.float32
-    # original (x, y, z) = (i, 2i, 3i). After yup→zup: (x, -z, y) = (i, -3i, 2i)
-    np.testing.assert_allclose(xyz[1], [1.0, -3.0, 2.0], atol=1e-6)
+    # original (x, y, z) = (i, 2i, 3i) — no rotation applied.
+    np.testing.assert_allclose(xyz[1], [1.0, 2.0, 3.0], atol=1e-6)
 
 
 def test_parse_static_attrs_returns_none_for_xyz_only_ply(tmp_path):
@@ -66,10 +69,9 @@ def test_parse_static_attrs_extracts_full_3dgs(tmp_path):
     assert attrs["n"] == 5
     # scales: exp(-2) ≈ 0.135
     np.testing.assert_allclose(attrs["scales"], np.exp(-2.0), atol=1e-5)
-    # R matrix: identity rotation in y-up frame, but rotated by M_YUP_TO_ZUP
-    # M_YUP_TO_ZUP @ I = M_YUP_TO_ZUP. Verify R[0] equals that matrix.
-    expected_R = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float32)
-    np.testing.assert_allclose(attrs["R"][0], expected_R, atol=1e-6)
+    # R matrix: identity quaternion -> identity rotation. No display-time
+    # basis rotation is composed in (data is Z-up at rest), so R[0] is I.
+    np.testing.assert_allclose(attrs["R"][0], np.eye(3, dtype=np.float32), atol=1e-6)
     # rgb: clip(0.5 * 0.282... + 0.5, 0, 1) for f_dc_0 channel
     expected_r = 0.5 * 0.28209479177387814 + 0.5
     np.testing.assert_allclose(attrs["rgb"][0, 0], expected_r, atol=1e-5)
@@ -105,8 +107,7 @@ def test_parse_static_attrs_normalizes_quaternions(tmp_path):
     p = tmp_path / "scaled_quat.ply"
     PlyData([PlyElement.describe(v, "vertex")], text=False).write(str(p))
     attrs = parse_static_attrs(p)
-    # R should still satisfy R @ R.T ≈ I (after the M_YUP_TO_ZUP composition).
+    # R should still satisfy R @ R.T ≈ I — the quat is normalized first.
     R = attrs["R"][0]
-    # Note: M_YUP_TO_ZUP @ I_yup is itself orthogonal, so R @ R.T == I.
     should_be_I = R @ R.T
     np.testing.assert_allclose(should_be_I, np.eye(3), atol=1e-5)
