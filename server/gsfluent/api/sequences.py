@@ -44,6 +44,7 @@ def _sequence_dict(seq: Sequence) -> dict:
     d.setdefault("coord_convention", "z-up")
     d.setdefault("first_frame_full", True)
     d.setdefault("created_at", None)
+    d.setdefault("converted_from", None)
     if "frame_count" not in d:
         d["frame_count"] = seq.frame_count()
     return d
@@ -106,12 +107,22 @@ def import_endpoint(req: ImportRequest):
         seq = import_sequence(folder, name=req.name, convert_y_up=req.convert_y_up)
     except FileExistsError as e:
         raise HTTPException(409, str(e))
-    except NotImplementedError as e:
-        raise HTTPException(501, str(e))
     except (ImportError, ValueError) as e:
         raise HTTPException(422, str(e))
-    except (FileNotFoundError, NotADirectoryError, OSError) as e:
+    except FileNotFoundError as e:
         raise HTTPException(422, str(e))
+    except NotADirectoryError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        # Surface plyfile parse errors as 422, disk-full as 500.
+        # plyfile raises a generic ValueError/Exception subclass for
+        # malformed input; the message tells us which.
+        msg = str(e)
+        if "ply" in msg.lower() or "header" in msg.lower():
+            raise HTTPException(422, f"failed to parse ply: {msg}")
+        if isinstance(e, OSError):
+            raise HTTPException(500, f"disk error during import: {msg}")
+        raise HTTPException(500, f"import failed: {msg}")
 
     return _sequence_dict(seq)
 
