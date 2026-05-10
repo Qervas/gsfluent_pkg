@@ -24,6 +24,7 @@ export function SequenceTree({
   const simRunName = useStore((s) => s.simRunName);
 
   const [path, setPath] = useState("");
+  const [convertYUp, setConvertYUp] = useState(false);
   const [busy, setBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
 
@@ -33,7 +34,7 @@ export function SequenceTree({
     setBusy(true);
     setImportError(null);
     try {
-      const seq = await api.sequences.import(p);
+      const seq = await api.sequences.import(p, undefined, convertYUp);
       qc.invalidateQueries({ queryKey: ["sequences"] });
       setPath("");
       // Make the freshly-imported sequence the active replay target.
@@ -90,10 +91,29 @@ export function SequenceTree({
           onClick={onImport}
           disabled={busy || !path.trim()}
           className="bg-elevated hover:bg-border border border-border text-accent text-[11px] px-2 rounded disabled:opacity-30"
-          title="Import the folder as a sequence (no copy)"
+          title={
+            convertYUp
+              ? "Convert + copy frames into the library (rewrites Y-up to Z-up)"
+              : "Import the folder as a sequence (no copy)"
+          }
         >
           {busy ? "…" : "+"}
         </button>
+      </div>
+      <div className="px-2 pb-1">
+        <label
+          className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-text-muted hover:text-text-primary cursor-pointer select-none"
+          title="Source is Y-up (PhysGaussian/Inria); convert to Z-up at import. Materializes the frames into the library instead of symlinking, so the entry never goes broken."
+        >
+          <input
+            type="checkbox"
+            checked={convertYUp}
+            disabled={busy}
+            onChange={(e) => setConvertYUp(e.target.checked)}
+            className="accent-accent"
+          />
+          Y-up
+        </label>
       </div>
       {importError && (
         <div className="px-3 pb-1 text-error text-[10px]">{importError}</div>

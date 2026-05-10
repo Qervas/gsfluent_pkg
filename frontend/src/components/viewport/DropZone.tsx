@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
@@ -20,6 +20,15 @@ import { useStore } from "@/lib/store";
 export function DropZone() {
   const [isOver, setIsOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Persistent toggle that applies to every drop until unchecked.
+  // Drag-drop fires straight into the upload mutation with no chance
+  // for the user to click an option mid-drop, so the user has to set
+  // this BEFORE dragging. The toggle is always visible at the top-
+  // right of the viewport so it's discoverable without obscuring the
+  // canvas.
+  const [convertYUp, setConvertYUp] = useState(false);
+  const convertYUpRef = useRef(false);
+  convertYUpRef.current = convertYUp;
   const setActiveModel = useStore((s) => s.setActiveModel);
   const qc = useQueryClient();
 
@@ -59,7 +68,9 @@ export function DropZone() {
         return;
       }
       try {
-        const m = await api.models.upload(ply, cam);
+        // Read from the ref so the value at drop-time wins, not the
+        // value at effect-mount time.
+        const m = await api.models.upload(ply, cam, convertYUpRef.current);
         setActiveModel(m);
         qc.invalidateQueries({ queryKey: ["models"] });
       } catch (e) {
@@ -80,23 +91,45 @@ export function DropZone() {
     };
   }, [setActiveModel, qc]);
 
-  if (!isOver && !error) return null;
-
-  if (error) {
-    return (
-      <div className="absolute inset-0 flex items-end justify-center pointer-events-none p-4">
-        <div className="bg-error/15 border border-error/40 text-error text-xs px-3 py-2 rounded">
-          {error}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="absolute inset-0 bg-accent/10 border-2 border-accent border-dashed rounded pointer-events-none flex items-center justify-center backdrop-blur-sm">
-      <div className="text-accent font-medium text-sm">
-        Drop .ply (optionally with cameras.json) to upload
+    <>
+      {/* Persistent Y-up toggle, top-right of the viewport. Always
+       *  visible (not just during drag) so the user can tick it
+       *  BEFORE starting the drag — there's no opportunity to click
+       *  anything once the file is mid-air. */}
+      <div className="absolute top-2 right-2 z-10">
+        <label
+          className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-text-muted hover:text-text-primary cursor-pointer select-none bg-elevated/70 border border-border rounded px-1.5 py-0.5 backdrop-blur-sm"
+          title="Source is Y-up (PhysGaussian/Inria); convert to Z-up at import"
+        >
+          <input
+            type="checkbox"
+            checked={convertYUp}
+            onChange={(e) => setConvertYUp(e.target.checked)}
+            className="accent-accent"
+          />
+          Y-up
+        </label>
       </div>
-    </div>
+      {error && (
+        <div className="absolute inset-0 flex items-end justify-center pointer-events-none p-4">
+          <div className="bg-error/15 border border-error/40 text-error text-xs px-3 py-2 rounded">
+            {error}
+          </div>
+        </div>
+      )}
+      {isOver && (
+        <div className="absolute inset-0 bg-accent/10 border-2 border-accent border-dashed rounded pointer-events-none flex flex-col items-center justify-center backdrop-blur-sm gap-1">
+          <div className="text-accent font-medium text-sm">
+            Drop .ply (optionally with cameras.json) to upload
+          </div>
+          {convertYUp && (
+            <div className="text-accent/80 text-[11px]">
+              Y-up source: will convert to Z-up at import
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }
