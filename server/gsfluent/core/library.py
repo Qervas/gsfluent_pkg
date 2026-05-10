@@ -135,6 +135,10 @@ class _SequenceMeta(BaseModel):
     coord_convention: str = Field(default="z-up")
     first_frame_full: bool = True
     created_at: Optional[str] = None
+    # Phase 4: when set, frames in this sequence were rewritten from
+    # the labelled axis convention into z-up at import time. Audit-only;
+    # display/playback code should never branch on this.
+    converted_from: Optional[str] = None  # "y-up" | None
 
 
 # --- Registered-externals index --------------------------------------------
@@ -441,6 +445,7 @@ class Sequence:
         coord_convention: str = "z-up",
         first_frame_full: bool = True,
         created_at: Optional[str] = None,
+        converted_from: Optional[str] = None,
     ) -> Path:
         target_dir = SEQUENCES_DIR / name
         payload = _SequenceMeta(
@@ -456,6 +461,7 @@ class Sequence:
             coord_convention=coord_convention,
             first_frame_full=first_frame_full,
             created_at=created_at or _now_iso(),
+            converted_from=converted_from,
         ).model_dump()
         meta_path = target_dir / "_meta.json"
         _atomic_write_json(meta_path, payload)
@@ -590,13 +596,16 @@ def import_sequence(
     already exists, raises `FileExistsError` — caller can pass an explicit
     `name` for the rename case.
 
-    `convert_y_up=True` is reserved for Phase 4 (will materialize converted
-    frames inside the library instead of symlinking). For now raises
-    `NotImplementedError` so callers don't silently get the wrong output.
+    `convert_y_up=True`: instead of symlinking, frames are MATERIALIZED
+    into `<library>/sequences/<name>/frames/`, with each frame rewritten
+    Y-up -> Z-up via `core.coord_convert.convert_full_3dgs_ply`. Costs
+    disk space (a full copy of the source) but the library entry is
+    self-contained -- no danger of going `is_broken` if the user moves
+    the source folder. `_meta.json:source_path` still records the
+    original input for audit; `_meta.json:converted_from = "y-up"`
+    flags the rewrite. The default (False) keeps the symlink semantics
+    untouched.
     """
-    if convert_y_up:
-        raise NotImplementedError("convert_y_up is Phase 4")
-
     folder_path = Path(folder_path)
     if not folder_path.exists():
         raise FileNotFoundError(f"folder does not exist: {folder_path}")
@@ -640,28 +649,52 @@ def import_sequence(
     seq_dir = SEQUENCES_DIR / seq_name
     seq_dir.mkdir(parents=True)
 
-    # Symlink frames/ -> source folder. No fallback to copy — explicit
-    # error is better than a 100GB silent copy on Windows-without-admin.
-    frames_link = seq_dir / "frames"
-    try:
-        os.symlink(
-            str(folder_path.resolve()),
-            str(frames_link),
-            target_is_directory=True,
-        )
-    except OSError as e:
-        # Roll back the empty seq_dir so a retry with a different name
-        # doesn't leave half-built dirs behind.
-        try:
-            shutil.rmtree(seq_dir)
-        except OSError:
-            pass
-        raise OSError(
-            f"failed to create symlink {frames_link} -> {folder_path}: {e}"
-        )
+    if convert_y_up:
+        # Materialize converted frames into seq_dir/frames/ — this is
+        # the only path that physically copies bytes into the library.
+        # Rolls back the half-built dir on any failure mid-conversion
+        # so retries don't leave a partial sequence behind.
+        from .coord_convert import convert_full_3dgs_ply
 
-    # bbox + count from frame 0.
-    n_splats, bbox = read_ply_bbox_and_count(frame0)
+        frames_out = seq_dir / "frames"
+        frames_out.mkdir()
+        try:
+            for _idx, src in frames:
+                dst = frames_out / src.name
+                convert_full_3dgs_ply(src, dst)
+        except Exception:
+            try:
+                shutil.rmtree(seq_dir)
+            except OSError:
+                pass
+            raise
+        # Read bbox/count from the CONVERTED frame 0 so meta reflects
+        # the on-disk Z-up data, not the original Y-up source.
+        converted_frame0 = frames_out / frame0.name
+        n_splats, bbox = read_ply_bbox_and_count(converted_frame0)
+        meta_converted_from: Optional[str] = "y-up"
+    else:
+        # Symlink frames/ -> source folder. No fallback to copy — explicit
+        # error is better than a 100GB silent copy on Windows-without-admin.
+        frames_link = seq_dir / "frames"
+        try:
+            os.symlink(
+                str(folder_path.resolve()),
+                str(frames_link),
+                target_is_directory=True,
+            )
+        except OSError as e:
+            # Roll back the empty seq_dir so a retry with a different name
+            # doesn't leave half-built dirs behind.
+            try:
+                shutil.rmtree(seq_dir)
+            except OSError:
+                pass
+            raise OSError(
+                f"failed to create symlink {frames_link} -> {folder_path}: {e}"
+            )
+        n_splats, bbox = read_ply_bbox_and_count(frame0)
+        meta_converted_from = None
 
     Sequence.write_meta(
         name=seq_name,
@@ -675,6 +708,7 @@ def import_sequence(
         coord_convention="z-up",
         first_frame_full=True,
         created_at=_now_iso(),
+        converted_from=meta_converted_from,
     )
 
     seq = Sequence.load(seq_name)

@@ -144,15 +144,40 @@ def test_import_sequence_rejects_missing_dir(tmp_path, monkeypatch):
         import_sequence(tmp_path / "does_not_exist")
 
 
-def test_convert_y_up_raises_not_implemented(tmp_path, monkeypatch):
+def test_convert_y_up_materializes_frames(tmp_path, monkeypatch):
+    """Phase 4: convert_y_up=True copies + rewrites frames Y-up -> Z-up
+    instead of symlinking. The library entry is then self-contained
+    (no symlink) and `converted_from` is recorded in meta."""
     _isolate(monkeypatch, tmp_path)
+    from gsfluent.core import library
     from gsfluent.core.library import import_sequence
 
     src = tmp_path / "yup_attempt"
     src.mkdir()
     _write_full_ply(src / "frame_0000.ply")
-    with pytest.raises(NotImplementedError):
-        import_sequence(src, convert_y_up=True)
+    _write_full_ply(src / "frame_0001.ply")
+
+    seq = import_sequence(src, convert_y_up=True)
+    assert seq.frame_count() == 2
+    # Materialized: frames/ is a real dir, not a symlink.
+    frames_dir = seq.path / "frames"
+    assert frames_dir.is_dir()
+    assert not frames_dir.is_symlink()
+    # Both frame files were rewritten into the library.
+    assert (frames_dir / "frame_0000.ply").is_file()
+    assert (frames_dir / "frame_0001.ply").is_file()
+    assert seq.meta is not None
+    assert seq.meta["converted_from"] == "y-up"
+    assert seq.meta["coord_convention"] == "z-up"
+    # source_path still points at the original (audit trail).
+    assert seq.meta["source_path"] == str(src.resolve())
+    # is_broken is False even if the source goes away — we materialized.
+    import shutil as _sh
+    _sh.rmtree(src)
+    seq2 = library.Sequence.load(seq.name)
+    assert seq2 is not None
+    assert seq2.is_broken is False
+    assert seq2.frame_count() == 2
 
 
 def test_is_broken_after_source_removal(tmp_path, monkeypatch):
@@ -245,7 +270,10 @@ def test_post_import_endpoint_missing_dir_422(client, tmp_path, monkeypatch):
     assert r.status_code == 422
 
 
-def test_post_import_endpoint_convert_y_up_501(client, tmp_path, monkeypatch):
+def test_post_import_endpoint_convert_y_up_200(client, tmp_path, monkeypatch):
+    """Phase 4: convert_y_up=True is now implemented end-to-end. The
+    response body carries `converted_from = "y-up"` so the frontend
+    can flag it in the Outliner."""
     _isolate(monkeypatch, tmp_path)
     src = tmp_path / "yup_ep"
     src.mkdir()
@@ -254,7 +282,10 @@ def test_post_import_endpoint_convert_y_up_501(client, tmp_path, monkeypatch):
         "/api/sequences/import",
         json={"folder_path": str(src), "convert_y_up": True},
     )
-    assert r.status_code == 501
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["converted_from"] == "y-up"
+    assert body["coord_convention"] == "z-up"
 
 
 def test_get_list_includes_imported(client, tmp_path, monkeypatch):
