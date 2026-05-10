@@ -26,30 +26,30 @@ from plyfile import PlyData, PlyElement
 # --- 1. Pure array math ----------------------------------------------------
 
 
-def test_rotate_positions_y_axis_to_neg_z():
-    """+Y (Y-up sky) -> -Z (Z-up below ground): the test the spec
-    paragraph spells out."""
+def test_rotate_positions_y_axis_to_pos_z():
+    """+Y (Y-up sky) -> +Z (Z-up sky). The Rx(+pi/2) convention for sim
+    data where +Y is the up direction."""
     from gsfluent.core.coord_convert import rotate_positions_y_up_to_z_up
 
     out = rotate_positions_y_up_to_z_up(np.array([[0.0, 1.0, 0.0]], dtype=np.float32))
     assert out.shape == (1, 3)
-    np.testing.assert_array_almost_equal(out[0], [0.0, 0.0, -1.0])
-
-
-def test_rotate_positions_neg_y_axis_to_pos_z():
-    """-Y (Y-up ground) -> +Z (Z-up sky)."""
-    from gsfluent.core.coord_convert import rotate_positions_y_up_to_z_up
-
-    out = rotate_positions_y_up_to_z_up(np.array([[0.0, -1.0, 0.0]], dtype=np.float32))
     np.testing.assert_array_almost_equal(out[0], [0.0, 0.0, 1.0])
 
 
-def test_rotate_positions_z_axis_to_pos_y():
-    """+Z (Y-up forward) -> +Y (Z-up forward, horizontal plane)."""
+def test_rotate_positions_neg_y_axis_to_neg_z():
+    """-Y (Y-up ground) -> -Z (Z-up below grid)."""
+    from gsfluent.core.coord_convert import rotate_positions_y_up_to_z_up
+
+    out = rotate_positions_y_up_to_z_up(np.array([[0.0, -1.0, 0.0]], dtype=np.float32))
+    np.testing.assert_array_almost_equal(out[0], [0.0, 0.0, -1.0])
+
+
+def test_rotate_positions_z_axis_to_neg_y():
+    """+Z (Y-up forward) -> -Y (Z-up sideways, horizontal plane)."""
     from gsfluent.core.coord_convert import rotate_positions_y_up_to_z_up
 
     out = rotate_positions_y_up_to_z_up(np.array([[0.0, 0.0, 1.0]], dtype=np.float32))
-    np.testing.assert_array_almost_equal(out[0], [0.0, 1.0, 0.0])
+    np.testing.assert_array_almost_equal(out[0], [0.0, -1.0, 0.0])
 
 
 def test_rotate_positions_preserves_x_axis_and_dtype():
@@ -58,12 +58,13 @@ def test_rotate_positions_preserves_x_axis_and_dtype():
     inp = np.array([[7.0, 2.0, 5.0]], dtype=np.float64)
     out = rotate_positions_y_up_to_z_up(inp)
     assert out.dtype == np.float64
-    np.testing.assert_array_almost_equal(out[0], [7.0, 5.0, -2.0])
+    # Rx(+pi/2): (x, y, z) -> (x, -z, y)
+    np.testing.assert_array_almost_equal(out[0], [7.0, -5.0, 2.0])
 
 
 def test_rotate_quaternions_identity_to_axis_quat():
-    """Identity quaternion (1, 0, 0, 0) composed with Rx(-pi/2) yields
-    the axis quaternion (cos(-pi/4), sin(-pi/4), 0, 0)."""
+    """Identity quaternion (1, 0, 0, 0) composed with Rx(+pi/2) yields
+    the axis quaternion (cos(+pi/4), sin(+pi/4), 0, 0)."""
     from gsfluent.core.coord_convert import rotate_quaternions_y_up_to_z_up
 
     q = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
@@ -71,8 +72,8 @@ def test_rotate_quaternions_identity_to_axis_quat():
     expected = np.array(
         [
             [
-                float(np.cos(-np.pi / 4)),
-                float(np.sin(-np.pi / 4)),
+                float(np.cos(np.pi / 4)),
+                float(np.sin(np.pi / 4)),
                 0.0,
                 0.0,
             ]
@@ -91,7 +92,7 @@ def test_rotate_quaternions_preserves_dtype():
 
 
 def test_rotate_normals_matches_positions():
-    """Normals share the position math — same Rx(-pi/2) applied to a
+    """Normals share the position math — same Rx(+pi/2) applied to a
     direction vector."""
     from gsfluent.core.coord_convert import (
         rotate_normals_y_up_to_z_up,
@@ -105,19 +106,19 @@ def test_rotate_normals_matches_positions():
 
 
 def test_position_round_trip():
-    """Applying Rx(-pi/2) then the inverse Rx(+pi/2) (i.e. (x, y, z) ->
-    (x, -z, y)) returns the original within float tolerance."""
+    """Applying Rx(+pi/2) then the inverse Rx(-pi/2) (i.e. (x, y, z) ->
+    (x, z, -y)) returns the original within float tolerance."""
     from gsfluent.core.coord_convert import rotate_positions_y_up_to_z_up
 
     rng = np.random.default_rng(0)
     pts = rng.standard_normal((50, 3)).astype(np.float32)
     rotated = rotate_positions_y_up_to_z_up(pts)
 
-    # Inverse: Rx(+pi/2) is (x, y, z) -> (x, -z, y).
+    # Inverse: Rx(-pi/2) is (x, y, z) -> (x, z, -y).
     back = np.empty_like(rotated)
     back[:, 0] = rotated[:, 0]
-    back[:, 1] = -rotated[:, 2]
-    back[:, 2] = rotated[:, 1]
+    back[:, 1] = rotated[:, 2]
+    back[:, 2] = -rotated[:, 1]
     np.testing.assert_allclose(back, pts, atol=1e-6)
 
 
@@ -193,18 +194,19 @@ def test_convert_full_3dgs_ply_round_trip(tmp_path: Path):
     out = PlyData.read(str(dst))["vertex"].data
 
     # Positions rotated: (x, y, z) -> (x, z, -y)
+    # Rx(+pi/2): (x, y, z) -> (x, -z, y)
     np.testing.assert_array_almost_equal(out["x"], arr["x"])
-    np.testing.assert_array_almost_equal(out["y"], arr["z"])
-    np.testing.assert_array_almost_equal(out["z"], -arr["y"])
+    np.testing.assert_array_almost_equal(out["y"], -arr["z"])
+    np.testing.assert_array_almost_equal(out["z"], arr["y"])
 
     # Normals rotated identically.
     np.testing.assert_array_almost_equal(out["nx"], arr["nx"])
-    np.testing.assert_array_almost_equal(out["ny"], arr["nz"])
-    np.testing.assert_array_almost_equal(out["nz"], -arr["ny"])
+    np.testing.assert_array_almost_equal(out["ny"], -arr["nz"])
+    np.testing.assert_array_almost_equal(out["nz"], arr["ny"])
 
     # Quaternions: identity -> axis quat
-    expected_w = float(np.cos(-np.pi / 4))
-    expected_x = float(np.sin(-np.pi / 4))
+    expected_w = float(np.cos(np.pi / 4))
+    expected_x = float(np.sin(np.pi / 4))
     np.testing.assert_array_almost_equal(out["rot_0"], np.full(n, expected_w))
     np.testing.assert_array_almost_equal(out["rot_1"], np.full(n, expected_x))
     np.testing.assert_array_almost_equal(out["rot_2"], np.zeros(n))
@@ -301,10 +303,10 @@ def test_sequence_import_with_convert_y_up_rotates_first_frame(
     frame0 = seq.path / "frames" / "frame_0000.ply"
     assert frame0.is_file()
     out = PlyData.read(str(frame0))["vertex"].data
-    # Source had y=1, x=z=0. After Rx(-pi/2): x=0, y=z_old=0, z=-y_old=-1.
+    # Source had y=1, x=z=0. After Rx(+pi/2): x=0, y=-z_old=0, z=y_old=1.
     np.testing.assert_array_almost_equal(out["x"], np.zeros(2))
     np.testing.assert_array_almost_equal(out["y"], np.zeros(2))
-    np.testing.assert_array_almost_equal(out["z"], -np.ones(2))
+    np.testing.assert_array_almost_equal(out["z"], np.ones(2))
 
 
 def test_model_upload_with_convert_y_up(client, tmp_path, monkeypatch):
@@ -343,7 +345,7 @@ def test_model_upload_with_convert_y_up(client, tmp_path, monkeypatch):
     )
     assert landed.is_file()
     out = PlyData.read(str(landed))["vertex"].data
-    np.testing.assert_array_almost_equal(out["z"], -np.ones(2))
+    np.testing.assert_array_almost_equal(out["z"], np.ones(2))
 
     # _meta.json carries the audit field.
     import json as _json
@@ -394,7 +396,7 @@ def test_model_register_with_convert_y_up_returns_copied_mode(
         / "point_cloud.ply"
     )
     out = PlyData.read(str(landed))["vertex"].data
-    np.testing.assert_array_almost_equal(out["z"], -np.ones(2))
+    np.testing.assert_array_almost_equal(out["z"], np.ones(2))
 
 
 def test_model_register_default_still_no_copy(client, tmp_path, monkeypatch):
