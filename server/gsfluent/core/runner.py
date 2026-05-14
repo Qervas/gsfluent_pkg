@@ -1,13 +1,35 @@
-"""Subprocess wrapper around tools/sim_one.sh.
+"""Subprocess wrapper for server-side simulation.
 
-One Run = one subprocess. The runner tracks live runs in an in-process
-registry so the WebSocket layer (Task 1.6) can subscribe to status events.
+Under the split-topology deployment, this runs on the server (your-server)
+next to the canonical sim core. One Run = one subprocess spawn of a shell
+wrapper (`tools/run_sim.sh` by default) that orchestrates:
+    1. The canonical MPM sim (`gs_simulation_building.py`)
+    2. The fuse step (`tools/fuse_to_full_ply.py`)
+After the run exits cleanly, runner.py kicks off `batch_convert_to_npz.py`
+to rebuild the .npz cache so the laptop sync daemon picks it up.
+
+The wrapper path + interpreter are env-overridable so the runner doesn't
+hardcode the server's directory layout:
+
+    GSFLUENT_SIM_SCRIPT_RUNNER  path to the shell wrapper invoked per run
+                                (default: <PKG_ROOT>/tools/run_sim.sh)
+    GSFLUENT_NPZ_REBUILD        if "1" (default), trigger .npz build after
+                                run completion. Set to "0" if you'd rather
+                                build manually.
+
+The wrapper receives:
+    $1            model_dir
+    --config      recipe JSON written by this runner
+    --particles   particle count
+    --output      run name (output dir under work/library/sequences/)
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
+import sys
 import time
 import uuid
 from asyncio.subprocess import PIPE, STDOUT
@@ -22,10 +44,20 @@ from . import manifest as manifest_mod
 
 _log = logging.getLogger(__name__)
 
-SIM_ONE_SH = PKG_ROOT / "tools" / "sim_one.sh"
+# Resolved at module load. Settable via env var so deployment can point
+# at a server-specific wrapper without code changes.
+SIM_SCRIPT_RUNNER = Path(os.environ.get(
+    "GSFLUENT_SIM_SCRIPT_RUNNER",
+    str(PKG_ROOT / "tools" / "run_sim.sh"),
+))
+# After a successful run, optionally rebuild the .npz cache so the
+# laptop sync daemon notices the new sequence. Off by default in tests.
+NPZ_REBUILD_AFTER_RUN = os.environ.get("GSFLUENT_NPZ_REBUILD", "1") == "1"
+
 # Phase 1.5: point at the library so manifest.json + run.log + recipe.json
-# land in the same dir as sim_one.sh's frame outputs (library/sequences/<run>/).
-# Tests monkeypatch this attribute to a tmp dir, which keeps working.
+# land in the same dir as the wrapper's frame outputs
+# (library/sequences/<run>/). Tests monkeypatch this attribute to a tmp dir,
+# which keeps working.
 FUSED_DIR = lib.SEQUENCES_DIR
 
 
@@ -43,9 +75,7 @@ _RUNS: dict[str, Run] = {}
 
 
 def _translate_sim_area_if_local(recipe_data: dict, model_dir: Path) -> dict:
-    """If the recipe's sim_area is in model-local coords (small magnitudes),
-    translate it to world coords using the model's bbox center. Otherwise
-    leave the recipe untouched.
+    """Translate model-local sim_area to world coords when the recipe says so.
 
     The sim core expects sim_area in absolute world coords (the canonical
     R7.M_jelly_cluster shape: [3440, 3480, 29030, 29060, -25, 35] for a
@@ -54,15 +84,30 @@ def _translate_sim_area_if_local(recipe_data: dict, model_dir: Path) -> dict:
     those to the actual model's location at run-start so the same recipe
     can run on any model.
 
-    Heuristic for "looks model-local": every value in sim_area has
-    abs <= 200. World-coord recipes typically have values >= a few thousand
-    (model centers in COLMAP scenes are often far from origin)."""
+    The recipe MUST be explicit about which frame its sim_area is in:
+        "sim_area_frame": "model"   → translate by model's bbox center
+        "sim_area_frame": "world"   → leave alone (or absent — that's the
+                                        default for back-compat with
+                                        legacy world-coord recipes that
+                                        predate this field)
+
+    The previous version used a |value| <= 200 heuristic to guess
+    model-vs-world. That misfired silently for legitimately-small
+    world-coord recipes (e.g. a scene centered near origin in a
+    normalized COLMAP), translating them into nonsense. Now-required
+    explicit declaration removes the guesswork."""
     out = dict(recipe_data)
     sim_area = out.get("sim_area")
     if not sim_area or len(sim_area) != 6:
         return out
-    if any(abs(v) > 200 for v in sim_area):
-        # Looks like world coords already — leave alone.
+    frame = out.get("sim_area_frame", "world")
+    if frame == "world":
+        return out
+    if frame != "model":
+        _log.warning(
+            "recipe has unknown sim_area_frame=%r (expected 'model'|'world'); "
+            "treating as world", frame,
+        )
         return out
 
     center = _read_model_bbox_center(model_dir)
@@ -160,23 +205,28 @@ async def start_run(
     # alone (assume the recipe author already specified world coords).
     effective_recipe = _translate_sim_area_if_local(recipe_data, model_dir)
 
-    # Write the merged effective recipe to a temp file sim_one.sh can consume.
+    # Write the merged effective recipe to a temp file the wrapper consumes.
     recipe_path = run_dir / "_effective_recipe.json"
     recipe_path.write_text(json.dumps(effective_recipe, indent=2))
 
+    if not SIM_SCRIPT_RUNNER.is_file():
+        raise FileNotFoundError(
+            f"sim wrapper not found: {SIM_SCRIPT_RUNNER}. "
+            "Adapt tools/run_sim.sh to your server, or set "
+            "$GSFLUENT_SIM_SCRIPT_RUNNER to point at your wrapper."
+        )
+
     cmd = [
-        str(SIM_ONE_SH),
+        "bash", str(SIM_SCRIPT_RUNNER),
         str(model_dir),
         "--config", str(recipe_path),
         "--particles", str(particles),
         "--output", run_name,
-        "--live",
-        "--no-vkgs-launch",
     ]
     try:
         proc = await _spawn(*cmd, stdout=PIPE, stderr=STDOUT, cwd=str(PKG_ROOT))
     except Exception as e:
-        _log.exception("failed to spawn sim_one.sh for run %s", run_name)
+        _log.exception("failed to spawn sim wrapper for run %s", run_name)
         manifest_mod.update(
             run_dir,
             status="error",
@@ -202,15 +252,38 @@ async def _drain(run: Run, run_dir: Path) -> None:
     # this file on subscribe and replays it as log events.
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "run.log"
-    with log_path.open("a", buffering=1) as log_fh:
-        async for raw in run.proc.stdout:
-            line = raw.decode(errors="replace").rstrip()
-            if line:
-                run.log_lines.append(line)
-                if len(run.log_lines) > 2000:
-                    run.log_lines = run.log_lines[-2000:]
-                log_fh.write(line + "\n")
-    rc = await run.proc.wait()
+    # Outer try/finally guarantees a final manifest write even on IO
+    # errors mid-drain (broken pipe, decode failure, disk-full). Without
+    # this the run stays "running" forever in the UI when stdout
+    # iteration raises, because the post-drain manifest update is dead
+    # code on that path.
+    rc: int = -1
+    try:
+        with log_path.open("a", buffering=1) as log_fh:
+            try:
+                async for raw in run.proc.stdout:
+                    line = raw.decode(errors="replace").rstrip()
+                    if line:
+                        run.log_lines.append(line)
+                        if len(run.log_lines) > 2000:
+                            run.log_lines = run.log_lines[-2000:]
+                        log_fh.write(line + "\n")
+            except Exception as e:
+                _log.exception("drain loop crashed for run %s", run.name)
+                log_fh.write(f"[runner] drain crashed: {e}\n")
+        rc = await run.proc.wait()
+    except Exception as e:
+        _log.exception("drain wrapper crashed for run %s", run.name)
+        if run.state == "running":
+            run.state = "error"
+        manifest_mod.update(
+            run_dir,
+            status=run.state,
+            exit_code=-1,
+            finished_at=time.time(),
+            error=f"drain crashed: {e}",
+        )
+        return
     # Only overwrite state if still 'running' — preserves a 'cancelled' that
     # cancel_run set while we were tailing stdout. Without this guard, every
     # run that gets cancelled would end up reported as 'done' (rc=0 if the
@@ -223,6 +296,50 @@ async def _drain(run: Run, run_dir: Path) -> None:
         exit_code=rc,
         finished_at=time.time(),
     )
+
+    # On a successful run, rebuild the .npz cache so the laptop sync
+    # daemon notices the new sequence on its next poll. We invoke
+    # batch_convert_to_npz.py as a separate subprocess (rather than
+    # importing it) so any plyfile / numpy work it does runs in its own
+    # process — keeps the API server's memory profile clean. Logged to
+    # run.log so failures are visible in the same WS replay.
+    if run.state == "done" and NPZ_REBUILD_AFTER_RUN:
+        try:
+            await _rebuild_npz(run.name, run_dir, log_path)
+        except Exception as e:
+            _log.warning("post-run .npz rebuild failed for %s: %s", run.name, e)
+
+
+async def _rebuild_npz(run_name: str, run_dir: Path, log_path: Path) -> None:
+    """Invoke `tools/batch_convert_to_npz.py <run_name>` as a subprocess.
+
+    Output is appended to the same run.log so a WS subscriber sees the
+    cache build progress as part of the run timeline. We don't fail the
+    run if the rebuild fails — the sequence still exists on disk, just
+    isn't viser-playable until the cache is built manually."""
+    converter = PKG_ROOT / "tools" / "batch_convert_to_npz.py"
+    if not converter.is_file():
+        return
+    cmd = [sys.executable, str(converter), run_name]
+    try:
+        proc = await _spawn(*cmd, stdout=PIPE, stderr=STDOUT, cwd=str(PKG_ROOT))
+    except Exception as e:
+        with log_path.open("a") as fh:
+            fh.write(f"[runner] npz rebuild spawn failed: {e}\n")
+        return
+    assert proc.stdout is not None
+    with log_path.open("a", buffering=1) as fh:
+        fh.write(f"[runner] building .npz cache for {run_name}…\n")
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                fh.write(f"[npz] {line}\n")
+    rc = await proc.wait()
+    with log_path.open("a") as fh:
+        if rc == 0:
+            fh.write(f"[runner] .npz cache built for {run_name}\n")
+        else:
+            fh.write(f"[runner] .npz cache build exited {rc} for {run_name}\n")
 
 
 async def wait_for_run(run_id: str) -> None:
@@ -252,7 +369,7 @@ async def _kill_after_grace(run: Run, grace_sec: float) -> None:
     """If the subprocess hasn't exited within grace_sec of SIGTERM, SIGKILL it.
 
     KNOWN LIMITATION: This only kills the direct subprocess (e.g. bash).
-    If the subprocess spawned children (sim_one.sh -> python), those orphans
+    If the subprocess spawned children (run_sim.sh -> python), those orphans
     can keep stdout pipes open until they exit naturally, which blocks
     `_drain`'s `async for` and prevents `wait_for_run` from returning.
 

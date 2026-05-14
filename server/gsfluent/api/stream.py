@@ -34,7 +34,11 @@ from watchfiles import awatch
 
 from ..core import library as lib
 from ..core import runner
-from ..core.frame_stream import parse_frame_xyz, parse_static_attrs
+from ..core.frame_stream import (
+    PackedReader,
+    parse_frame_xyz,
+    parse_static_attrs,
+)
 from ..core.runner import _log_task_exception
 
 _log = logging.getLogger(__name__)
@@ -149,18 +153,51 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
 
     sent: set[str] = set()
     sent_static = False
-    # Initial snapshot — look in BOTH the run root AND frames/ subdir.
-    # sim_one.sh writes frames directly into the run dir; the new pipeline
-    # may use a frames/ subdir going forward. Support both.
+    # Initial snapshot. Prefer packed `frames.bin` (mmap-fast, 30× smaller
+    # on disk) if it exists; fall back to per-ply iteration otherwise so
+    # legacy sequences keep working.
+    #
+    # PackedReader owns an open file descriptor and mmap. Without
+    # explicit close on WS disconnect we'd leak both per connection
+    # (relying on __del__ at GC time is non-deterministic under WS
+    # exception paths). The outer try/finally below pairs with this open.
+    packed = PackedReader.maybe_open(run_dir)
     try:
-        # Numeric-by-frame-idx sort. Path's default sort is lexicographic —
-        # which orders frame_10 before frame_2 — making the initial snapshot
-        # arrive out of playback order. The viewer's currentFrameIdx then
-        # points at frames that haven't streamed yet (Map.get returns
-        # undefined), causing visible jumps and the progress bar to climb
-        # erratically.
-        for f in sorted(_list_frame_plys(run_dir), key=_frame_idx_for_sort):
-            sent_static = await _send(ws, run_name, f, sent, sent_static)
+        if packed is not None:
+            # Static attrs come from the bootstrap frame_0000.ply — packed
+            # data only carries xyz. The ply still lives at frames/.
+            bootstrap_ply = run_dir / "frames" / "frame_0000.ply"
+            if not bootstrap_ply.is_file():
+                bootstrap_ply = run_dir / "frame_0000.ply"
+            if bootstrap_ply.is_file() and not sent_static:
+                attrs = parse_static_attrs(bootstrap_ply)
+                if attrs is not None:
+                    await ws.send_json({
+                        "type": "static_attrs",
+                        "run_name": run_name,
+                        "n": int(attrs["n"]),
+                        "R_b64":      "",
+                        "scales_b64": "",
+                        "rgb_b64":    base64.b64encode(attrs["rgb"].tobytes()).decode("ascii"),
+                        "opacity_b64":"",
+                    })
+                    sent_static = True
+            for idx in range(packed.n_frames):
+                xyz = packed.xyz(idx)
+                await ws.send_json({
+                    "type": "frame_meta", "run_name": run_name,
+                    "frame_idx": idx, "n": int(xyz.shape[0]),
+                })
+                await ws.send_bytes(xyz.tobytes())
+                # Synthesize a frame name so the dedupe set + downstream
+                # mid-stream watch still see the same identity space.
+                sent.add(f"frame_{idx:04d}.ply")
+        else:
+            # Legacy per-ply path. Numeric-by-frame-idx sort. Path's default
+            # sort is lexicographic — orders frame_10 before frame_2 — which
+            # makes the initial snapshot arrive out of playback order.
+            for f in sorted(_list_frame_plys(run_dir), key=_frame_idx_for_sort):
+                sent_static = await _send(ws, run_name, f, sent, sent_static)
     except WebSocketDisconnect:
         return
     except Exception as e:
@@ -231,7 +268,23 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
         except Exception:
             pass
     except asyncio.CancelledError:
+        # Re-raise so the parent task sees cancellation, but make sure
+        # we close the mmap'd reader first. Without this the fd + page
+        # cache stay pinned for the lifetime of the parent process.
+        if packed is not None:
+            try:
+                packed.close()
+            except Exception:
+                pass
         raise
+    finally:
+        # Catches the normal-exit and `return`-after-disconnect paths.
+        # Idempotent: close() guards against double-close internally.
+        if packed is not None:
+            try:
+                packed.close()
+            except Exception:
+                pass
 
 
 def _list_frame_plys(run_dir: Path) -> list[Path]:

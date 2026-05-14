@@ -97,11 +97,32 @@ export function SplatScene() {
     // and at an angle so we see all three axes. Z-up world: position above-
     // and-to-the-side of the centroid. Up-axis itself is owned by
     // <UpAxisSync> in Viewport — it's invariant of staticAttrs timing.
-    const camPos = center.clone().add(
-      new THREE.Vector3(diag * 1.0, diag * 1.0, diag * 0.7)
-    );
+    // Camera positioning: honor a saved pointsCamera (set by the
+    // Splat→Points mode-toggle effect in Viewport.tsx) if one exists.
+    // Auto-fit only when there's no prior viewpoint — typically the first
+    // mount for a new model. The bbox/scaleScale/sceneFloor publishing
+    // below still runs unconditionally so the Grid scales correctly.
+    const saved = useStore.getState().pointsCamera;
+    let camPos: THREE.Vector3;
+    let look: THREE.Vector3;
+    if (saved) {
+      camPos = new THREE.Vector3(...saved.position);
+      look = new THREE.Vector3(...saved.target);
+    } else {
+      // Place the camera 1.5× the diagonal away from the center, looking
+      // down and at an angle so we see all three axes.
+      camPos = center.clone().add(
+        new THREE.Vector3(diag * 1.0, diag * 1.0, diag * 0.7)
+      );
+      look = center.clone();
+    }
     camera.position.copy(camPos);
-    camera.near = Math.max(diag * 0.001, 0.01);
+    // Initial near plane. Tighter than the old 0.001 ratio because user
+    // gestures (zoom-in, fly-through) routinely take camera-to-splat
+    // distance below the old 0.01 floor, causing front-face splats to
+    // get culled. The useFrame loop below tightens this further on the
+    // fly based on the live camera-target distance.
+    camera.near = Math.max(diag * 0.0001, 1e-5);
     // far must cover the camera-to-origin distance too — drei's Grid is
     // anchored at world origin and gets clipped if far is shorter than the
     // distance from the camera to (0,0,0). For a model at (3460, 29045, 5)
@@ -110,10 +131,10 @@ export function SplatScene() {
     const distToOrigin = camPos.length();
     camera.far = Math.max(diag * 100, distToOrigin * 2);
     camera.updateProjectionMatrix();
-    camera.lookAt(center);
+    camera.lookAt(look);
 
     if (typeof controls.target?.copy !== "function") return;
-    controls.target.copy(center);
+    controls.target.copy(look);
     controls.update?.();
 
     // Bbox-derived point size: 0.4% of the diagonal. Scale-invariant — works
@@ -146,13 +167,61 @@ export function SplatScene() {
   // The frame-advance logic itself moved to <PlaybackDriver/> in Phase 3
   // — this loop is now purely a data-pump: read currentFrameIdx, write
   // bytes. Both points and splat renderers read the SAME store value.
+  // We also retune camera.near each tick so zooming the camera close
+  // doesn't clip near-surface splats. Near tracks the camera-to-target
+  // distance (× 0.001) with an absolute floor at 1e-5 to keep the
+  // far/near ratio inside the depth buffer's precision.
   useFrame(() => {
-    if (!built) return;
-    const xyz = frameXyz.get(currentFrameIdx);
-    if (!xyz || xyz.length !== built.positions.length) return;
-    built.positions.set(xyz);
-    if (positionsRef.current) positionsRef.current.needsUpdate = true;
+    if (built) {
+      const xyz = frameXyz.get(currentFrameIdx);
+      if (xyz && xyz.length === built.positions.length) {
+        built.positions.set(xyz);
+        if (positionsRef.current) positionsRef.current.needsUpdate = true;
+      }
+    }
+    const tgt = (controls as unknown as { target?: THREE.Vector3 })?.target;
+    if (tgt) {
+      const dist = camera.position.distanceTo(tgt);
+      // dist * 0.001 means anything closer than 0.1% of the orbit radius
+      // gets culled. At dist=5cm that's 50 μm — well below any plausible
+      // splat radius — so front-face splats stay rendered all the way in.
+      const desired = Math.max(dist * 0.001, 1e-5);
+      // Only update when there's a meaningful change; touching projection
+      // matrix every frame is cheap but recomputing it constantly is not
+      // free with anti-aliasing passes.
+      if (Math.abs(camera.near - desired) > desired * 0.05) {
+        camera.near = desired;
+        camera.updateProjectionMatrix();
+      }
+    }
   });
+
+  // Publish Points-mode camera state to the store on every OrbitControls
+  // 'change'. Viewport.tsx's mode-toggle effect reads the latest value
+  // and POSTs it to viser /camera when entering Splats mode, so the user's
+  // viewpoint carries across the toggle. Writes are cheap (single Zustand
+  // set per orbit gesture); no throttling needed.
+  useEffect(() => {
+    if (!controls) return;
+    const setPointsCamera = useStore.getState().setPointsCamera;
+    const onChange = () => {
+      const tgt = (controls as unknown as { target?: THREE.Vector3 }).target;
+      if (!tgt) return;
+      setPointsCamera({
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        target:   [tgt.x, tgt.y, tgt.z],
+      });
+    };
+    // The OrbitControls drei wrapper extends THREE.EventDispatcher and fires
+    // 'change' on each interaction tick. Casting to the bare type because
+    // R3F's `controls` is typed loose (could be any ControlsImpl).
+    const dispatcher = controls as unknown as {
+      addEventListener: (t: string, l: () => void) => void;
+      removeEventListener: (t: string, l: () => void) => void;
+    };
+    dispatcher.addEventListener("change", onChange);
+    return () => dispatcher.removeEventListener("change", onChange);
+  }, [controls, camera]);
 
   if (!built) return null;
 
