@@ -54,9 +54,12 @@ def create_app() -> FastAPI:
                 ),
             }
         try:
+            # Note: `cuda_version` was historically queryable but newer
+            # drivers (565+) reject it. Stick to fields available in
+                # both old and new nvidia-smi.
             out = subprocess.check_output(
                 [smi,
-                 "--query-gpu=name,driver_version,cuda_version,memory.total,memory.free",
+                 "--query-gpu=index,name,driver_version,memory.total,memory.free",
                  "--format=csv,noheader"],
                 text=True, timeout=5,
             ).strip()
