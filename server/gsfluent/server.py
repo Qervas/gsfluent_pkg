@@ -1,3 +1,9 @@
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +32,58 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     async def health():
         return {"status": "ok", "pkg_root": str(PKG_ROOT)}
+
+    @app.get("/api/gpu-check")
+    async def gpu_check():
+        """Probe the host's NVIDIA GPU(s) via nvidia-smi. Used as a
+        deployment-time handshake: confirms (1) nvidia-smi is reachable
+        from this process (so the container was started with `--gpus all`
+        or the host has the CUDA toolkit on PATH), and (2) at least one
+        GPU is visible. Returns the raw CSV rows for the caller to
+        inspect."""
+        smi = shutil.which("nvidia-smi")
+        if smi is None:
+            return {
+                "ok": False,
+                "error": "nvidia-smi not on PATH",
+                "hint": (
+                    "If running in Docker: was the container started with "
+                    "`--gpus all` and is the nvidia-container-toolkit "
+                    "installed on the host? On bare metal: install the "
+                    "NVIDIA driver + CUDA toolkit so nvidia-smi is on PATH."
+                ),
+            }
+        try:
+            out = subprocess.check_output(
+                [smi,
+                 "--query-gpu=name,driver_version,cuda_version,memory.total,memory.free",
+                 "--format=csv,noheader"],
+                text=True, timeout=5,
+            ).strip()
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "nvidia-smi timed out (>5s)"}
+        except subprocess.CalledProcessError as e:
+            return {"ok": False, "error": f"nvidia-smi exit {e.returncode}",
+                    "stderr": (e.stderr or "").strip()}
+        return {
+            "ok": True,
+            "gpus": [line.strip() for line in out.splitlines() if line.strip()],
+        }
+
+    @app.get("/api/system")
+    async def system_info():
+        """Container/host introspection. Useful before submitting the
+        first sim run — confirms the backend is the version + env the
+        deployer expects. No secrets exposed."""
+        return {
+            "hostname":      socket.gethostname(),
+            "platform":      platform.platform(),
+            "python":        sys.version.split()[0],
+            "pkg_root":      str(PKG_ROOT),
+            "sim_script":    os.environ.get("GSFLUENT_SIM_SCRIPT_RUNNER", "<default>"),
+            "sim_home":      os.environ.get("GSFLUENT_SIM_HOME", "<default>"),
+            "in_container":  Path("/.dockerenv").exists(),
+        }
 
     from .api import (
         recipes as recipes_api,

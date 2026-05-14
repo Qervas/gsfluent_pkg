@@ -1,0 +1,96 @@
+# gsfluent backend image — reproducible deployment of the workbench's
+# server-side FastAPI gateway + SPA. GPU access is wired in (nvidia/cuda
+# base + the host's nvidia-container-toolkit), so future image revisions
+# can layer the MPM sim stack on top without changing the base.
+#
+# Stage 1: build the React SPA (Node 22). The compiled assets land in
+#   server/gsfluent/static/ inside the image so `gsfluent serve` mounts
+#   them at /. Separated into its own stage so changes to the server's
+#   Python only invalidate the python layers, not the node_modules.
+#
+# Stage 2: install gsfluent server into a nvidia/cuda runtime image.
+#   Currently the image has NO sim stack — only the API gateway. Test
+#   the handshake (SSH tunnel + /api/health + /api/gpu-check) first,
+#   then a follow-up commit adds torch/warp/taichi + the canonical sim
+#   source.
+#
+# Build (from gsfluent_pkg/ root):
+#   docker build -f docker/Dockerfile.backend -t gsfluent-backend:dev .
+#
+# Run (server admin):
+#   docker run --rm --gpus all \
+#       -p 8080:8080 \
+#       gsfluent-backend:dev
+#
+# Test (each team member from their laptop):
+#   ssh -L 8080:localhost:8080 sxyin-host
+#   curl http://localhost:8080/api/health
+#   curl http://localhost:8080/api/gpu-check
+#   curl http://localhost:8080/api/system
+
+# ============================================================================
+# Stage 1 — SPA build
+# ============================================================================
+FROM node:22-slim AS spa-build
+
+WORKDIR /spa
+
+# Copy package manifests first so a server-only change doesn't invalidate
+# the node_modules layer.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# Copy the rest of the frontend and build.
+COPY frontend/ ./
+RUN npm run build
+
+# ============================================================================
+# Stage 2 — runtime image with FastAPI + GPU access
+# ============================================================================
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Minimal system deps. python3.11-distutils is needed for `pip install -e`
+# to resolve the editable install; build-essential is for compiling any
+# C-extension wheels that don't ship prebuilt. No git/curl/etc. — keeps
+# the image lean.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-distutils python3.11-venv python3-pip \
+        build-essential \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install the server package. We copy ONLY server/ here so frontend
+# rebuilds don't invalidate the pip-install layer.
+COPY server/ /app/server/
+RUN python -m pip install --upgrade pip wheel \
+    && python -m pip install -e /app/server
+
+# Copy tools (run_sim.sh, fuse_to_full_ply.py, etc.) so runner.py can
+# spawn them. These don't run for the handshake-only image but the
+# paths are wired up for the next layer that adds the sim stack.
+COPY tools/ /app/tools/
+
+# Drop in the built SPA so /api/* + / route works from one origin.
+# COPY --from=spa-build /spa/dist/ /app/server/gsfluent/static/
+# (Re-enable once the SPA build is reliable; for handshake-only, the
+# JSON API endpoints are enough. Until then the image stays smaller.)
+
+# These defaults can be overridden at `docker run` time via -e.
+ENV GSFLUENT_SIM_HOME=/opt/gsfluent-sim \
+    GSFLUENT_SIM_PYTHON=python \
+    GSFLUENT_SIM_SCRIPT_RUNNER=/app/tools/run_sim.sh \
+    GSFLUENT_NPZ_REBUILD=1
+
+EXPOSE 8080
+
+# Listen on 0.0.0.0 so the published port is reachable from outside.
+# `--no-browser` skips the auto-open attempt (no display in a container).
+CMD ["gsfluent", "serve", "--host", "0.0.0.0", "--port", "8080", "--no-browser"]
