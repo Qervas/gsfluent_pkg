@@ -1,0 +1,71 @@
+# Reproducible runtime config for the gsfluent backend container.
+#
+# Why compose: every deployer-tunable knob lives here, so users don't
+# need to memorize a long `docker run -e ... -p ... -v ...` command.
+# Override anything by setting env vars before invoking compose:
+#
+#   BACKEND_PORT=18080 \
+#   LIBRARY_HOST_DIR=$USER_HOME/gsfluent_work/library \
+#   docker compose -f docker/compose.yml up -d
+#
+# Or copy this file, edit it in place, and `docker compose -f my.yml up`.
+#
+# All paths below are HOST paths (mounted into the container at the
+# corresponding /work/... locations). The container itself stays
+# stateless: code in the image, data on the host.
+
+services:
+  backend:
+    image: gsfluent-backend:${IMAGE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: ${CONTAINER_NAME:-gsfluent-backend}
+    restart: unless-stopped
+
+    # Expose the FastAPI port. Override BACKEND_PORT to publish on a
+    # different host port (useful if multiple deployments share a box
+    # or if 8080 is taken).
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+
+    # GPU access via the nvidia-container-toolkit. Requires the host to
+    # have it installed:
+    #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+    # Without this, /api/gpu-check returns "nvidia-smi not on PATH".
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Library + cache volumes. The container is stateless code; all
+    # persistent data lives on the host. Override LIBRARY_HOST_DIR to
+    # point at wherever your sim outputs should accumulate.
+    #
+    # Layout inside the container mirrors the laptop workbench:
+    #   /app/work/library/sequences   ← fused-frame outputs
+    #   /app/work/cache/viser         ← .npz cache (served to laptops)
+    #   /app/work/uploads             ← user-uploaded 3DGS models
+    volumes:
+      - ${LIBRARY_HOST_DIR:-./work/library}:/app/work/library
+      - ${CACHE_HOST_DIR:-./work/cache}:/app/work/cache
+      - ${UPLOADS_HOST_DIR:-./work/uploads}:/app/work/uploads
+      # Optional: mount a path to the canonical gsfluent sim install on
+      # the host. Used by run_sim.sh to invoke gs_simulation_building.py.
+      # Leave commented for handshake-only deploys.
+      # - ${SIM_HOST_DIR:-$GSFLUENT_SIM_HOME}:/opt/gsfluent-sim:ro
+
+    # Environment knobs. Most are no-ops for handshake-only (until the
+    # sim stack lands in the image), but they're documented so future
+    # deployers don't have to dig into the source to find them.
+    environment:
+      - GSFLUENT_SIM_HOME=${GSFLUENT_SIM_HOME:-/opt/gsfluent-sim}
+      - GSFLUENT_SIM_PYTHON=${GSFLUENT_SIM_PYTHON:-python}
+      - GSFLUENT_SIM_SCRIPT_RUNNER=${GSFLUENT_SIM_SCRIPT_RUNNER:-/app/tools/run_sim.sh}
+      - GSFLUENT_NPZ_REBUILD=${GSFLUENT_NPZ_REBUILD:-1}
+
+    # FastAPI keeps the connection open for streaming; bump timeouts in
+    # the reverse proxy / SSH tunnel if you see WS drops on slow links.
