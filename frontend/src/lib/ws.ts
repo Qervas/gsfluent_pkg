@@ -31,8 +31,21 @@ export class StreamClient {
   constructor(private h: Handlers) {}
 
   connect(): void {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const url = `${proto}://${location.host}/api/stream`;
+    // Points-mode WS source. Under the split-topology deployment the
+    // SPA loads from the server but the Points stream is served by a
+    // *local* mmap'd service on the laptop (tools/local_stream.py) so
+    // we don't pay WAN bandwidth for ~120 MB/s of per-frame xyz. The
+    // VITE_LOCAL_STREAM_URL env var configures that endpoint; fallback
+    // is the same-origin shape so a server-bundled deployment (no
+    // local laptop service) still works for testing.
+    const fromEnv = import.meta.env.VITE_LOCAL_STREAM_URL as string | undefined;
+    let url: string;
+    if (fromEnv) {
+      url = fromEnv;
+    } else {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      url = `${proto}://${location.host}/api/stream`;
+    }
     this.ws = new WebSocket(url);
     this.ws.binaryType = "arraybuffer";
     this.ws.onmessage = (ev) => this._onMessage(ev);
@@ -140,7 +153,12 @@ function decodeStatic(msg: {
   rgb_b64: string;
   opacity_b64: string;
 }): StaticAttrs {
+  // The server emits empty strings for fields the Points renderer doesn't
+  // consume (R, scales, opacity) so the static_attrs message doesn't blow
+  // past WS message size limits. Skip the atob → Float32Array dance for
+  // empty inputs; just return an empty typed array.
   const dec = (b64: string): Float32Array => {
+    if (!b64) return new Float32Array(0);
     const bin = atob(b64);
     const a = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);

@@ -222,7 +222,7 @@ def _heuristic_model_ref(run_name: str, known_models: list[str]) -> Optional[str
     """Best-effort match of `<run_name>` to a model name.
 
     We try two patterns the existing pipeline uses:
-      - "<modelname>_<recipe>_<datestamp>"  (sim_one.sh default)
+      - "<modelname>_<recipe>_<datestamp>"  (legacy run-naming default)
       - "<modelname>__<rest>" (double underscore separator, less common)
 
     Only return a match if exactly one known model name is a prefix; on

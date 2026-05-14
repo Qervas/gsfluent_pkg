@@ -1,178 +1,171 @@
-# gsfluent — drop a building, watch it deform
+# gsfluent — workbench for animated 3DGS sequences
 
-Self-contained physics simulator for 3D Gaussian Splatting scenes. Drop in a 3DGS-trained building (or any object), pick a recipe (jelly, demolition, ...), and watch it animate live in your browser. Built on MPM (Material Point Method) physics + viser/WebGL rendering.
+Browser workbench for inspecting and playing back physics-simulated 3D
+Gaussian Splatting sequences. Pick a sequence, scrub the timeline,
+switch between point-cloud and splat rendering, orbit the camera.
 
-> **Status:** Linux + NVIDIA GPU validated. Other platforms best-effort. Sim core is Python (PyTorch + NVIDIA Warp + Taichi); viewer is browser-side WebGL via viser, so the playback works on any OS with a browser.
+Simulation runs on the server (`sxyin-host`); the laptop is a viewer
+and a gateway to the run/job API. No CUDA, no PyTorch, no Warp, no
+Taichi locally — pure-Python deps.
 
 [中文 README](README.md)
 
-## Install (one-time, ~5 min)
+## Install
+
+Pure pip, no conda. Pick whichever Python you have on PATH; the seven
+deps below get installed there.
 
 ```bash
-git clone https://github.com/Qervas/gsfluent_pkg
+git clone <repo>
 cd gsfluent_pkg
-./setup.sh
+./setup-view.sh
 ```
 
-`setup.sh` creates a conda env (`gsfluent`), installs the right PyTorch/Warp/Taichi versions, and builds two CUDA extensions (diff_gaussian_rasterization + simple-knn) from the bundled gaussian-splatting submodule. Re-running it is safe.
+What `setup-view.sh` installs:
 
-Requirements:
-- conda (Miniconda / Anaconda / Mambaforge)
-- NVIDIA GPU with up-to-date driver (CUDA 12.x runtime — install via conda or system package)
-- ~5 GB free disk for the conda env
-
-## Use
-
-### Run (recommended: React workbench)
-
-```bash
-git clone https://github.com/Qervas/gsfluent_pkg
-cd gsfluent_pkg/server
-make build         # build frontend + install server
-gsfluent serve     # opens http://localhost:8080
+```
+fastapi  uvicorn  pydantic  watchfiles  plyfile  numpy  viser
 ```
 
-> Deprecated: `./run-workbench.sh` (the legacy viser workbench) will be
-> removed in v0.3.
-
-### Legacy browser workbench (deprecated)
-
-One page does everything — upload model, pick recipe, tweak parameters, run sim, watch results:
+Plus `pip install -e ./server` so the `gsfluent` console script lands
+on PATH. To target a non-default Python:
 
 ```bash
-./run-workbench.sh
+PYTHON=python3.11 ./setup-view.sh
 ```
 
-Opens at `http://localhost:8080`:
-
-- **Model** — drop a `.ply` to upload, or paste a path to an existing model directory.
-- **Recipe** — dropdown of `jelly` / `demolition` / any you've added. Params below auto-populate with that recipe's defaults.
-- **Recipe parameters** — sliders / inputs for grid resolution, substep dt, frame count, camera angles, etc. Edits apply on the next Run.
-- **Run** — click and the sim spawns in the background; the building deforms live in the 3D viewport as frames arrive.
-- **Playback** — frame slider, pause, speed.
-
-No terminal commands, no JSON editing required.
-
-### CLI (for scripted use)
+To build the SPA for production (HMR-less mode):
 
 ```bash
-./run-sim.sh <building_path> --recipe demolition
+cd frontend && npm install && npm run build
+cp -r frontend/dist/* server/gsfluent/static/
 ```
 
-`<building_path>` can be:
+## Run
 
-- a single `.ply` file (the script auto-wraps it into the directory layout the simulator expects), or
-- a 3DGS model directory (with the standard `point_cloud/iteration_*/point_cloud.ply`).
-
-The script runs the MPM sim (~150 frames at 1 fps on a laptop GPU), fuses each frame back with the original Gaussian attributes, and opens `localhost:8080` showing the building animating live as the sim computes.
-
-Examples:
+Once on the server (sxyin-host):
 
 ```bash
-./run-sim.sh ~/projects/my_3dgs_model/             --recipe jelly
-./run-sim.sh /tmp/quick_scan.ply                   --recipe demolition --particles 100000
-./run-sim.sh ~/data/building_a/point_cloud.ply     --recipe jelly --output building_a_test
+./setup-server.sh
+./run-server.sh                    # backend on :8080
 ```
 
-### Available recipes
-
-| Recipe       | What it does                                | Notes                          |
-| ------------ | ------------------------------------------- | ------------------------------ |
-| `jelly`      | Soft body wobble / gentle bounce            | good for first try             |
-| `demolition` | Building collapse via sequential release    | dramatic; ~2 min on RTX 5070   |
-
-### Modify or add recipes
-
-Recipes are JSON files in `tools/recipes/`. Each holds material parameters, boundary conditions, camera angles, and integration settings:
+On the laptop:
 
 ```bash
-# Copy an existing recipe to start from
+./setup-view.sh
+GSFLUENT_SERVER=http://sxyin-host:8080 ./run-laptop.sh
+```
+
+This brings up two cooperating servers:
+
+```
+┌──────────────────┐  HTTP   ┌─────────────────────┐
+│ gsfluent serve   │ ←─────→ │  React workbench    │
+│ :8080            │         │  (browser)          │
+│  - SPA + REST    │         │  ┌───────────────┐  │
+│  - /api/stream   │         │  │ iframe :8091  │ ←─┐
+│    (WS, Points)  │         │  │  viser splat  │   │  /set, /camera
+└──────────────────┘         │  └───────────────┘   │  → :8092
+                             └─────────────────────┘
+                                                      │
+                             ┌────────────────────────┴─┐
+                             │  tools/viser_headless.py │
+                             │  viser :8091, ctl :8092  │
+                             └──────────────────────────┘
+```
+
+Open `http://localhost:8080` (or `:5173` in dev mode). Outliner picks
+a sequence; the playback bar scrubs frames; the render-mode toggle
+switches between **Points** (R3F + int16-quantized xyz over WebSocket)
+and **Splats** (viser iframe driven by the control API).
+
+## Where data lives
+
+```
+work/
+├── library/
+│   └── sequences/<name>/
+│       ├── frames/frame_NNNN.ply   # fused 3DGS frames (Z-up at rest)
+│       ├── frames.bin              # GSSQ-packed int16 xyz (Points mode)
+│       ├── manifest.json
+│       └── _meta.json
+└── cache/
+    └── viser/<name>.npz            # Splats-mode playback cache
+```
+
+A sequence is the canonical artifact: fused per-frame splat plies plus
+optional packed-binary and viser cache files. Two ways to populate it:
+
+1. **From the server** — `rsync sxyin-host:.../sequences/<name>/`
+   into `work/library/sequences/`, then
+   `python tools/batch_convert_to_npz.py` to build the viser cache.
+2. **From a local sim_*.ply set** — `python tools/fuse_to_full_ply.py`
+   on rsynced sim outputs (this needs only numpy + plyfile + optional
+   torch for `--knn_rotation`).
+
+The server's `runner.py` auto-runs `batch_convert_to_npz.py` after each
+sim completes (idempotent — only rebuilds stale .npz). The laptop's
+`sync_daemon` then mirrors the new .npz over.
+
+## Render modes
+
+| Mode | Renderer | Transport | What it's good for |
+|---|---|---|---|
+| **Points** | R3F (three.js) | `/api/stream` WS, int16 xyz via `PackedReader` | Lightweight inspection; works without the viser cache |
+| **Splats** | viser iframe | `POST /set`, `POST /camera` to `:8092` | High-quality splat rendering for review and demos |
+
+Both modes share `currentFrameIdx` and `simRunName` from the Zustand
+store, so the timeline and outliner drive whichever renderer is
+active. Toggling modes does not reset playback state.
+
+## Recipes (sim parameters)
+
+`tools/recipes/*.json` defines material + boundary + integration
+parameters consumed by the server-side sim. The schema matches what
+`gs_simulation_building.py` on `sxyin-host` expects.
+
+```bash
+ls tools/recipes/
+# cluster_6_15_smash.json  demolition.json  jelly.json  earthquake.json  ...
 cp tools/recipes/jelly.json tools/recipes/my_recipe.json
-# Edit the parameters
-vim tools/recipes/my_recipe.json
-# Use it
-./run-sim.sh <building_path> --recipe my_recipe
 ```
 
-Key parameters worth tweaking:
-
-- `n_grid` — MPM grid resolution; higher = finer detail, VRAM grows quadratically
-- `substep_dt` — inner integration step; smaller = more stable but slower
-- `frame_num` — total animation frames at `frame_dt` spacing
-- `boundary_conditions` — list of BCs. Validated paths today: `release_particles_sequentially` (collapse) and `particle_damping` (soft body)
-- material parameters: density, Young's modulus, Poisson ratio, yield stress, ...
-
-Full parameter reference: [`tools/recipes/RECIPES.md`](tools/recipes/RECIPES.md).
-
-### Replay an old run without re-simulating
-
-```bash
-./run-viewer.sh work/fused/<run_name>/
-```
-
-Opens the same browser viewer pointed at any directory of `frame_NNNN.ply` files.
-
-## Performance reality check
-
-| Component | Speed              | Real-time?               |
-| --------- | ------------------ | ------------------------ |
-| Sim       | ~1 frame/sec @ 200k particles, RTX 5070 | No — physics is the bottleneck |
-| Browser viewer | 24 fps playback target, 200+ fps render headroom | Yes — playback is real-time |
-
-Live-mode is "live preview as the sim computes," not "real-time physics." The browser updates its slider as new frames arrive (~1/sec at 200k particles).
-
-## CLI flags worth knowing
-
-```
-./run-sim.sh <input> [options]
-  --recipe NAME         see tools/recipes/
-  --particles N         MPM particle count (default 200000; lower = faster)
-  --output NAME         output dir name (default auto: <model>_<recipe>_<date>)
-  --no-viewer           sim only, no browser
-  --port N              viewer port (default 8080)
-  --dry-run             preview commands
-
-./run-viewer.sh <dir> [--port N]
-```
-
-## Common issues
-
-**`./setup.sh` says CUDA mismatch / extension build fails**
-The bundled `env.yml` pins PyTorch with CUDA 12.4. If your driver is older/newer, edit the `--extra-index-url` line in `env.yml` to match (e.g. `cu121`, `cu128`, or `cu132` for Blackwell/sm_120) and re-run `./setup.sh` after deleting the env.
-
-**Sim hangs forever on first launch**
-First-run kernel compilation (Warp + Taichi) takes 30–90 seconds. Be patient. After the first run, kernels are cached at `~/.cache/warp/` and re-launches are fast.
-
-**Taichi 1.7.4 hangs on Blackwell (sm_120) GPUs in `densify_grids`**
-Sim_one.sh exports `GSFLUENT_TI_ARCH=cpu` by default to force Taichi onto CPU just for the (cheap) particle-fill step. The rest of the pipeline stays on CUDA via Warp.
-
-**Browser shows nothing / blank canvas**
-Wait 30 seconds for the first sim frame to land in the fused dir; the viewer is just polling. If it never shows: check `work/output/<run>/fuse.log` and `work/output/<run>/viewer.log`.
+Editing a recipe locally and submitting a run goes through the server —
+see `docs/ARCHITECTURE.md` for the sim-submission flow (work in
+progress).
 
 ## Layout
 
 ```
 gsfluent_pkg/
-├── README.md          # 中文 (default on GitHub)
-├── README.en.md       # this file
-├── setup.sh           # one-time install (conda env + CUDA exts)
-├── run-workbench.sh   # browser workbench (recommended entry)
-├── run-sim.sh         # CLI: drop a model, get a browser tab (scripted use)
-├── run-viewer.sh      # replay an existing run
-├── env.yml            # conda spec
-├── core/              # the sim code (gs_simulation, mpm_solver_warp, ...)
+├── README.md                README.en.md      # bilingual
+├── setup-view.sh / run-laptop.sh         # laptop side
+├── setup-server.sh / run-server.sh       # server side
+├── docs/ARCHITECTURE.md     # deeper architecture notes
+├── server/                  # FastAPI + SPA serving
+│   └── gsfluent/
+│       ├── api/             # /api/recipes, /api/runs, /api/sequences, /api/stream
+│       └── core/            # library scanning, manifest, runner, frame_stream
+├── frontend/                # React + Vite + R3F SPA
+│   └── src/components/viewport/
+│       ├── SplatScene.tsx       # Points mode (R3F)
+│       └── ViserSplatScene.tsx  # Splats mode (viser iframe)
 ├── tools/
-│   ├── sim_one.sh         # sim+fuse orchestrator (called by run-sim.sh)
-│   ├── fuse_to_full_ply.py
-│   ├── view_points.py     # browser viewer (point cloud)
-│   ├── viewer_textured.py # browser viewer (gaussian splat — heavier, optional)
-│   └── recipes/           # JSON config presets
-└── work/              # generated at runtime: per-run sim + fused dirs
+│   ├── viser_headless.py        # viser + control API (Splats mode backend)
+│   ├── batch_convert_to_npz.py  # builds work/cache/viser/*.npz
+│   ├── sequence_to_viser_npz.py # one-sequence converter
+│   ├── fuse_to_full_ply.py      # sim_*.ply + ref 3DGS → frame_*.ply
+│   ├── pack_sequence.py         # frame_*.ply → frames.bin (GSSQ int16)
+│   ├── migrate_to_library.py    # legacy → work/library/ layout
+│   ├── vkgs_play.py             # launch the vkgs fork against a sequence
+│   └── recipes/                 # JSON recipe presets
+└── work/                    # runtime data (library, cache, uploads)
 ```
 
 ## Credits
 
 - 3D Gaussian Splatting: Kerbl et al. 2023
-- MPM-based sim: built on top of NVIDIA Warp + Taichi
-- Browser viewer: viser
-
+- MPM physics: NVIDIA Warp + Taichi (server-side)
+- Splat playback: viser
+- Workbench: React + Vite + React Three Fiber

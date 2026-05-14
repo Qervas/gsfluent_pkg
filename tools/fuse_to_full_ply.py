@@ -56,22 +56,137 @@ def _sim_idx(path):
     return int(m.group(1)) if m else None
 
 
-def _transform_sim_xyz(sim_xyz, args):
-    """Apply --center_at_origin shift + Y-up -> Z-up rotation to sim
-    positions. Returns (n, 3) array in the final output coord system.
+def _transform_sim_xyz(sim_xyz, args, *, extent=None, center=None):
+    """Map normalized sim positions back to output coord system.
+
+    The sim runs in a normalized [0, 2] cube (built from the reference
+    ply's bbox in `main`). Two output coord systems are supported:
+
+    --output_source_scale (default): un-normalize back to source-world
+        scale. Per-frame ply positions land at the same world extents
+        as the reference ply, which means splat scales (kept at their
+        source log values) and positions are consistent. Crucially for
+        viser/web rendering: cov² stays above float16 subnormal so the
+        WebGL splat shader doesn't drop ~40 % of splats. Pass
+        --center_at_origin to translate the bbox center to (0,0,0)
+        after un-normalizing.
+
+    Legacy mode (--no-output_source_scale): keep positions in the
+        normalized [0, 2] cube (centered to [-1, 1] when
+        --center_at_origin). Pairs with the legacy
+        log_scale_shift=-log(extent) applied to scales. Use ONLY
+        with the diff_gaussian_rasterization (CUDA fp32) renderer
+        which doesn't suffer from float16 precision loss; viser
+        will mis-render this output.
 
     The simulator emits Y-up. By default we rotate to Z-up via
-    Rx(-pi/2) (delegated to coord_convert). Pass --no_zup / --keep_y_up
-    to skip the rotation."""
+    Rx(-pi/2) (delegated to coord_convert). Pass --no_zup /
+    --keep_y_up to skip the rotation."""
     sx = sim_xyz[:, 0].astype(np.float32, copy=True)
     sy = sim_xyz[:, 1].astype(np.float32, copy=True)
     sz = sim_xyz[:, 2].astype(np.float32, copy=True)
-    if args.center_at_origin:
-        sx -= 1.0; sy -= 1.0; sz -= 0.5
+
+    if args.output_source_scale:
+        # Un-normalize: undo `(x - center) / extent + 1.0` from main().
+        # Pull extent/center from kwargs or fall back to the values
+        # stashed on args during main().
+        ext = extent if extent is not None else getattr(args, "extent", None)
+        ctr = center if center is not None else getattr(args, "center", None)
+        assert ext is not None and ctr is not None, \
+            "output_source_scale needs extent + center (set in main)"
+        sx = (sx - 1.0) * ext + ctr[0]
+        sy = (sy - 1.0) * ext + ctr[1]
+        sz = (sz - 1.0) * ext + ctr[2]
+        if args.center_at_origin:
+            sx -= ctr[0]; sy -= ctr[1]; sz -= ctr[2]
+    else:
+        # Legacy normalized output. Kept for parity with the CUDA
+        # renderer's expected coord system.
+        if args.center_at_origin:
+            sx -= 1.0; sy -= 1.0; sz -= 0.5
+
     stacked = np.stack([sx, sy, sz], axis=1)
     if args.zup:
         return _rotate_pos(stacked)
     return stacked
+
+
+def _batched_kabsch_rotation(p_rel_0, q_rel_t, weights):
+    """Weighted Kabsch over a batch of N point-clouds.
+
+    p_rel_0: (N, K, 3)  reference neighborhood (centered) at t=0
+    q_rel_t: (N, K, 3)  same neighborhood at t (centered)
+    weights: (N, K)     per-neighbor weights summing to 1 along axis 1
+
+    Returns R: (N, 3, 3) — the proper rotation that best maps p_rel_0 to
+    q_rel_t under the weighted sum-of-squares objective.
+
+    Algorithm: H = Σ_k w_k q_k p_k^T = U S V^T → R = U diag(1,1,sign(det(U V^T))) V^T.
+    The diag term flips the smallest singular vector when SVD picks a
+    reflection (det = -1), preserving det(R) = +1.
+    """
+    H = np.einsum("nk,nki,nkj->nij", weights, q_rel_t, p_rel_0)             # (N, 3, 3)
+    U, _, Vt = np.linalg.svd(H)
+    det = np.linalg.det(np.einsum("nij,njk->nik", U, Vt))
+    D = np.broadcast_to(np.eye(3, dtype=H.dtype), (H.shape[0], 3, 3)).copy()
+    D[:, 2, 2] = np.sign(det)
+    return np.einsum("nij,njk,nkl->nil", U, D, Vt)
+
+
+def _rotmat_to_quat(R):
+    """Batched (N, 3, 3) rotation matrices -> (N, 4) quaternions in (w,x,y,z) order.
+
+    Standard Shepperd / Shoemake method: pick the largest-magnitude
+    diagonal-derived component, then back-fill the others. Numerically
+    stable for any proper rotation.
+    """
+    m = R
+    t = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
+    out = np.zeros((m.shape[0], 4), dtype=m.dtype)
+    # Case A: trace > 0
+    mask_a = t > 0
+    s = np.sqrt(t[mask_a] + 1.0) * 2.0
+    out[mask_a, 0] = 0.25 * s
+    out[mask_a, 1] = (m[mask_a, 2, 1] - m[mask_a, 1, 2]) / s
+    out[mask_a, 2] = (m[mask_a, 0, 2] - m[mask_a, 2, 0]) / s
+    out[mask_a, 3] = (m[mask_a, 1, 0] - m[mask_a, 0, 1]) / s
+    # Remaining: pick the biggest diagonal entry to seed
+    remaining = ~mask_a
+    rem_idx = np.argmax(np.stack([m[:, 0, 0], m[:, 1, 1], m[:, 2, 2]], axis=1), axis=1)
+    # Case B: m[0,0] largest
+    mb = remaining & (rem_idx == 0)
+    s = np.sqrt(1.0 + m[mb, 0, 0] - m[mb, 1, 1] - m[mb, 2, 2]) * 2.0
+    out[mb, 0] = (m[mb, 2, 1] - m[mb, 1, 2]) / s
+    out[mb, 1] = 0.25 * s
+    out[mb, 2] = (m[mb, 0, 1] + m[mb, 1, 0]) / s
+    out[mb, 3] = (m[mb, 0, 2] + m[mb, 2, 0]) / s
+    # Case C: m[1,1] largest
+    mc = remaining & (rem_idx == 1)
+    s = np.sqrt(1.0 + m[mc, 1, 1] - m[mc, 0, 0] - m[mc, 2, 2]) * 2.0
+    out[mc, 0] = (m[mc, 0, 2] - m[mc, 2, 0]) / s
+    out[mc, 1] = (m[mc, 0, 1] + m[mc, 1, 0]) / s
+    out[mc, 2] = 0.25 * s
+    out[mc, 3] = (m[mc, 1, 2] + m[mc, 2, 1]) / s
+    # Case D: m[2,2] largest
+    md = remaining & (rem_idx == 2)
+    s = np.sqrt(1.0 + m[md, 2, 2] - m[md, 0, 0] - m[md, 1, 1]) * 2.0
+    out[md, 0] = (m[md, 1, 0] - m[md, 0, 1]) / s
+    out[md, 1] = (m[md, 0, 2] + m[md, 2, 0]) / s
+    out[md, 2] = (m[md, 1, 2] + m[md, 2, 1]) / s
+    out[md, 3] = 0.25 * s
+    return out
+
+
+def _quat_mul(q1, q2):
+    """Hamilton product q1 ⊗ q2, both (N, 4) in (w,x,y,z) order. Returns (N, 4)."""
+    w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
+    w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
+    return np.stack([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ], axis=1)
 
 
 def _write_frame_atomic(full_attrs, nn_idx, kept_sim_idx, sim_xyz, args, out_path, text_mode):
@@ -139,6 +254,16 @@ def main():
                    help="Skip the Y-up -> Z-up rotation; write sim's native "
                         "Y-up frame straight through (positions, quaternions, "
                         "and normals).")
+    p.add_argument("--output_source_scale", action="store_true", default=True,
+                   help="(default) Output per-frame plys in source-world coord "
+                        "system: positions un-normalized back to reference-ply "
+                        "extents, splat log-scales kept at source values. "
+                        "Avoids float16-subnormal loss when viser renders cov.")
+    p.add_argument("--no-output_source_scale", dest="output_source_scale",
+                   action="store_false",
+                   help="Legacy: keep positions in the normalized [0, 2] cube "
+                        "and shrink scales accordingly. Use only with CUDA "
+                        "fp32 renderers (diff_gaussian_rasterization).")
     p.add_argument("--center_at_origin", action="store_true", default=True,
                    help="Translate so building base sits at (0,0,0) instead of "
                         "the simulator's normalized (1,1,1)")
@@ -153,7 +278,7 @@ def main():
                         "compilation + first-frame latency on cold caches).")
     p.add_argument("--max_frames", type=int, default=0,
                    help="If >0, exit watch mode as soon as this many fused frames "
-                        "have been produced. Lets sim_one.sh wrap up immediately "
+                        "have been produced. Lets run_sim.sh wrap up immediately "
                         "after the sim's expected frame count is reached, instead "
                         "of waiting for the quiet-seconds timeout.")
     p.add_argument("--xyz_only_after_first", action="store_true", default=False,
@@ -164,11 +289,55 @@ def main():
                         "no info on the workbench path. Disable if you need "
                         "external viewers (e.g. vkgs) to read every frame's "
                         "full attrs from disk.")
+    p.add_argument("--knn", type=int, default=0,
+                   help="K-NN skinning. K=0 (default): legacy 1-NN binding "
+                        "(only sim-claimed ref splats move; the other 80% "
+                        "stay at rest — the 'ghost' problem). K>=1: each ref "
+                        "splat is driven by the K nearest sim particles via "
+                        "inverse-distance weights, so every ref splat moves "
+                        "smoothly with the local sim displacement field. "
+                        "K=8 is a sensible default for a continuous field.")
+    p.add_argument("--min_opacity", type=float, default=0.0,
+                   help="Drop reference splats whose sigmoid-opacity is below "
+                        "this threshold BEFORE NN/K-NN binding. Use to remove "
+                        "the low-opacity 'ambient noise' splats that produce "
+                        "the sparkle/spike artifact in Splats-mode playback. "
+                        "0.0 = keep all (default). 0.05–0.1 cuts visible noise "
+                        "without making holes. Higher than 0.2 starts removing "
+                        "legitimate surface splats.")
+    p.add_argument("--knn_rotation", action="store_true", default=False,
+                   help="When --knn>0: also compute the local rotation at each "
+                        "ref splat per frame via weighted Kabsch (batched 3x3 "
+                        "SVD over the K-NN neighborhood), compose with the "
+                        "rest-pose quaternion, and write rot_0..rot_3 in every "
+                        "frame ply. Fixes the Splats-mode smear by keeping "
+                        "each splat aligned with the deforming local surface. "
+                        "Requires --no_zup (sim output coord == fuse output "
+                        "coord); for --zup we'd need a basis-transform on R.")
     args = p.parse_args()
 
     print(f"Loading reference: {args.reference_ply}")
     ref_ply = PlyData.read(args.reference_ply)
     ref_v = ref_ply["vertex"].data
+    # Optional low-opacity filter. The reference 3DGS typically contains a
+    # long tail of near-transparent "ambient" gaussians used during training
+    # as soft fillers. They contribute sparkle/spike artifacts in Splats-mode
+    # playback (their orientations are random; once skinned to a moving sim
+    # they smear outward as visible noise). Drop them at the source so every
+    # downstream array (positions, KD-tree, K-NN map, full_attrs) is built
+    # over the cleaner set. Default 0.0 preserves the original behavior.
+    if args.min_opacity > 0:
+        if "opacity" not in ref_v.dtype.names:
+            raise SystemExit("--min_opacity set but reference ply has no `opacity` field")
+        op_sig = 1.0 / (1.0 + np.exp(-ref_v["opacity"].astype(np.float32)))
+        keep_mask = op_sig >= args.min_opacity
+        n_before = len(ref_v)
+        n_kept = int(keep_mask.sum())
+        if n_kept == 0:
+            raise SystemExit(f"--min_opacity {args.min_opacity} dropped ALL splats; lower it")
+        ref_v = ref_v[keep_mask]
+        print(f"Opacity filter (sigmoid>={args.min_opacity}): "
+              f"kept {n_kept:,}/{n_before:,} ({n_kept/n_before*100:.1f}%)")
     ref_xyz_raw = np.stack([ref_v["x"], ref_v["y"], ref_v["z"]], axis=1).astype(np.float32)
     aabb_min = ref_xyz_raw.min(0); aabb_max = ref_xyz_raw.max(0)
     center = (aabb_min + aabb_max) / 2.0
@@ -176,6 +345,11 @@ def main():
     scale_origin = 1.0 / extent
     ref_xyz_norm = ((ref_xyz_raw - center) / extent + 1.0).astype(np.float32)
     print(f"  ref: {len(ref_xyz_raw)} gaussians, extent {extent:.2f}, scale_origin {scale_origin:.4f}")
+    # Stash on args so _transform_sim_xyz (called from the per-frame
+    # write helpers) can un-normalize back to source-world coords
+    # without us threading these through every helper signature.
+    args.extent = extent
+    args.center = center
 
     # Sim plys — in watch mode wait for any sim_*.ply to exist.
     sim_dir = Path(args.sim_dir)
@@ -213,6 +387,61 @@ def main():
     _, nn_idx = tree.query(sim_xyz_t0[kept_sim_idx], k=1, workers=-1)
     print(f"  NN map ready ({len(nn_idx)} matches)")
 
+    # K-NN skinning map: for each REF splat, find K nearest SIM particles
+    # at frame 0 in normalized sim space. Used per-frame to compute a
+    # weighted displacement field over ALL ref splats — eliminates the
+    # 1-NN ghost where unclaimed ref splats stay static.
+    knn_idx = None
+    knn_weights = None
+    sim_xyz_t0_kept = sim_xyz_t0[kept_sim_idx]
+    if args.knn > 0:
+        K = int(args.knn)
+        print(f"Building K-NN map (K={K}) from each ref splat -> {len(kept_sim_idx)} sim particles...")
+        sim_tree = cKDTree(sim_xyz_t0_kept)
+        dists, knn_idx = sim_tree.query(ref_xyz_norm, k=K, workers=-1)
+        # k=1 returns 1-D arrays; force 2-D for uniform broadcasting.
+        if K == 1:
+            dists = dists[:, None]
+            knn_idx = knn_idx[:, None]
+        # Inverse-distance weights, normalized per ref splat. Epsilon
+        # prevents div-by-zero on coincident points.
+        inv_d = 1.0 / (dists.astype(np.float32) + 1e-6)
+        knn_weights = (inv_d / inv_d.sum(axis=1, keepdims=True)).astype(np.float32)
+        print(f"  K-NN map: ref→sim shape={knn_idx.shape}, weights summed to 1.0 per row")
+        print(f"  median NN distance: {np.median(dists[:, 0]):.4f}  "
+              f"max NN distance: {dists[:, 0].max():.4f} (normalized sim units)")
+
+    # Pre-compute the rest-pose neighborhood for K-NN rotation extraction:
+    # for each ref splat, the K sim particle positions at frame 0 expressed
+    # relative to the weighted centroid. Reused every frame in fuse_one.
+    knn_p_rel_0 = None
+    knn_rest_quat = None
+    if args.knn_rotation:
+        if not args.knn or not args.knn > 0:
+            raise SystemExit("--knn_rotation requires --knn >= 1")
+        if args.zup:
+            raise SystemExit("--knn_rotation requires --no_zup (the local "
+                             "rotation R is computed in sim space; we'd need a "
+                             "basis transform to apply it to a Z-up output)")
+        print(f"Building K-NN rotation prerequisites (rest-pose p_rel)...")
+        p_indexed = sim_xyz_t0_kept[knn_idx]                                  # (n_ref, K, 3)
+        knn_p_centroid_0 = (knn_weights[..., None] * p_indexed).sum(axis=1)   # (n_ref, 3)
+        knn_p_rel_0 = (p_indexed - knn_p_centroid_0[:, None, :]).astype(np.float32)
+        # Snapshot the rest-pose quaternions BEFORE the Z-up rotation block
+        # below tweaks them. (For --no_zup, that block is skipped anyway, so
+        # ref_v carries the canonical rest quats already.)
+        knn_rest_quat = np.stack([
+            ref_v["rot_0"].astype(np.float32),
+            ref_v["rot_1"].astype(np.float32),
+            ref_v["rot_2"].astype(np.float32),
+            ref_v["rot_3"].astype(np.float32),
+        ], axis=1)
+        # Normalize defensively — Inria 3DGS plys sometimes drift from unit norm.
+        norms = np.linalg.norm(knn_rest_quat, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        knn_rest_quat /= norms
+        print(f"  rest-pose neighborhoods + quaternions cached: {len(knn_p_rel_0):,} splats")
+
     # Build the FULL reference attribute array (one row per ref splat).
     # Output frames will start as a copy of this and overlay sim positions
     # only on the matched indices — so the static remainder (splats not
@@ -223,12 +452,24 @@ def main():
     for field in out_dtype.names:
         full_attrs[field] = ref_v[field]
 
-    # Adjust scale_0/1/2: sim is in normalized space, scales must shrink by log(scale_origin)
-    log_scale_shift = float(np.log(scale_origin))
-    print(f"  scale shift (log-space): {log_scale_shift:.4f}")
-    for k in ("scale_0", "scale_1", "scale_2"):
-        if k in full_attrs.dtype.names:
-            full_attrs[k] = full_attrs[k] + log_scale_shift
+    # Splat scale handling:
+    #   - source-scale output (default): keep log-scales at source values.
+    #     Positions are un-normalized in _transform_sim_xyz so the bbox
+    #     matches source extents; scales need to match positions in
+    #     absolute units so they don't drift into float16-subnormal land
+    #     when viser casts cov to fp16 for WS transport.
+    #   - legacy normalized output: subtract log(extent) so scales shrink
+    #     to match the [-1, 1] cube. Required for the diff_gaussian_
+    #     rasterization CUDA renderer which works in normalized coords.
+    if args.output_source_scale:
+        print(f"  splat log-scales kept at source values (source-scale output)")
+    else:
+        log_scale_shift = float(np.log(scale_origin))
+        print(f"  splat log-scales shifted by log(1/extent) = {log_scale_shift:.4f}  "
+              f"(legacy normalized output)")
+        for k in ("scale_0", "scale_1", "scale_2"):
+            if k in full_attrs.dtype.names:
+                full_attrs[k] = full_attrs[k] + log_scale_shift
 
     # Y-up -> Z-up axis rotation. The sim emits Y-up; the workbench's
     # invariant says all stored data is Z-up. Rx(-pi/2) maps
@@ -288,9 +529,67 @@ def main():
         v = PlyData.read(str(sp))["vertex"].data
         sim_xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float32)
         out_path = out_dir / f"frame_{idx:04d}.ply"
-        # Frame 0 always full (workbench/vkgs bootstrap); frames 1+ slim
-        # to xyz-only when the flag is set — same overlay logic, smaller
-        # disk write.
+
+        if knn_idx is not None:
+            # K-NN skinning path. Every ref splat displaces by a weighted
+            # sum of the displacements of its K nearest sim particles
+            # (computed in normalized sim space, then transformed to output).
+            sim_kept = sim_xyz[kept_sim_idx]                                  # (n_kept, 3)
+            sim_disp = sim_kept - sim_xyz_t0_kept                             # (n_kept, 3)
+            neighbors = sim_disp[knn_idx]                                     # (n_ref, K, 3)
+            ref_disp = (knn_weights[..., None] * neighbors).sum(axis=1)       # (n_ref, 3)
+            ref_xyz_displaced = ref_xyz_norm + ref_disp                       # (n_ref, 3)
+            out_xyz_world = _transform_sim_xyz(ref_xyz_displaced, args)       # (n_ref, 3)
+
+            # Optional per-frame rotation update via weighted Kabsch.
+            # Only valid for --no_zup (sim and output share a basis).
+            new_quat = None
+            if knn_p_rel_0 is not None:
+                q_indexed = sim_kept[knn_idx]                                 # (n_ref, K, 3)
+                q_centroid = (knn_weights[..., None] * q_indexed).sum(axis=1) # (n_ref, 3)
+                q_rel_t = (q_indexed - q_centroid[:, None, :]).astype(np.float32)
+                R_local = _batched_kabsch_rotation(knn_p_rel_0, q_rel_t, knn_weights)
+                q_local = _rotmat_to_quat(R_local)                            # (n_ref, 4)
+                new_quat = _quat_mul(q_local, knn_rest_quat)                  # (n_ref, 4)
+
+            # Overwrite ALL splats — no notion of "matched/unmatched" left.
+            if idx == 0 or not args.xyz_only_after_first:
+                out = full_attrs.copy()
+                out["x"] = out_xyz_world[:, 0]
+                out["y"] = out_xyz_world[:, 1]
+                out["z"] = out_xyz_world[:, 2]
+                if new_quat is not None:
+                    out["rot_0"] = new_quat[:, 0]
+                    out["rot_1"] = new_quat[:, 1]
+                    out["rot_2"] = new_quat[:, 2]
+                    out["rot_3"] = new_quat[:, 3]
+                tmp_path = Path(str(out_path) + ".tmp")
+                PlyData([PlyElement.describe(out, "vertex")], text=text_mode).write(tmp_path)
+                os.replace(tmp_path, out_path)
+            else:
+                # Compact frame: xyz + (optional) per-splat quat. Even with
+                # quats this is ~24 MB vs ~161 MB for a full ply — still a
+                # 7x reduction over the full-attr frame.
+                fields = [("x", np.float32), ("y", np.float32), ("z", np.float32)]
+                if new_quat is not None:
+                    fields += [("rot_0", np.float32), ("rot_1", np.float32),
+                               ("rot_2", np.float32), ("rot_3", np.float32)]
+                out = np.empty(len(full_attrs), dtype=fields)
+                out["x"] = out_xyz_world[:, 0]
+                out["y"] = out_xyz_world[:, 1]
+                out["z"] = out_xyz_world[:, 2]
+                if new_quat is not None:
+                    out["rot_0"] = new_quat[:, 0]
+                    out["rot_1"] = new_quat[:, 1]
+                    out["rot_2"] = new_quat[:, 2]
+                    out["rot_3"] = new_quat[:, 3]
+                tmp_path = Path(str(out_path) + ".tmp")
+                PlyData([PlyElement.describe(out, "vertex")], text=text_mode).write(tmp_path)
+                os.replace(tmp_path, out_path)
+            return out_path
+
+        # Legacy 1-NN overlay path (kept for backwards compatibility +
+        # debugging the K-NN behavior against the prior baseline).
         if idx == 0 or not args.xyz_only_after_first:
             _write_frame_atomic(full_attrs, nn_idx, kept_sim_idx, sim_xyz, args, out_path, text_mode)
         else:

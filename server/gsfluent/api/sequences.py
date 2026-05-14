@@ -13,13 +13,27 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..core import library as lib
 from ..core import runner
 from ..core.library import Sequence, import_sequence
+from ..server import PKG_ROOT
+# Frame-serving handler is shared with /api/runs/{name}/frame/{idx}.ply
+# so the two URL shapes return the exact same bytes for the same args.
+# Imported at the top (was originally a late-import inside the function
+# to avoid circular-import worries — verified no longer needed).
+from .runs import get_run_frame as _get_run_frame
 
 router = APIRouter(prefix="/api/sequences", tags=["sequences"])
+
+# Where derived caches live. The viser .npz cache is built by
+# `tools/batch_convert_to_npz.py` and consumed by `tools/viser_headless.py`.
+# Under the split-topology deployment, the server holds the canonical
+# copy and laptop-side `tools/sync_daemon.py` mirrors files here onto
+# the laptop's local cache.
+_VISER_CACHE = PKG_ROOT / "work" / "cache" / "viser"
 
 
 def _sequence_dict(seq: Sequence) -> dict:
@@ -34,6 +48,12 @@ def _sequence_dict(seq: Sequence) -> dict:
     # Always emit is_broken — frontend reads it to decide whether to show
     # the warning indicator.
     d["is_broken"] = bool(seq.is_broken)
+    # `meta_dict()` injects the absolute server filesystem path
+    # (e.g. /data/yinshaoxuan/.../sequences/foo/) into every payload.
+    # The React workbench doesn't consume it; under split-topology the
+    # laptop has no use for the server's local path either. Stripping
+    # it keeps the API surface from leaking server directory layout.
+    d.pop("path", None)
     # Default-fill the fields the frontend SequenceItem type expects, so
     # legacy sequences without a complete _meta.json still render.
     d.setdefault("source", "unknown")
@@ -45,9 +65,51 @@ def _sequence_dict(seq: Sequence) -> dict:
     d.setdefault("first_frame_full", True)
     d.setdefault("created_at", None)
     d.setdefault("converted_from", None)
+    # `frame_count` resolution priority:
+    #   1. meta-declared (cheap: already in the dict)
+    #   2. live filesystem count (only when meta is absent OR a sim run
+    #      is actively writing frames into this dir — we WANT the live
+    #      count then so the playback bar grows as new frames land).
+    # Before this guard the filesystem walk ran for every sequence on
+    # every /api/sequences GET (polled every 5s), turning to 6k stats/s
+    # for a 30-sequence library.
     if "frame_count" not in d:
         d["frame_count"] = seq.frame_count()
+    else:
+        is_live = any(r.name == seq.name and r.state == "running"
+                      for r in runner.list_runs())
+        if is_live:
+            d["frame_count"] = seq.frame_count()
+    # Cache descriptor: lets the laptop sync daemon detect staleness
+    # without having to download anything to check. Both files are
+    # optional — viser.npz only exists after batch_convert_to_npz.py
+    # has run; frames.bin only exists after tools/pack_sequence.py has
+    # run. Missing → field stays null and the daemon skips that file.
+    d["cache"] = {
+        "viser_npz_mtime":  _stat_mtime(_VISER_CACHE / f"{seq.name}.npz"),
+        "viser_npz_bytes":  _stat_size(_VISER_CACHE / f"{seq.name}.npz"),
+        "frames_bin_mtime": _stat_mtime(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
+        "frames_bin_bytes": _stat_size(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
+    }
     return d
+
+
+def _stat_mtime(p: Path) -> Optional[float]:
+    """`p.stat().st_mtime` or None if the file doesn't exist. Used by the
+    sequence-list payload so the laptop sync daemon can compare against
+    its local copy without a full HEAD round-trip per file."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _stat_size(p: Path) -> Optional[int]:
+    """`p.stat().st_size` or None if the file doesn't exist."""
+    try:
+        return p.stat().st_size
+    except OSError:
+        return None
 
 
 @router.get("")
@@ -127,16 +189,79 @@ def import_endpoint(req: ImportRequest):
     return _sequence_dict(seq)
 
 
-# Frame-serving handler. We forward to the existing handler in api/runs.py
-# rather than reimplement the legacy-fused-dir fallback path. Same URL
-# pattern under /api/sequences for symmetry; the legacy /api/runs/.../frame
-# alias stays live.
-from .runs import get_run_frame as _get_run_frame  # noqa: E402  (intentional late import)
-
-
 @router.get("/{name}/frame/{frame_idx}.ply")
 async def get_frame(name: str, frame_idx: int):
+    """Re-exposes /api/runs/{name}/frame/{idx}.ply under the sequences
+    namespace so the frontend's WebSocket bootstrap can hit either URL
+    shape and get the same bytes."""
     return await _get_run_frame(name, frame_idx)
+
+
+@router.get("/{name}/cache/viser.npz")
+def get_viser_cache(name: str):
+    """Serve the .npz viser cache file as a downloadable artifact.
+
+    Used by the laptop sync daemon (`tools/sync_daemon.py`) to mirror the
+    server's cache onto the laptop, where `tools/viser_headless.py`
+    mmaps it for Splats-mode playback. The split-topology rationale:
+    pushing per-frame xyz over WAN at 30 fps is ~2 Gbps (683k splats ×
+    12 B × 30) — infeasible. A one-time .npz download (~1-2 GB) then
+    local playback is the only path that scales.
+
+    FastAPI's FileResponse handles Range requests natively, so
+    interrupted downloads resume cleanly.
+    """
+    if not Sequence.exists(name):
+        raise HTTPException(404, f"sequence not found: {name}")
+    path = _VISER_CACHE / f"{name}.npz"
+    if not path.is_file():
+        raise HTTPException(
+            404,
+            f"viser cache not built for sequence '{name}'. "
+            "Run `python tools/batch_convert_to_npz.py {name}` on the server.",
+        )
+    # Path-traversal defense: confirm the resolved path is inside the cache.
+    target = path.resolve()
+    cache_root = _VISER_CACHE.resolve()
+    try:
+        target.relative_to(cache_root)
+    except ValueError:
+        raise HTTPException(400, f"refusing to serve outside cache: {name}")
+    return FileResponse(
+        target,
+        media_type="application/octet-stream",
+        filename=f"{name}.npz",
+    )
+
+
+@router.get("/{name}/cache/frames.bin")
+def get_frames_bin_cache(name: str):
+    """Serve the GSSQ-packed frames.bin (int16-quantized xyz per frame).
+
+    Mirror of `tools/pack_sequence.py`'s output, used by the laptop
+    Points-mode WS server (`tools/local_stream.py`) for fast local
+    streaming without per-frame ply reads. Same range-resume semantics
+    as the viser cache endpoint."""
+    if not Sequence.exists(name):
+        raise HTTPException(404, f"sequence not found: {name}")
+    path = lib.SEQUENCES_DIR / name / "frames.bin"
+    if not path.is_file():
+        raise HTTPException(
+            404,
+            f"frames.bin not built for sequence '{name}'. "
+            f"Run `python tools/pack_sequence.py {name}` on the server.",
+        )
+    target = path.resolve()
+    seq_root = lib.SEQUENCES_DIR.resolve()
+    try:
+        target.relative_to(seq_root)
+    except ValueError:
+        raise HTTPException(400, f"refusing to serve outside library: {name}")
+    return FileResponse(
+        target,
+        media_type="application/octet-stream",
+        filename=f"{name}.bin",
+    )
 
 
 @router.delete("/{name}")

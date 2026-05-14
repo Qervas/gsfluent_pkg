@@ -1,175 +1,166 @@
-# gsfluent — 建筑物理仿真 + 浏览器实时回放
+# gsfluent — 动画 3DGS 序列的工作台
 
-针对 3D Gaussian Splatting 场景的物理仿真工具。给一个 3DGS 训练好的建筑（或其他物体），选一个材料配方（jelly、demolition...），在浏览器里看着它实时形变。底层是 MPM（物质点法）仿真 + viser/WebGL 渲染。
+针对物理仿真后的 3D Gaussian Splatting 序列的浏览器工作台。挑序列、
+拖时间轴、在点云和 splat 两种渲染模式间切换、绕模型转动相机。
 
-> 状态：Linux + NVIDIA GPU 已验证，其他平台可尝试。仿真核心是 Python（PyTorch + NVIDIA Warp + Taichi），渲染走浏览器端 WebGL（viser），所以回放在任何带浏览器的机器上都能看。
+仿真跑在服务器（`sxyin-host`），本机只是查看器 + 任务接入层。本机
+不需要 CUDA、PyTorch、Warp、Taichi——纯 Python 轻依赖。
 
-[English version](README.en.md)
+[English README](README.en.md)
 
-## 安装（一次性，约 5 分钟）
+## 安装
+
+纯 pip，不用 conda。用 PATH 上的任意 Python 即可，下面七个依赖装到
+那个环境里。
 
 ```bash
-git clone https://github.com/Qervas/gsfluent_pkg
+git clone <repo>
 cd gsfluent_pkg
-./setup.sh
+./setup-view.sh
 ```
 
-`setup.sh` 会创建 conda 环境 `gsfluent`，装好对应版本的 PyTorch / Warp / Taichi，并从内置的 gaussian-splatting 子模块里编译两个 CUDA 扩展（`diff_gaussian_rasterization` 和 `simple-knn`）。重复运行安全。
+`setup-view.sh` 安装：
 
-依赖：
-
-- conda（Miniconda / Anaconda / Mambaforge）
-- NVIDIA GPU + 较新驱动（CUDA 12.x 运行时——通过 conda 或系统包管理器装）
-- 约 5 GB 磁盘空间给 conda 环境
-
-## 用法
-
-### 推荐运行方式（React 工作台）
-
-```bash
-git clone https://github.com/Qervas/gsfluent_pkg
-cd gsfluent_pkg/server
-make build      # 构建前端 + 安装后端
-gsfluent serve  # 自动打开 http://localhost:8080
+```
+fastapi  uvicorn  pydantic  watchfiles  plyfile  numpy  viser
 ```
 
-> 已弃用：`./run-workbench.sh`（viser 版本）将在 v0.3 移除。
-
-### 旧版浏览器工作台（已弃用）
-
-一个页面搞定一切——上传模型、选配方、调参数、跑仿真、看结果：
+外加 `pip install -e ./server`，把 `gsfluent` CLI 装到 PATH 上。指定
+Python 版本：
 
 ```bash
-./run-workbench.sh
+PYTHON=python3.11 ./setup-view.sh
 ```
 
-打开 `http://localhost:8080`：
-
-- **Model**：拖一个 `.ply` 进来上传，或粘贴已有的模型目录路径
-- **Recipe**：从下拉里选 `jelly` / `demolition` / 自己加的；下面的滑块自动显示该配方的当前值
-- **Recipe parameters**：网格分辨率、子步长、帧数、相机角度等都暴露成滑块/输入框；改一下即可应用到下次跑
-- **Run**：点 Run，仿真在后台跑，建筑一边算一边在 3D 视口里形变
-- **Playback**：滑帧、暂停、调速度
-
-不需要终端命令、不需要懂 JSON。
-
-### CLI（脚本化场景用）
+构建生产版 SPA（不需要 HMR 的场景）：
 
 ```bash
-./run-sim.sh <building_path> --recipe demolition
+cd frontend && npm install && npm run build
+cp -r frontend/dist/* server/gsfluent/static/
 ```
 
-`<building_path>` 可以是：
+## 运行
 
-- 一个 `.ply` 文件（脚本自动包装成仿真器要的目录结构）
-- 一个 3DGS 模型目录（含 `point_cloud/iteration_*/point_cloud.ply` 的标准训练输出）
-
-例子：
+服务器（sxyin-host）一次：
 
 ```bash
-./run-sim.sh ~/projects/scan_3dgs/                 --recipe jelly
-./run-sim.sh /tmp/quick_scan.ply                   --recipe demolition --particles 100000
-./run-sim.sh ~/data/building_a/point_cloud.ply     --recipe jelly --output building_a_test
+./setup-server.sh
+./run-server.sh                    # 后端在 :8080
 ```
 
-### 自带的配方
-
-| 名字          | 效果                              | 备注                            |
-| ------------- | --------------------------------- | ------------------------------- |
-| `jelly`       | 软体晃动 / 缓慢回弹               | 第一次跑用这个                  |
-| `demolition`  | 通过粒子顺序释放实现的塌楼        | 视觉冲击大；RTX 5070 约 2 分钟  |
-
-### 改 / 加自己的配方
-
-配方就是 `tools/recipes/` 下的 JSON 文件。每个配方包含材料参数、边界条件、相机角度、积分步长。改配方流程：
+笔记本：
 
 ```bash
-# 复制现有配方开始改
+./setup-view.sh
+GSFLUENT_SERVER=http://sxyin-host:8080 ./run-laptop.sh
+```
+
+启动两个协作服务：
+
+```
+┌──────────────────┐  HTTP   ┌─────────────────────┐
+│ gsfluent serve   │ ←─────→ │  React workbench    │
+│ :8080            │         │  (浏览器)           │
+│  - SPA + REST    │         │  ┌───────────────┐  │
+│  - /api/stream   │         │  │ iframe :8091  │ ←─┐
+│    (WS, Points)  │         │  │  viser splat  │   │  /set, /camera
+└──────────────────┘         │  └───────────────┘   │  → :8092
+                             └─────────────────────┘
+                                                      │
+                             ┌────────────────────────┴─┐
+                             │  tools/viser_headless.py │
+                             │  viser :8091, ctl :8092  │
+                             └──────────────────────────┘
+```
+
+打开 `http://localhost:8080`（dev 模式打开 `:5173`）。左侧大纲选序列，
+底部拖时间轴，右上角切换 **Points** 渲染（R3F + WebSocket 上的 int16
+量化 xyz）和 **Splats** 渲染（viser iframe，由控制 API 驱动）。
+
+## 数据放在哪
+
+```
+work/
+├── library/
+│   └── sequences/<name>/
+│       ├── frames/frame_NNNN.ply   # 融合后的 3DGS 每帧（静止姿态 Z-up）
+│       ├── frames.bin              # GSSQ 打包的 int16 xyz（Points 模式用）
+│       ├── manifest.json
+│       └── _meta.json
+└── cache/
+    └── viser/<name>.npz            # Splats 模式的播放缓存
+```
+
+序列是核心资产：融合后的每帧 splat ply，加上可选的二进制打包文件和
+viser 缓存。两种填充方式：
+
+1. **从服务器拉** — `rsync sxyin-host:.../sequences/<name>/` 到
+   `work/library/sequences/`，再 `python tools/batch_convert_to_npz.py`
+   生成 viser 缓存。
+2. **本地融合 sim_*.ply** — 把服务器的 sim 输出 rsync 下来后跑
+   `python tools/fuse_to_full_ply.py`，依赖只有 numpy + plyfile（加
+   `--knn_rotation` 时还需要 torch）。
+
+服务器端的 `runner.py` 在每次 sim 跑完之后自动调用 `batch_convert_to_npz.py`
+（幂等——只重建过期的 .npz）。笔记本上的 `sync_daemon` 随后把新生成的
+.npz mirror 到本地。
+
+## 渲染模式
+
+| 模式 | 渲染器 | 传输 | 用途 |
+|---|---|---|---|
+| **Points** | R3F（three.js） | `/api/stream` WS, `PackedReader` 解 int16 xyz | 轻量检视；没有 viser 缓存也能用 |
+| **Splats** | viser iframe | `POST /set`、`POST /camera` 到 `:8092` | 高质量 splat 渲染，做评审或 demo |
+
+两种模式共用 Zustand store 里的 `currentFrameIdx` 和 `simRunName`，
+时间轴和大纲切的是当前渲染器。模式切换不会重置播放状态。
+
+## 配方（仿真参数）
+
+`tools/recipes/*.json` 描述材料 + 边界 + 积分参数，由服务器端的仿真
+脚本消费。schema 与 `sxyin-host` 上的 `gs_simulation_building.py`
+匹配。
+
+```bash
+ls tools/recipes/
+# cluster_6_15_smash.json  demolition.json  jelly.json  earthquake.json  ...
 cp tools/recipes/jelly.json tools/recipes/my_recipe.json
-# 编辑参数
-vim tools/recipes/my_recipe.json
-# 用新配方跑
-./run-sim.sh <building_path> --recipe my_recipe
 ```
 
-可以改的关键参数：
-
-- `n_grid` — MPM 网格分辨率，越高越细，显存按平方增长
-- `substep_dt` — 积分子步长，越小越稳但越慢
-- `frame_num` — 总帧数（每帧 `frame_dt` 秒）
-- `boundary_conditions` — 边界条件列表。目前验证过的两条路径：`release_particles_sequentially`（塌楼）、`particle_damping`（软体）
-- 材质参数：密度、杨氏模量、泊松比、屈服应力等
-
-完整参数说明见 [`tools/recipes/RECIPES.md`](tools/recipes/RECIPES.md)。
-
-### 回放之前的结果（不重新仿真）
-
-```bash
-./run-viewer.sh work/fused/<run_name>/
-```
-
-把浏览器查看器接到任意一个装满 `frame_NNNN.ply` 的目录。
-
-## 性能
-
-| 组件         | 速度                                       | 实时？                |
-| ------------ | ------------------------------------------ | --------------------- |
-| 仿真         | 200k 粒子在 RTX 5070 上约 1 frame/sec      | 否——物理是瓶颈        |
-| 浏览器渲染   | 24 fps 回放目标，渲染端有 200+ fps 余量    | 是——回放端实时        |
-
-`--live` 模式给的是「仿真算到哪儿展示到哪儿」的渐进预览，不是「物理实时」。浏览器滑块随新帧到达自动延长（约每秒一帧）。
-
-## 常用 CLI 参数
-
-```
-./run-sim.sh <input> [options]
-  --recipe NAME         配方名，见 tools/recipes/
-  --particles N         MPM 粒子数（默认 200000，越少越快）
-  --output NAME         输出目录名（默认 <model>_<recipe>_<date>）
-  --no-viewer           只仿真不开浏览器
-  --port N              查看器端口（默认 8080）
-  --dry-run             只打印命令不执行
-
-./run-viewer.sh <dir> [--port N]
-```
-
-## 常见问题
-
-`./setup.sh` 报 CUDA 不匹配 / 扩展编译失败
-- `env.yml` 锁的是 PyTorch + CUDA 12.4。驱动不一致就改里面的 `--extra-index-url`（`cu121` / `cu128` / Blackwell sm_120 用 `cu132` nightly），删掉 conda 环境后重跑 `./setup.sh`。
-
-第一次跑仿真卡很久
-- 第一次启动 Warp + Taichi 要编译内核，30–90 秒是正常的。第二次起内核缓存在 `~/.cache/warp/`，启动很快。
-
-Taichi 1.7.4 在 Blackwell（sm_120）上 `densify_grids` 卡死
-- `sim_one.sh` 默认导出 `GSFLUENT_TI_ARCH=cpu`，把 Taichi 的（很轻量的）粒子填充步骤强制走 CPU。仿真主体仍由 Warp 跑在 CUDA 上。
-
-浏览器一直空白
-- 等 30 秒，等第一帧融合好；查看器只是在轮询目录。如果一直没东西，看 `work/output/<run>/fuse.log` 和 `work/output/<run>/viewer.log`。
+本地改完配方提交仿真要经过服务器——sim 提交流程见
+`docs/ARCHITECTURE.md`（开发中）。
 
 ## 目录结构
 
 ```
 gsfluent_pkg/
-├── README.md          # 中文版（默认）
-├── README.en.md       # English
-├── setup.sh           # 一次性安装（conda 环境 + CUDA 扩展）
-├── run-workbench.sh   # 浏览器工作台（推荐入口）
-├── run-sim.sh         # CLI：丢模型，开浏览器（脚本化用）
-├── run-viewer.sh      # 回放已有结果
-├── env.yml            # conda 环境定义
-├── core/              # 仿真代码（gs_simulation, mpm_solver_warp, ...）
+├── README.md                README.en.md      # 中英双语
+├── setup-view.sh / run-laptop.sh         # laptop side
+├── setup-server.sh / run-server.sh       # server side
+├── docs/ARCHITECTURE.md     # 架构细节
+├── server/                  # FastAPI + SPA 服务
+│   └── gsfluent/
+│       ├── api/             # /api/recipes, /api/runs, /api/sequences, /api/stream
+│       └── core/            # library 扫描、manifest、runner、frame_stream
+├── frontend/                # React + Vite + R3F SPA
+│   └── src/components/viewport/
+│       ├── SplatScene.tsx       # Points 模式（R3F）
+│       └── ViserSplatScene.tsx  # Splats 模式（viser iframe）
 ├── tools/
-│   ├── sim_one.sh         # 仿真+融合编排（被 run-sim.sh 调用）
-│   ├── fuse_to_full_ply.py
-│   ├── view_points.py     # 浏览器查看器（点云）
-│   ├── viewer_textured.py # 浏览器查看器（高斯泼溅，更重）
-│   └── recipes/           # JSON 配方
-└── work/              # 运行时生成：每次跑的仿真和融合输出
+│   ├── viser_headless.py        # viser + 控制 API（Splats 后端）
+│   ├── batch_convert_to_npz.py  # 生成 work/cache/viser/*.npz
+│   ├── sequence_to_viser_npz.py # 单序列转换器
+│   ├── fuse_to_full_ply.py      # sim_*.ply + 参考 3DGS → frame_*.ply
+│   ├── pack_sequence.py         # frame_*.ply → frames.bin（GSSQ int16）
+│   ├── migrate_to_library.py    # 旧布局迁移到 work/library/
+│   ├── vkgs_play.py             # 启动 vkgs fork 播一个序列
+│   └── recipes/                 # JSON 配方
+└── work/                    # 运行时数据（library / cache / uploads）
 ```
 
 ## 引用
 
 - 3D Gaussian Splatting：Kerbl et al. 2023
-- MPM 仿真：基于 NVIDIA Warp + Taichi
-- 浏览器查看器：viser
+- MPM 物理：NVIDIA Warp + Taichi（服务器端）
+- Splat 播放：viser
+- 工作台：React + Vite + React Three Fiber

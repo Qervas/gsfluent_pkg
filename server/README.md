@@ -1,45 +1,46 @@
 # gsfluent server
 
-The FastAPI + WebSocket bridge for the gsfluent workbench. Wraps the
-existing Taichi/Warp sim core (`tools/sim_one.sh`) as a subprocess
-and serves the React SPA built from `../frontend/`.
+FastAPI + WebSocket bridge for the gsfluent workbench. Serves the
+React SPA built from `../frontend/`, exposes the library/recipes/runs
+REST API, and pumps per-frame xyz over `/api/stream` for the Points
+render mode.
+
+Pure-Python deps (fastapi, uvicorn, plyfile, pydantic, watchfiles,
+numpy). Simulation itself runs on the server (`sxyin-host`), not here
+— see `../docs/ARCHITECTURE.md`.
 
 ## Install
 
+This package is normally installed by the top-level
+`../setup-view.sh`. To install standalone:
+
 ```bash
-# Build the frontend bundle and install the server in editable mode.
 cd server
-make build
+pip install -e .
 ```
 
-Or manually:
+That registers the `gsfluent` console script. For the SPA, build it
+first or run vite alongside in dev mode:
 
 ```bash
-cd frontend && npm install && npm run build
-cd ../server && pip install -e .
+# production: bake the SPA into server/gsfluent/static/
+cd ../frontend && npm install && npm run build
+cp -r dist/* ../server/gsfluent/static/
+
+# dev: leave static/ empty, run vite separately
+cd ../frontend && npm run dev   # http://localhost:5173, proxies /api → :8080
 ```
 
 ## Run
 
-After install, from anywhere:
-
 ```bash
 gsfluent serve              # opens browser to http://localhost:8080
-gsfluent serve --no-browser # don't auto-open
-gsfluent serve --reload     # auto-reload on code changes (dev)
+gsfluent serve --no-browser
+gsfluent serve --reload     # dev: auto-reload on code changes
 ```
 
-## Develop (no build step required)
-
-```bash
-# terminal 1:
-cd server
-python -m gsfluent serve --no-browser --reload --port 8080
-
-# terminal 2:
-cd frontend
-npm run dev   # http://localhost:5173 (vite proxies /api → :8080)
-```
+For the integrated workbench (backend + viser headless together),
+use `../run-server.sh` (this box) + `../run-laptop.sh` (laptop) instead.
 
 ## Test
 
@@ -52,8 +53,8 @@ make test     # pytest -v
 
 - `gsfluent/server.py` — FastAPI app factory
 - `gsfluent/cli.py` — `gsfluent` console-script entry
-- `gsfluent/api/` — REST + WebSocket routers (recipes, models, runs, schemas, stream)
-- `gsfluent/core/` — domain logic (recipes, models, manifest, runner, frame_stream)
+- `gsfluent/api/` — REST + WebSocket routers (recipes, models, runs, sequences, schemas, stream)
+- `gsfluent/core/` — domain logic (library, manifest, runner, frame_stream, recipes)
 - `gsfluent/schemas/` — BC + material default schemas
-- `gsfluent/static/` — Vite build output, served at `/` (gitignored)
-- `tests/` — pytest suite (37 tests, see `pytest -v`)
+- `gsfluent/static/` — built SPA, served at `/` (gitignored)
+- `tests/` — pytest suite (see `pytest -v`)

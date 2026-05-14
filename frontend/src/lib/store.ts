@@ -71,6 +71,17 @@ type State = {
   // — only available for static model preview, not sim runs.
   renderMode: RenderMode;
 
+  // Last-known Points-mode camera state. Written continuously by
+  // SplatScene as the user orbits, read by Viewport.tsx's mode-toggle
+  // effect so the Splats iframe gets POSTed the same viewpoint. Null
+  // until the user has interacted with the Points-mode controls at
+  // least once (initial auto-fit doesn't count — we want the user's
+  // chosen view to carry over, not the auto-framed one).
+  pointsCamera: {
+    position: [number, number, number];
+    target:   [number, number, number];
+  } | null;
+
   // Setters
   setActiveModel: (m: ModelItem | null) => void;
   setActiveRecipe: (n: string | null, d: Record<string, unknown> | null) => void;
@@ -94,6 +105,7 @@ type State = {
   // frames land, so this clamp tracks production naturally.
   stepFrame: (delta: number) => void;
   resetForNewRun: (name: string) => void;
+  setPointsCamera: (cam: State["pointsCamera"]) => void;
 };
 
 export const useStore = create<State>((set) => ({
@@ -124,6 +136,7 @@ export const useStore = create<State>((set) => ({
   sceneCenter: [0, 0, 0],
   sceneFloor: 0,
   renderMode: "points",
+  pointsCamera: null,
 
   setActiveModel: (m) => set({ activeModel: m }),
   setActiveRecipe: (n, d) => set({ activeRecipeName: n, activeRecipeData: d }),
@@ -143,7 +156,10 @@ export const useStore = create<State>((set) => ({
         simFirstFrameAt: st.simFirstFrameAt ?? Date.now(),
       };
     }),
-  setStaticAttrs: (a) => set({ staticAttrs: a }),
+  // Clearing pointsCamera here means a new model load triggers a fresh
+  // auto-fit in SplatScene instead of reusing a viewpoint from the
+  // previously-loaded scene (which would likely be off-scale).
+  setStaticAttrs: (a) => set({ staticAttrs: a, pointsCamera: null }),
   setCurrentFrame: (i) => set({ currentFrameIdx: i }),
   setPlaying: (p) => set({ playing: p }),
   setSceneScale: (diag, center) => set({ sceneScale: diag, sceneCenter: center }),
@@ -159,6 +175,7 @@ export const useStore = create<State>((set) => ({
       const next = Math.min(upper, Math.max(0, st.currentFrameIdx + delta));
       return { currentFrameIdx: next };
     }),
+  setPointsCamera: (cam) => set({ pointsCamera: cam }),
   resetForNewRun: (name) =>
     set({
       simRunName: name,

@@ -48,6 +48,17 @@ export type SequenceItem = {
   // Phase 4: present when frames were rewritten Y-up -> Z-up at
   // import time (frames/ is materialized rather than symlinked).
   converted_from?: "y-up" | null;
+  // Server-side cache descriptor. Always present in the response —
+  // individual field values may be null when the corresponding artifact
+  // hasn't been built (run batch_convert_to_npz.py / pack_sequence.py
+  // on server). Used by the sync daemon for staleness detection and
+  // surfaced in the outliner as size/synced indicators.
+  cache: {
+    viser_npz_mtime:  number | null;
+    viser_npz_bytes:  number | null;
+    frames_bin_mtime: number | null;
+    frames_bin_bytes: number | null;
+  };
 };
 
 export type StaticAttrs = {
