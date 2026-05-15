@@ -1,5 +1,5 @@
 # gsfluent — workbench for animated 3DGS sequences
-
+![](./docs/diagram.png)
 Browser workbench for inspecting and playing back physics-simulated 3D
 Gaussian Splatting sequences. Pick a sequence, scrub the timeline,
 switch between point-cloud and splat rendering, orbit the camera.
