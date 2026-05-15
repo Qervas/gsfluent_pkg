@@ -309,6 +309,57 @@ async def _drain(run: Run, run_dir: Path) -> None:
         except Exception as e:
             _log.warning("post-run .npz rebuild failed for %s: %s", run.name, e)
 
+    # Write _meta.json for the freshly-produced library sequence. Without
+    # this the laptop's /api/sequences sees a dir with no metadata and
+    # surfaces it as source="unknown" — and the sync daemon has nothing
+    # canonical to mirror. Done unconditionally on success so the entry
+    # is well-formed even if the .npz rebuild failed (manual rebuild
+    # later still leaves the sequence renderable).
+    if run.state == "done":
+        try:
+            _write_sequence_meta(run.name, run_dir)
+        except Exception as e:
+            _log.warning("post-run _meta.json write failed for %s: %s", run.name, e)
+
+
+def _write_sequence_meta(run_name: str, run_dir: Path) -> None:
+    """Write the canonical `_meta.json` for a completed sim sequence.
+
+    Pulls `model_dir` back out of `manifest.json` (saved at start_run)
+    and reads frame_0000.ply for n_splats + bbox_initial. Frame count is
+    a directory walk of `frames/`. Source path is hostname-qualified so
+    the laptop can later distinguish "produced on sxyin-host" from a
+    locally-imported sequence with the same name."""
+    import socket
+    frames_dir = run_dir / "frames"
+    frame0 = frames_dir / "frame_0000.ply"
+    frame_count = sum(1 for p in frames_dir.glob("frame_*.ply")) if frames_dir.is_dir() else 0
+    if frame0.is_file():
+        n_splats, bbox = lib.read_ply_bbox_and_count(frame0)
+    else:
+        n_splats, bbox = None, None
+    model_ref: Optional[str] = None
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            data = json.loads(manifest_path.read_text())
+            md = data.get("model_dir")
+            if isinstance(md, str) and md:
+                model_ref = Path(md).name
+        except (json.JSONDecodeError, OSError):
+            pass
+    lib.Sequence.write_meta(
+        name=run_name,
+        source="sim",
+        source_path=f"{socket.gethostname()}:{run_dir}",
+        model_ref=model_ref,
+        frame_count=frame_count,
+        n_splats=n_splats,
+        bbox_initial=bbox,
+        coord_convention="z-up",
+        first_frame_full=True,
+    )
+
 
 async def _rebuild_npz(run_name: str, run_dir: Path, log_path: Path) -> None:
     """Invoke `tools/batch_convert_to_npz.py <run_name>` as a subprocess.
