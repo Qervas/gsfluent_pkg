@@ -1,5 +1,5 @@
 # gsfluent — 动画 3DGS 序列的工作台
-
+![](./docs/diagram.png)
 针对物理仿真后的 3D Gaussian Splatting 序列的浏览器工作台。挑序列、
 拖时间轴、在点云和 splat 两种渲染模式间切换、绕模型转动相机。
 
