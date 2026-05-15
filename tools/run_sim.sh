@@ -59,6 +59,37 @@ PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SIM_HOME="${GSFLUENT_SIM_HOME:-$GSFLUENT_SIM_HOME}"
 SIM_PY="${GSFLUENT_SIM_PYTHON:-python}"
 
+# Pre-flight: bail fast with a clear, deploy-aware error if the sim env
+# isn't mounted/installed. Without this the script would barrel into
+# `cd "$SIM_HOME"` and surface a cryptic "no such file or directory"
+# to the workbench's run.log. The Docker bundled-image case (no
+# SIM_HOST_DIR mounted) hits this path on a leader's POST /api/runs.
+if [[ ! -d "$SIM_HOME" ]]; then
+    cat >&2 <<EOF
+ERROR: no sim environment installed at \$GSFLUENT_SIM_HOME=$SIM_HOME
+
+This deploy has the gsfluent API but no MPM sim. POST /api/runs requires
+a working GaussianFluent install (the upstream sim core with Warp +
+Taichi + torch). Three ways to fix:
+
+  1. Mount your sim install into the container:
+     SIM_HOST_DIR=/path/to/GaussianFluent docker compose up -d
+     (and uncomment the SIM_HOST_DIR volume line in docker/compose.yml)
+
+  2. Point at a sim install already on the host:
+     GSFLUENT_SIM_HOME=/path/to/GaussianFluent ./run-server.sh
+
+  3. Use a sim-capable backend elsewhere (your GPU server) and connect
+     this workbench to it via SSH tunnel — see README "Mode B".
+EOF
+    exit 1
+fi
+if ! command -v "$SIM_PY" >/dev/null 2>&1; then
+    echo "ERROR: sim interpreter not on PATH: \$GSFLUENT_SIM_PYTHON=$SIM_PY" >&2
+    echo "       Point it at the python that has torch/warp/taichi installed." >&2
+    exit 1
+fi
+
 # Conda activation, optional. If GSFLUENT_SIM_ENV is set we activate it;
 # otherwise we trust the caller's env (e.g. systemd unit, run-server.sh)
 # has already set up the right python.
