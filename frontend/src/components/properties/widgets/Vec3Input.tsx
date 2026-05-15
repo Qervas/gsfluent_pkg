@@ -1,3 +1,5 @@
+import { HelpIcon } from "./HelpIcon";
+
 export function Vec3Input({
   label,
   value,
@@ -17,8 +19,11 @@ export function Vec3Input({
     onChange(next);
   };
   return (
-    <div className="py-0.5" title={hint}>
-      <div className="text-text-secondary text-xs mb-0.5 truncate">{label}</div>
+    <div className="py-0.5">
+      <div className="text-text-secondary text-xs mb-0.5 truncate flex items-center gap-1">
+        <span className="truncate">{label}</span>
+        <HelpIcon hint={hint} />
+      </div>
       <div className="flex gap-1">
         {(["x", "y", "z"] as const).map((axis, i) => (
           <input
