@@ -10,6 +10,27 @@ Warp, no Taichi locally — pure-Python deps.
 
 [中文 README](README.md)
 
+## Fastest path: Docker (one command)
+
+If you just want to **run** the workbench (browse sequences, edit
+recipes, submit sim runs against a configured backend), the Docker
+image bundles everything:
+
+```bash
+git clone <repo> && cd gsfluent_pkg
+docker compose -f docker/compose.yml up -d
+open http://localhost:8080/
+```
+
+That's it. No Node, no Python, no setup-* scripts on your host —
+only Docker. The image (~316 MB) carries the FastAPI gateway + the
+built React SPA + recipe presets. See [docker/README.md](docker/README.md)
+for the full deployment guide (sim env mount, GPU access, env vars,
+client-side optional tools).
+
+The rest of this README documents the **development** flow — running
+the API and the SPA from source via uv + Vite, with hot-reload.
+
 ## Architecture: strong frontend/backend split
 
 | | server (GPU box) | client (your machine) |

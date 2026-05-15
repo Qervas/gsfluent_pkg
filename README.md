@@ -8,6 +8,23 @@
 
 [English README](README.en.md)
 
+## 最快上手：Docker 一条命令
+
+只想**跑起来**（浏览序列、改配方、提交仿真请求）？Docker 镜像把
+FastAPI + 编好的 React SPA + 配方一起打包了：
+
+```bash
+git clone <repo> && cd gsfluent_pkg
+docker compose -f docker/compose.yml up -d
+open http://localhost:8080/
+```
+
+主机上只需要 Docker，不用装 Node/Python/setup-* 脚本。镜像 ~316 MB。
+完整部署指南（sim env mount、GPU、env 变量、客户端可选工具）见
+[docker/README.md](docker/README.md)。
+
+下面是**开发流程**——用 uv + Vite 跑源码、带热重载。
+
 ## 架构：严格前后端分离
 
 | | 服务器（GPU 机） | 客户端（你的机器） |
