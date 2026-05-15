@@ -3,13 +3,13 @@ import { SliderInput } from "./widgets/SliderInput";
 import { NumberInput } from "./widgets/NumberInput";
 
 const FIELDS: Array<[string, string, [number, number, number], string?]> = [
-  ["n_grid",                 "Grid resolution",         [50, 400, 10],     "MPM grid cells per side. Quadratic memory cost."],
-  ["grid_lim",               "Grid lim",                [1, 10, 1],        "Grid extent in world units."],
-  ["frame_dt",               "Frame dt (s)",            [0.005, 0.1, 0.005], "Time per frame."],
-  ["frame_num",              "Total frames",            [30, 600, 10],     "Animation length."],
-  ["flip_pic_ratio",         "FLIP/PIC ratio",          [0, 1, 0.05],      "0 = pure PIC, 1 = pure FLIP."],
-  ["rpic_damping",           "RPIC damping",            [0, 1, 0.01],      "Velocity damping factor."],
-  ["grid_v_damping_scale",   "Grid v damping scale",    [0.5, 2, 0.05]],
+  ["n_grid",                 "Grid resolution",         [50, 400, 10],       "MPM grid cells per side. Cubic memory cost; doubling triples runtime."],
+  ["grid_lim",               "Grid lim",                [1, 10, 1],          "Half-width of the sim cube in MPM-normalized units. Grid spans [0, 2·grid_lim] per axis."],
+  ["frame_dt",               "Frame dt (s)",            [0.005, 0.1, 0.005], "Wall-clock interval each frame represents. Frame count × frame_dt = total sim time."],
+  ["frame_num",              "Total frames",            [30, 600, 10],       "Number of frames to simulate. Output: simulation_ply/sim_0000.ply … sim_{N-1}.ply."],
+  ["flip_pic_ratio",         "FLIP/PIC ratio",          [0, 1, 0.05],        "0 = pure PIC (more damped, stable); 1 = pure FLIP (livelier motion). 0.7 is a good default for jelly."],
+  ["rpic_damping",           "RPIC damping",            [0, 1, 0.01],        "Rotational PIC damping. 0 = none; higher kills angular motion."],
+  ["grid_v_damping_scale",   "Grid v damping scale",    [0.5, 2, 0.05],      "Multiplier on grid-velocity damping. >1 dampens harder each step; <1 lets motion persist longer."],
 ];
 
 export function SolverPanel() {
@@ -42,7 +42,7 @@ export function SolverPanel() {
         value={Number(data.substep_dt ?? 0.0001)}
         onChange={(n) => setField("substep_dt", n)}
         step={0.00001}
-        hint="Inner integration step. Smaller = more stable."
+        hint="Inner integration timestep. Smaller = more stable but slower (more substeps per frame). 1e-4 is typical."
       />
     </div>
   );

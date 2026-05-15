@@ -22,7 +22,7 @@ export function ForcesPanel() {
         value={gTuple}
         onChange={(v) => setField("g", [v[0], v[1], v[2]])}
         step={0.5}
-        hint="Gravity vector. Default (0, 0, -15) for z-up world."
+        hint="Gravitational acceleration vector (world units / s²). Default (0, 0, -15) is 1.5× Earth gravity for snappier motion on small scenes."
       />
     </div>
   );

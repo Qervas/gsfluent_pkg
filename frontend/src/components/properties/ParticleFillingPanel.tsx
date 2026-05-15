@@ -1,6 +1,20 @@
 import { useStore } from "@/lib/store";
 import { NumberInput } from "./widgets/NumberInput";
 
+// Hints for the known particle_filling sub-keys. The block is an opaque
+// dict in the upstream sim, so we render whatever keys appear; this map
+// just labels the ones we recognize. Unknown keys get rendered without
+// a tooltip.
+const HINTS: Record<string, string> = {
+  n_grid:                  "Voxel resolution used by the filler. Independent of solver n_grid — finer = more particles for the same volume.",
+  max_particles_num:       "Hard cap on particles inserted. Filler stops once this is reached.",
+  density_threshold:       "Voxel density threshold below which a cell is treated as empty (no particles inserted).",
+  search_threshold:        "Ray-cast hit threshold used to decide whether a voxel is inside or outside the surface.",
+  max_partciels_per_cell:  "Max particles emitted per voxel cell. Caps local density. (Note: upstream typo; key spelling matches the sim.)",
+  search_exclude_direction: "Skip this ray-cast direction during the inside/outside test (0–5 → ±X, ±Y, ±Z).",
+  ray_cast_direction:       "Primary ray direction for the inside/outside test (0–5 → ±X, ±Y, ±Z).",
+};
+
 export function ParticleFillingPanel() {
   const data = useStore((s) => s.activeRecipeData);
   const name = useStore((s) => s.activeRecipeName);
@@ -34,6 +48,7 @@ export function ParticleFillingPanel() {
             value={v}
             onChange={(n) => setChild(k, n)}
             step={1}
+            hint={HINTS[k]}
           />
         );
       })}

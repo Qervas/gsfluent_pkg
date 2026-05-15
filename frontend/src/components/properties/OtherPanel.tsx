@@ -24,6 +24,7 @@ export function OtherPanel() {
         label="Show hint"
         value={Boolean(data.show_hint)}
         onChange={(v) => setField("show_hint", v)}
+        hint="Upstream sim flag — overlay hint geometry (sim bounds, viewpoint center) in the preview render. Has no effect on the workbench viewport."
       />
     </div>
   );
