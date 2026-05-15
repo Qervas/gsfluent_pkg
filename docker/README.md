@@ -1,29 +1,31 @@
 # Deploying the gsfluent backend in Docker
 
-Slim, reproducible deploy of the workbench's server-side API. One image,
-works on any Linux box, Mac, or Windows-with-WSL that has Docker — no
-GPU runtime required for the API itself. The MPM sim is launched as a
-subprocess against a separately-installed sim environment, mounted in
-read-only at run time.
+Slim, reproducible deploy of the entire workbench in **one container**:
+FastAPI gateway + the React workbench SPA + run-script tools. Bundled
+so the leader's-laptop deploy is literally:
 
-**Image size**: ~315 MB (slim Python + uv-managed venv, no CUDA layer).
-**Dependencies**: Docker 24+ with BuildKit. Compose v2.
+```bash
+git clone <repo> && cd gsfluent_pkg
+docker compose -f docker/compose.yml up -d
+open http://localhost:8080/
+```
 
-## Quick start (server admin)
+No Node, no npm, no Python on the host. Docker is the only requirement.
+Works on any Linux box, Mac, or Windows-with-WSL.
+
+**Image size**: ~316 MB (slim Python + uv-managed venv + Vite-built SPA,
+no CUDA runtime). **Dependencies**: Docker 24+ with BuildKit. Compose v2.
+
+## Quick start
 
 From the repo root (`gsfluent_pkg/`):
 
 ```bash
 docker compose -f docker/compose.yml up -d
-```
-
-That builds the image, launches the container, publishes `:8080`, and
-auto-restarts on health failure. Verify:
-
-```bash
-curl http://localhost:8080/api/health
-curl http://localhost:8080/api/system
-docker compose -f docker/compose.yml ps   # check Healthy column
+# wait ~10s for the start-period grace window
+open http://localhost:8080/                        # the workbench
+curl http://localhost:8080/api/health              # ok
+docker compose -f docker/compose.yml ps            # check Healthy column
 ```
 
 To stop:
@@ -83,21 +85,31 @@ block in `compose.yml` uncommented. Coming up in the sim-layer image.)
   `WORK_HOST_DIR` mount. Restarting / re-pulling the image doesn't
   lose sequences.
 
-## Connect a client
+## Two deployment modes
 
-From a laptop, point the workbench at the deployed backend:
+**Mode A — leader-friendly one-machine deploy.** The container hosts
+both the API and the SPA. Open `http://localhost:8080/` and the
+workbench renders against its own backend. **Points** render mode works
+out of the box (uses /api/stream). **Splats** mode and auto-sync of
+sequences from a remote sim host require the optional client tools
+(`./run-client.sh`) running alongside.
+
+**Mode B — split: laptop client + remote backend.** Backend container
+runs on the GPU server; the laptop forwards `:8080` via SSH and uses
+`./run-client.sh` for viser + sync_daemon:
 
 ```bash
-# Same machine as the container:
-SERVER_SSH=  GSFLUENT_SERVER=http://localhost:8080 ./run-client.sh
+# laptop ~/.ssh/config:
+#   Host mygpu
+#     HostName <ip>
+#     User <you>
 
-# Remote machine (the leader's laptop case):
-ssh-config:  Host mygpu / HostName 10.20.30.40 / User <you>
 SERVER_SSH=mygpu ./run-client.sh
+# opens tunnel + viser + sync_daemon + browser to localhost:4173
 ```
 
-`run-client.sh` opens an SSH tunnel + starts vite preview + viser +
-sync_daemon and points the browser at the workbench.
+The same container image serves both modes — only the env vars and
+mounts differ.
 
 ## Architecture
 
