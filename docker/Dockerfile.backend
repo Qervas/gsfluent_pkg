@@ -1,89 +1,83 @@
-# gsfluent backend image — reproducible deployment of the workbench's
-# server-side FastAPI gateway + SPA. GPU access is wired in (nvidia/cuda
-# base + the host's nvidia-container-toolkit), so future image revisions
-# can layer the MPM sim stack on top without changing the base.
+# gsfluent backend image — slim, uv-based, reproducible, no GPU runtime.
 #
-# Stage 1: build the React SPA (Node 22). The compiled assets land in
-#   server/gsfluent/static/ inside the image so `gsfluent serve` mounts
-#   them at /. Separated into its own stage so changes to the server's
-#   Python only invalidate the python layers, not the node_modules.
+# Why slim (not nvidia/cuda): the backend is a pure FastAPI gateway.
+# The MPM sim is spawned per /api/runs request as a subprocess against
+# a separately-installed sim environment (mounted via $GSFLUENT_SIM_HOME).
+# That keeps this image at ~200MB and lets the same image deploy on
+# any Linux box with Docker — GPU host, CPU-only laptop, even a Mac.
 #
-# Stage 2: install gsfluent server into a nvidia/cuda runtime image.
-#   Currently the image has NO sim stack — only the API gateway. Test
-#   the handshake (SSH tunnel + /api/health + /api/gpu-check) first,
-#   then a follow-up commit adds torch/warp/taichi + the canonical sim
-#   source.
+# To run sims, mount the sim env at /opt/gsfluent-sim AND point
+# $GSFLUENT_SIM_PYTHON at the conda-env python inside that mount.
+# Without those mounts the container still serves the API + sequence
+# library; POST /api/runs returns a clear error.
 #
-# Build (from gsfluent_pkg/ root):
-#   docker build -f docker/Dockerfile.backend -t gsfluent-backend:dev .
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.backend -t gsfluent-backend:latest .
 #
-# Run (server admin):
-#   docker run --rm --gpus all \
-#       -p 8080:8080 \
-#       gsfluent-backend:dev
+# Run (simplest):
+#   docker run --rm -p 8080:8080 gsfluent-backend:latest
 #
-# Test (each team member from their laptop):
-#   ssh -L 8080:localhost:8080 sxyin-host
-#   curl http://localhost:8080/api/health
-#   curl http://localhost:8080/api/gpu-check
-#   curl http://localhost:8080/api/system
+# Run (with sim env):
+#   docker run --rm -p 8080:8080 \
+#       -v /path/to/GaussianFluent:/opt/gsfluent-sim:ro \
+#       -v $PWD/work:/app/work \
+#       -e GSFLUENT_SIM_PYTHON=/opt/gsfluent-sim/.venv/bin/python \
+#       gsfluent-backend:latest
+#
+# Prefer compose for anything beyond `docker run --rm`:
+#   docker compose -f docker/compose.yml up -d
 
 # ============================================================================
-# Stage 1 — SPA build
+# Stage 1 — install dependencies into a venv via uv. Uses the project's
+# uv.lock so every build resolves to the same package versions.
 # ============================================================================
-FROM node:22-slim AS spa-build
-
-WORKDIR /spa
-
-# Copy package manifests first so a server-only change doesn't invalidate
-# the node_modules layer.
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
-
-# Copy the rest of the frontend and build.
-COPY frontend/ ./
-RUN npm run build
-
-# ============================================================================
-# Stage 2 — runtime image with FastAPI + GPU access
-# ============================================================================
-FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04 AS runtime
+FROM python:3.12-slim-bookworm AS deps
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/server/.venv
 
-# Minimal system deps. python3.11-distutils is needed for `pip install -e`
-# to resolve the editable install; build-essential is for compiling any
-# C-extension wheels that don't ship prebuilt. No git/curl/etc. — keeps
-# the image lean.
+# uv is shipped as a single static binary — much faster than pip install
+# and obeys uv.lock byte-for-byte.
+COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
+
+WORKDIR /app/server
+
+# Copy ONLY the lockfile + pyproject first so a code change doesn't
+# invalidate the dependency layer. uv sync resolves to .venv.
+COPY server/pyproject.toml server/uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
+
+# Now copy the source + install the project itself.
+COPY server/ ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen
+
+# ============================================================================
+# Stage 2 — runtime. Copy the .venv from deps, plus tools/ for run_sim.sh,
+# then run gsfluent serve. No build deps in the final image.
+# ============================================================================
+FROM python:3.12-slim-bookworm AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/server/.venv/bin:$PATH"
+
+# Minimal runtime essentials: curl for the HEALTHCHECK + ca-certificates
+# for any outbound HTTPS the runner may need.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-distutils python3.11-venv python3-pip \
-        build-essential \
-    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
-    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+        curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install the server package. We copy ONLY server/ here so frontend
-# rebuilds don't invalidate the pip-install layer.
-COPY server/ /app/server/
-RUN python -m pip install --upgrade pip wheel \
-    && python -m pip install -e /app/server
-
-# Copy tools (run_sim.sh, fuse_to_full_ply.py, etc.) so runner.py can
-# spawn them. These don't run for the handshake-only image but the
-# paths are wired up for the next layer that adds the sim stack.
+COPY --from=deps /app/server /app/server
 COPY tools/ /app/tools/
 
-# Drop in the built SPA so /api/* + / route works from one origin.
-# COPY --from=spa-build /spa/dist/ /app/server/gsfluent/static/
-# (Re-enable once the SPA build is reliable; for handshake-only, the
-# JSON API endpoints are enough. Until then the image stays smaller.)
-
-# These defaults can be overridden at `docker run` time via -e.
+# Tunable env vars, all overridable at `docker run -e ...`.
 ENV GSFLUENT_SIM_HOME=/opt/gsfluent-sim \
     GSFLUENT_SIM_PYTHON=python \
     GSFLUENT_SIM_SCRIPT_RUNNER=/app/tools/run_sim.sh \
@@ -91,6 +85,10 @@ ENV GSFLUENT_SIM_HOME=/opt/gsfluent-sim \
 
 EXPOSE 8080
 
-# Listen on 0.0.0.0 so the published port is reachable from outside.
-# `--no-browser` skips the auto-open attempt (no display in a container).
+# Docker-managed liveness probe. The wrapping orchestrator (compose with
+# `restart: unless-stopped`) restarts the container on `unhealthy`.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=4 \
+    CMD curl -fs http://localhost:8080/api/health > /dev/null || exit 1
+
+# Listen on 0.0.0.0 — published port comes from the host's -p mapping.
 CMD ["gsfluent", "serve", "--host", "0.0.0.0", "--port", "8080", "--no-browser"]
