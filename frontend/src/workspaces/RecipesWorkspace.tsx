@@ -1,38 +1,47 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2, Copy, Save, Upload } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { Properties } from "@/components/properties/Properties";
+import { useStore } from "@/lib/store";
 
+/** Recipes workspace.
+ *
+ * Mirrors the Sim workspace's RHS Properties panel here so a user can
+ * tune material / solver / forces / boundaries on a recipe without
+ * leaving the Recipes tab. Selection updates `store.activeRecipe`,
+ * which Properties (and every nested panel) already reads from — same
+ * single source of truth across both workspaces.
+ */
 export function RecipesWorkspace() {
   const qc = useQueryClient();
   const { data: recipes = [] } = useQuery({
     queryKey: ["recipes"],
     queryFn: api.recipes.list,
   });
-  const [selected, setSelected] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string>("");
+
+  const activeRecipeName = useStore((s) => s.activeRecipeName);
+  const activeRecipeData = useStore((s) => s.activeRecipeData);
+  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
+
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const builtin = recipes.filter((r) => r.source === "builtin");
   const user = recipes.filter((r) => r.source === "user");
+  const selected = activeRecipeName;
   const isUser = recipes.find((r) => r.name === selected)?.source === "user";
 
-  const { data: detail } = useQuery({
-    queryKey: ["recipe", selected],
-    queryFn: () =>
-      selected ? api.recipes.get(selected) : Promise.resolve(null),
-    enabled: !!selected,
-  });
-
-  // Sync editing buffer when selection changes / detail loads.
-  useEffect(() => {
-    if (detail) {
-      setEditing(JSON.stringify(detail.data, null, 2));
-      setError(null);
+  const onSelect = async (name: string) => {
+    setError(null);
+    try {
+      const r = await api.recipes.get(name);
+      setActiveRecipe(r.name, r.data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
-  }, [detail]);
+  };
 
   const onDelete = async () => {
     if (!selected || !isUser) return;
@@ -40,18 +49,18 @@ export function RecipesWorkspace() {
     try {
       await api.recipes.delete(selected);
       qc.invalidateQueries({ queryKey: ["recipes"] });
-      setSelected(null);
+      setActiveRecipe(null, null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
   const onDuplicate = async () => {
-    if (!detail) return;
+    if (!activeRecipeData) return;
     const name = prompt("Duplicate as preset name:");
     if (!name?.trim()) return;
     try {
-      await api.recipes.save(name.trim(), detail.data, selected ?? undefined);
+      await api.recipes.save(name.trim(), activeRecipeData, selected ?? undefined);
       qc.invalidateQueries({ queryKey: ["recipes"] });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -59,32 +68,29 @@ export function RecipesWorkspace() {
   };
 
   const onRename = async () => {
-    if (!selected || !isUser || !detail) return;
+    if (!selected || !isUser || !activeRecipeData) return;
     const next = prompt(`Rename "${selected}" to:`, selected);
     if (!next?.trim() || next.trim() === selected) return;
     const newName = next.trim();
     try {
-      // Save under new name carrying provenance, then delete the old file.
-      const provenance = (detail.data?._provenance as { based_on?: string } | undefined)?.based_on;
-      await api.recipes.save(newName, detail.data, provenance);
+      const provenance = (activeRecipeData?._provenance as { based_on?: string } | undefined)?.based_on;
+      await api.recipes.save(newName, activeRecipeData, provenance);
       await api.recipes.delete(selected);
       qc.invalidateQueries({ queryKey: ["recipes"] });
-      setSelected(newName);
+      setActiveRecipe(newName, activeRecipeData);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
   const onSaveEdits = async () => {
-    if (!selected || !isUser) return;
+    if (!selected || !isUser || !activeRecipeData) return;
     setSaving(true);
     setError(null);
     try {
-      const data = JSON.parse(editing);
-      const provenance = (detail?.data?._provenance as { based_on?: string } | undefined)?.based_on;
-      await api.recipes.save(selected, data, provenance);
+      const provenance = (activeRecipeData?._provenance as { based_on?: string } | undefined)?.based_on;
+      await api.recipes.save(selected, activeRecipeData, provenance);
       qc.invalidateQueries({ queryKey: ["recipes"] });
-      qc.invalidateQueries({ queryKey: ["recipe", selected] });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -122,7 +128,7 @@ export function RecipesWorkspace() {
 
   return (
     <div className="h-full flex">
-      {/* Left: list */}
+      {/* Left: recipe list */}
       <div className="w-[280px] border-r border-border overflow-y-auto shrink-0">
         <div className="px-3 py-2 flex items-center justify-between">
           <span className="text-text-muted text-[10px] uppercase tracking-wider">
@@ -143,7 +149,7 @@ export function RecipesWorkspace() {
           <button
             key={r.name}
             type="button"
-            onClick={() => setSelected(r.name)}
+            onClick={() => onSelect(r.name)}
             className={
               "w-full text-left px-3 py-1 text-xs hover:bg-elevated truncate " +
               (selected === r.name ? "text-accent" : "text-text-primary")
@@ -162,7 +168,7 @@ export function RecipesWorkspace() {
           <button
             key={r.name}
             type="button"
-            onClick={() => setSelected(r.name)}
+            onClick={() => onSelect(r.name)}
             className={
               "w-full text-left px-3 py-1 text-xs hover:bg-elevated truncate " +
               (selected === r.name ? "text-accent" : "text-text-primary")
@@ -172,7 +178,8 @@ export function RecipesWorkspace() {
           </button>
         ))}
       </div>
-      {/* Right: detail */}
+
+      {/* Right: action bar + structured params editor (Properties) */}
       <div className="flex-1 flex flex-col min-w-0">
         {!selected ? (
           <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
@@ -180,13 +187,13 @@ export function RecipesWorkspace() {
           </div>
         ) : (
           <>
-            <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
+            <div className="flex items-center gap-2 px-4 py-2 border-b border-border shrink-0">
               <span className="font-mono text-sm text-text-primary truncate">
                 {isUser ? "★ " : ""}
                 {selected}
               </span>
               <span className="text-text-muted text-xs shrink-0">
-                {isUser ? "user preset" : "built-in"}
+                {isUser ? "user preset" : "built-in (read-only)"}
               </span>
               <div className="ml-auto flex gap-2 shrink-0">
                 <Button variant="secondary" onClick={onDuplicate}>
@@ -208,17 +215,17 @@ export function RecipesWorkspace() {
               </div>
             </div>
             {error && (
-              <div className="px-4 py-1 text-error text-xs bg-error/10 border-b border-error/30">
+              <div className="px-4 py-1 text-error text-xs bg-error/10 border-b border-error/30 shrink-0">
                 {error}
               </div>
             )}
-            <textarea
-              value={editing}
-              onChange={(e) => setEditing(e.target.value)}
-              readOnly={!isUser}
-              className="flex-1 font-mono text-xs bg-canvas text-text-primary p-4 outline-none resize-none border-0"
-              spellCheck={false}
-            />
+            {/* Same Properties tree as the Sim workspace's right rail.
+                Each sub-panel reads + writes store.activeRecipe[Name|Data],
+                so edits flow through the same path the sim workspace
+                uses and Save reads activeRecipeData from the store. */}
+            <div className="flex-1 overflow-y-auto">
+              <Properties />
+            </div>
           </>
         )}
       </div>
