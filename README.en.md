@@ -14,18 +14,24 @@ Warp, no Taichi locally — pure-Python deps.
 
 If you just want to **run** the workbench (browse sequences, edit
 recipes, submit sim runs against a configured backend), the Docker
-image bundles everything:
+image bundles everything. Two ways:
 
 ```bash
+# A — pull a pre-built image from GHCR (no local build):
+docker pull ghcr.io/qervas/gsfluent-backend:latest
+docker run --rm -d -p 8080:8080 --name gsfluent ghcr.io/qervas/gsfluent-backend:latest
+open http://localhost:8080/
+
+# B — build from source (gets you compose + healthcheck + log rotation):
 git clone <repo> && cd gsfluent_pkg
 docker compose -f docker/compose.yml up -d
 open http://localhost:8080/
 ```
 
-That's it. No Node, no Python, no setup-* scripts on your host —
-only Docker. The image (~316 MB) carries the FastAPI gateway + the
-built React SPA + recipe presets. See [docker/README.md](docker/README.md)
-for the full deployment guide (sim env mount, GPU access, env vars,
+No Node, no Python, no setup-* scripts on your host — only Docker.
+The image (~316 MB) carries the FastAPI gateway + the built React
+SPA + recipe presets. See [docker/README.md](docker/README.md) for
+the full deployment guide (sim env mount, GPU access, env vars,
 client-side optional tools).
 
 The rest of this README documents the **development** flow — running

@@ -11,9 +11,15 @@
 ## 最快上手：Docker 一条命令
 
 只想**跑起来**（浏览序列、改配方、提交仿真请求）？Docker 镜像把
-FastAPI + 编好的 React SPA + 配方一起打包了：
+FastAPI + 编好的 React SPA + 配方一起打包了，两种方式：
 
 ```bash
+# A — 直接从 GHCR 拉预构建镜像（不用本地编译）：
+docker pull ghcr.io/qervas/gsfluent-backend:latest
+docker run --rm -d -p 8080:8080 --name gsfluent ghcr.io/qervas/gsfluent-backend:latest
+open http://localhost:8080/
+
+# B — 从源码 build（带 compose + healthcheck + 日志滚动）：
 git clone <repo> && cd gsfluent_pkg
 docker compose -f docker/compose.yml up -d
 open http://localhost:8080/
