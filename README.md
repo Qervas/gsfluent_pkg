@@ -47,12 +47,43 @@ cd gsfluent_pkg && ./setup-client.sh
 **客户端（每次）：**
 
 ```bash
-SERVER_SSH=<server-host> ./run-client.sh
+SERVER_SSH=mygpu ./run-client.sh
 ```
 
-`run-client.sh` 会自动打通 SSH 隧道（`-L 8080:localhost:8080`），用
-`vite preview` 在 `:4173` 启动 SPA，再起 viser + sync_daemon +
-Points WS，最后在浏览器里打开 workbench。Ctrl-C 一并清理。
+### `SERVER_SSH` 是什么（一个例子）
+
+`SERVER_SSH` 就是你 `ssh ` 后面那个**主机别名**——读自
+`~/.ssh/config`：
+
+```ssh-config
+# ~/.ssh/config
+Host mygpu
+    HostName 10.20.30.40        # 或 gpu.lab.example.com
+    User alice
+    IdentityFile ~/.ssh/lab_key
+    Port 22
+```
+
+配好这一段后，`ssh mygpu` 就能直接进服务器。
+`SERVER_SSH=mygpu ./run-client.sh` 复用同一个别名，在后台开一条
+**端口转发**的 SSH 连接：
+
+```text
+客户端（你的机器）                              服务器（mygpu）
+───────────────────────                        ──────────────────
+http://localhost:4173  ◄── vite preview        gsfluent serve
+                            （SPA）               监听 :8080
+                                                       ▲
+                                                       │
+                            ssh -N -L 8080:localhost:8080 mygpu
+http://localhost:8080  ──────────────────────────────► 隧道出口
+   （SPA 把 /api 代理到这里）                       （服务器的 loopback）
+```
+
+笔记本的 `:8080` 和服务器的 `:8080` 通过 SSH 焊在一起。SPA 调
+`/api/*`，被 vite 代理到 `localhost:8080`——也就是隧道的客户端
+端——也就是服务器的 `gsfluent serve`。整条链路全在 SSH 里跑，
+不开公网端口。Ctrl-C 时连同隧道一起清理。
 
 已有隧道或后端在 LAN 上直连？跳过 `SERVER_SSH`：
 

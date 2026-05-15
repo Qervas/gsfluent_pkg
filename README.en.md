@@ -50,15 +50,48 @@ cd gsfluent_pkg && ./setup-client.sh
 **Client (each session):**
 
 ```bash
-SERVER_SSH=<server-host> ./run-client.sh
+SERVER_SSH=mygpu ./run-client.sh
 ```
 
-`run-client.sh` opens the SSH tunnel for you
-(`-L 8080:localhost:8080`), serves the SPA via `vite preview` on
-`:4173`, starts viser + sync_daemon + Points WS, and opens the
-workbench in your browser. Ctrl-C tears the whole stack down.
+### What `SERVER_SSH` is, with an example
 
-Existing tunnel or LAN-reachable server? Skip `SERVER_SSH`:
+`SERVER_SSH` is an **SSH host alias** — the same name you'd type after
+`ssh ` to log into the server. It's read out of your
+`~/.ssh/config`:
+
+```ssh-config
+# ~/.ssh/config
+Host mygpu
+    HostName 10.20.30.40        # or gpu.lab.example.com
+    User alice
+    IdentityFile ~/.ssh/lab_key
+    Port 22
+```
+
+With that block in place, `ssh mygpu` opens an interactive shell on
+the server. `SERVER_SSH=mygpu ./run-client.sh` reuses the same alias
+to open a **port-forwarding** SSH connection in the background:
+
+```text
+client (your machine)                          server (mygpu)
+───────────────────────                        ──────────────────
+http://localhost:4173  ◄── vite preview        gsfluent serve
+                            (the SPA)             listening on :8080
+                                                          ▲
+                                                          │
+                            ssh -N -L 8080:localhost:8080 mygpu
+http://localhost:8080  ─────────────────────────────────► tunnel exit
+   (SPA proxies /api here)                              (loopback on the server)
+```
+
+Port `:8080` on your laptop is fused to port `:8080` on the server.
+The SPA hits `/api/*` (proxied to `localhost:8080` by vite), which is
+the tunnel's client end, which is the server's `gsfluent serve`. No
+ports are exposed on the public internet — SSH carries everything.
+Ctrl-C tears the tunnel down with the rest of the stack.
+
+Got an existing tunnel or a server reachable over the LAN? Skip
+`SERVER_SSH` and point directly:
 
 ```bash
 GSFLUENT_SERVER=http://server.lan:8080 ./run-client.sh
