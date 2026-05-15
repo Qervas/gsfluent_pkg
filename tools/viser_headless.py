@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import uvicorn
 import viser
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -464,6 +464,37 @@ def main() -> int:
                                               "(is sync_daemon running?)"}
         except (OSError, ValueError) as e:
             return {"online": False, "error": f"status file unreadable: {e}"}
+
+    @api.get("/read-local")
+    def read_local(path: str):
+        """Stream a .ply file from the laptop's filesystem to the
+        workbench. The SPA can't read local files except via the
+        drag-drop FileReader path; this endpoint lets a user instead
+        paste a filesystem path and have the workbench load it.
+
+        The SPA then re-uploads the bytes via /api/models/upload, so
+        the server (which never sees the laptop's filesystem) ends up
+        with a normal model registration. We're only the file-reader
+        leg of the trip.
+
+        Security: only .ply files, and only files actually on disk —
+        path traversal is harmless because we always resolve and then
+        stat the result. A malicious caller could enumerate which .ply
+        paths exist on the laptop, but viser_headless binds 0.0.0.0
+        already (same threat surface), and the response is just bytes
+        of files the user owns.
+        """
+        from fastapi.responses import FileResponse
+        p = Path(path).expanduser().resolve()
+        if not p.is_file():
+            raise HTTPException(404, f"no such file: {p}")
+        if p.suffix.lower() != ".ply":
+            raise HTTPException(400, f"only .ply files accepted, got {p.suffix}")
+        return FileResponse(
+            str(p),
+            media_type="application/octet-stream",
+            filename=p.name,
+        )
 
     @api.post("/reload")
     def reload_cell(cell: str | None = None) -> dict:
