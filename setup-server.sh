@@ -1,63 +1,60 @@
 #!/usr/bin/env bash
-# Server-side one-time setup. Run on sxyin-host (or whichever host has
-# the canonical sim core).
+# Server-side one-time setup.
 #
-# What this does:
-#   1. pip-installs the gsfluent package (FastAPI + REST/WS + SPA serving).
-#      The sim dependencies (torch/warp/taichi) are NOT installed by this
-#      script — they're already present in the canonical sim env.
-#   2. builds the React SPA and copies it into server/gsfluent/static/ so
-#      `gsfluent serve` serves the SPA at /.
+# Installs the gsfluent API package into a uv-managed virtualenv at
+# server/.venv/, pinned to the versions in server/uv.lock so every
+# install is byte-identical. No Node, no SPA, no GPU deps here: the
+# server is a pure API + sim runner under the strong frontend/backend
+# split.
 #
-# Pre-reqs:
-#   - python3 (the same one that has the sim deps, ideally)
-#   - npm (Node 18+ recommended) for the SPA build
+# Pre-reqs (all checked below):
+#   - python (>= 3.10) somewhere on PATH (uv will pick it up)
+#   - uv (https://docs.astral.sh/uv/) — the install line is printed if missing
 #
 # Usage:
-#   ./setup-server.sh                    # default python3 + npm on PATH
-#   PYTHON=python3.11 ./setup-server.sh  # specific python
+#   ./setup-server.sh
 
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY="${PYTHON:-python3}"
 
 note() { echo ">>> $*"; }
 err()  { echo "ERROR: $*" >&2; exit 1; }
 
-command -v "$PY" >/dev/null 2>&1 || err "$PY not found on PATH"
-note "using python: $($PY -V)  ($(command -v "$PY"))"
+# ---- 1/2: uv preflight ----
+if ! command -v uv >/dev/null 2>&1; then
+    cat >&2 <<EOF
+ERROR: uv not found on PATH.
 
-note "installing gsfluent server (FastAPI + plyfile + numpy + pydantic + watchfiles)"
-"$PY" -m pip install -e "$PKG_ROOT/server"
+uv is the Python package manager this project uses for reproducible
+installs (https://docs.astral.sh/uv/). Install it once with:
 
-if ! command -v gsfluent >/dev/null 2>&1; then
-    err "post-install: 'gsfluent' console script not on PATH. Check pip install output."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+then re-run this script. uv is a single static binary — no Python
+needed to install it.
+EOF
+    exit 1
 fi
-note "gsfluent CLI at: $(command -v gsfluent)"
+note "uv: $(uv --version)"
 
-note "building React SPA"
-if ! command -v npm >/dev/null 2>&1; then
-    note "  npm not on PATH — skipping SPA build."
-    note "  Install Node 18+ and re-run, or build elsewhere and copy:"
-    note "    cd frontend && npm install && npm run build"
-    note "    cp -r dist/* server/gsfluent/static/"
-else
-    (
-        cd "$PKG_ROOT/frontend"
-        npm install
-        npm run build
-    )
-    mkdir -p "$PKG_ROOT/server/gsfluent/static"
-    rm -rf "$PKG_ROOT/server/gsfluent/static"/*
-    cp -r "$PKG_ROOT/frontend/dist/." "$PKG_ROOT/server/gsfluent/static/"
-    note "SPA copied to $PKG_ROOT/server/gsfluent/static/"
+# ---- 2/2: sync ----
+# `uv sync` reads server/pyproject.toml + server/uv.lock and produces
+# server/.venv with exactly the locked versions. Idempotent: re-running
+# is a no-op when the lockfile hasn't changed.
+note "syncing server dependencies into server/.venv/ (from uv.lock)"
+(cd "$PKG_ROOT/server" && uv sync)
+
+# Sanity probe the console script.
+if ! "$PKG_ROOT/server/.venv/bin/gsfluent" --help >/dev/null 2>&1; then
+    err "post-install: 'gsfluent' console script in server/.venv/bin/ isn't runnable. Check uv sync output."
 fi
+note "gsfluent CLI ready: $PKG_ROOT/server/.venv/bin/gsfluent"
 
 note "done."
 echo ""
 echo "Next:"
-echo "  ./run-server.sh                 # start the backend on :8080"
+echo "  ./run-server.sh                 # start the API on :8080"
 echo ""
-echo "From the laptop:"
-echo "  GSFLUENT_SERVER=http://$(hostname):8080 ./run-laptop.sh"
+echo "On the client machine:"
+echo "  SERVER_SSH=$(hostname) ./run-client.sh"

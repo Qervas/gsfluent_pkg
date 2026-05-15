@@ -18,6 +18,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+# Client-side extras: pulled in by `uv sync --extra client` on the
+# machine that runs viser/sync_daemon/local_stream + the SPA. The
+# server install (plain `uv sync`) deliberately omits these — the
+# server doesn't render anything.
+#   - viser pinned <2: the 1.x API (initial_camera, GaussianSplatHandle,
+#     on_client_connect) is what tools/viser_headless.py depends on.
+client = ["viser>=1.0,<2", "numpy>=1.24"]
 
 [project.scripts]
 gsfluent = "gsfluent.cli:main"

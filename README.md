@@ -8,40 +8,22 @@
 
 [English README](README.en.md)
 
-## 安装
+## 架构：严格前后端分离
 
-纯 pip，不用 conda。用 PATH 上的任意 Python 即可，下面七个依赖装到
-那个环境里。
+| | 服务器（GPU 机） | 客户端（你的机器） |
+|---|---|---|
+| 代码 | `server/`（FastAPI + 仿真 runner） | `frontend/`（React SPA） + `tools/`（viser、sync、Points WS） |
+| 安装 | `./setup-server.sh` | `./setup-client.sh` |
+| 运行 | `./run-server.sh` | `./run-client.sh` |
+| Python 环境 | `server/.venv`（uv 管理），纯 API 依赖 | 同一份 lockfile + `[client]` extras（viser、numpy） |
+| Node | 不需要 | 需要（Vite 构建） |
 
-```bash
-git clone <repo>
-cd gsfluent_pkg
-./setup-view.sh
-```
+Python 依赖统一用 [uv](https://docs.astral.sh/uv/) 管理，`server/uv.lock`
+入库——每次安装都解析到完全相同的版本。新接手的人装一次 uv 即可
+（`curl -LsSf https://astral.sh/uv/install.sh | sh`），其余 setup
+脚本会处理。
 
-`setup-view.sh` 安装：
-
-```
-fastapi  uvicorn  pydantic  watchfiles  plyfile  numpy  viser
-```
-
-外加 `pip install -e ./server`，把 `gsfluent` CLI 装到 PATH 上。指定
-Python 版本：
-
-```bash
-PYTHON=python3.11 ./setup-view.sh
-```
-
-构建生产版 SPA（不需要 HMR 的场景）：
-
-```bash
-cd frontend && npm install && npm run build
-cp -r frontend/dist/* server/gsfluent/static/
-```
-
-## 运行
-
-两台机器，三条命令。
+## 安装 + 运行
 
 **服务器（首次）：**
 
@@ -53,45 +35,54 @@ cd gsfluent_pkg && ./setup-server.sh
 **服务器（每次）：**
 
 ```bash
-./run-server.sh                    # 后端在 :8080
+./run-server.sh                    # API 在 :8080
 ```
 
-**笔记本（每次）：**
+**客户端（首次）：**
 
 ```bash
-SERVER_SSH=<server-host> ./run-laptop.sh
+cd gsfluent_pkg && ./setup-client.sh
 ```
 
-`SERVER_SSH` 是 `~/.ssh/config` 里的 SSH 别名。`run-laptop.sh` 会自动
-打通隧道（`-L 8080:localhost:8080`），起 viser + sync_daemon + Points
-WS，并在浏览器里打开 workbench。Ctrl-C 一并清理。
-
-如果你已经有隧道，或者后端在 LAN 上可直连，跳过 `SERVER_SSH`，直接设
-`GSFLUENT_SERVER`：
+**客户端（每次）：**
 
 ```bash
-GSFLUENT_SERVER=http://server.lan:8080 ./run-laptop.sh
+SERVER_SSH=<server-host> ./run-client.sh
+```
+
+`run-client.sh` 会自动打通 SSH 隧道（`-L 8080:localhost:8080`），用
+`vite preview` 在 `:4173` 启动 SPA，再起 viser + sync_daemon +
+Points WS，最后在浏览器里打开 workbench。Ctrl-C 一并清理。
+
+已有隧道或后端在 LAN 上直连？跳过 `SERVER_SSH`：
+
+```bash
+GSFLUENT_SERVER=http://server.lan:8080 ./run-client.sh
 ```
 
 启动两个协作服务：
 
 ```
-┌──────────────────┐  HTTP   ┌─────────────────────┐
-│ gsfluent serve   │ ←─────→ │  React workbench    │
-│ :8080            │         │  (浏览器)           │
-│  - SPA + REST    │         │  ┌───────────────┐  │
-│  - /api/stream   │         │  │ iframe :8091  │ ←─┐
-│    (WS, Points)  │         │  │  viser splat  │   │  /set, /camera
-└──────────────────┘         │  └───────────────┘   │  → :8092
-                             └─────────────────────┘
-                                                      │
-                             ┌────────────────────────┴─┐
-                             │  tools/viser_headless.py │
-                             │  viser :8091, ctl :8092  │
-                             └──────────────────────────┘
+   SERVER (run-server.sh)             CLIENT (run-client.sh)
+
+  ┌──────────────────┐               ┌──────────────────────────┐
+  │ gsfluent serve   │   /api  HTTP  │ vite preview  :4173      │
+  │ :8080            │ ◀────────────▶│  (serves frontend/dist/) │
+  │  - REST + /api   │   走 SSH 隧道 │                          │
+  │  - /api/stream   │               │ React workbench 在       │
+  │    (WS, Points)  │               │  浏览器  ┌─────────────┐ │
+  │                  │               │          │ iframe :8091│◀┐
+  │ runner.py 起 MPM │               │          │ viser splat │ │
+  │ 仿真             │               │          └─────────────┘ │
+  └──────────────────┘               │                          │
+         ▲                           │ tools/viser_headless.py  │
+         │                           │   :8091 + ctl :8092 ─────┘
+         │ sync_daemon 轮询          │ tools/sync_daemon.py
+         │ /api/sequences            │ tools/local_stream.py
+         └───────────────────────────┴─────  /set, /camera, /sync-status
 ```
 
-打开 `http://localhost:8080`（dev 模式打开 `:5173`）。左侧大纲选序列，
+`./run-client.sh` 之后打开 `http://localhost:4173`。左侧大纲选序列，
 底部拖时间轴，右上角切换 **Points** 渲染（R3F + WebSocket 上的 int16
 量化 xyz）和 **Splats** 渲染（viser iframe，由控制 API 驱动）。
 
@@ -153,7 +144,7 @@ cp tools/recipes/jelly.json tools/recipes/my_recipe.json
 ```
 gsfluent_pkg/
 ├── README.md                README.en.md      # 中英双语
-├── setup-view.sh / run-laptop.sh         # laptop side
+├── setup-client.sh / run-client.sh       # client side
 ├── setup-server.sh / run-server.sh       # server side
 ├── docs/ARCHITECTURE.md     # 架构细节
 ├── server/                  # FastAPI + SPA 服务

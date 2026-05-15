@@ -10,91 +10,83 @@ Taichi locally — pure-Python deps.
 
 [中文 README](README.md)
 
-## Install
+## Architecture: strong frontend/backend split
 
-Pure pip, no conda. Pick whichever Python you have on PATH; the seven
-deps below get installed there.
+| | server (GPU box) | client (your machine) |
+|---|---|---|
+| code | `server/` (FastAPI + sim runner) | `frontend/` (React SPA) + `tools/` (viser, sync, Points WS) |
+| install | `./setup-server.sh` | `./setup-client.sh` |
+| run | `./run-server.sh` | `./run-client.sh` |
+| python env | `server/.venv` (uv) — pure API deps | same lockfile + `[client]` extras (viser, numpy) |
+| node | not needed | required (Vite build) |
 
-```bash
-git clone <repo>
-cd gsfluent_pkg
-./setup-view.sh
-```
+Python deps are managed by [uv](https://docs.astral.sh/uv/) with
+`server/uv.lock` checked in — every install resolves to the exact
+same versions. Recipients install uv once
+(`curl -LsSf https://astral.sh/uv/install.sh | sh`); the setup
+scripts handle the rest.
 
-What `setup-view.sh` installs:
+## Install + run
 
-```
-fastapi  uvicorn  pydantic  watchfiles  plyfile  numpy  viser
-```
-
-Plus `pip install -e ./server` so the `gsfluent` console script lands
-on PATH. To target a non-default Python:
-
-```bash
-PYTHON=python3.11 ./setup-view.sh
-```
-
-To build the SPA for production (HMR-less mode):
-
-```bash
-cd frontend && npm install && npm run build
-cp -r frontend/dist/* server/gsfluent/static/
-```
-
-## Run
-
-Two machines, three commands.
-
-**On the server (one-time):**
+**Server (one-time):**
 
 ```bash
 ssh <server-host>
 cd gsfluent_pkg && ./setup-server.sh
 ```
 
-**On the server (each session):**
+**Server (each session):**
 
 ```bash
-./run-server.sh                    # backend on :8080
+./run-server.sh                    # API on :8080
 ```
 
-**On the laptop (each session):**
+**Client (one-time):**
 
 ```bash
-SERVER_SSH=<server-host> ./run-laptop.sh
+cd gsfluent_pkg && ./setup-client.sh
 ```
 
-`SERVER_SSH` is the SSH alias from your `~/.ssh/config`. `run-laptop.sh`
-opens the tunnel for you (`-L 8080:localhost:8080`), starts viser +
-sync_daemon + Points WS, then opens the workbench in your browser. The
-tunnel is torn down with everything else on Ctrl-C.
-
-Got an existing tunnel, or backend on the LAN? Skip `SERVER_SSH` and
-set `GSFLUENT_SERVER` directly:
+**Client (each session):**
 
 ```bash
-GSFLUENT_SERVER=http://server.lan:8080 ./run-laptop.sh
+SERVER_SSH=<server-host> ./run-client.sh
+```
+
+`run-client.sh` opens the SSH tunnel for you
+(`-L 8080:localhost:8080`), serves the SPA via `vite preview` on
+`:4173`, starts viser + sync_daemon + Points WS, and opens the
+workbench in your browser. Ctrl-C tears the whole stack down.
+
+Existing tunnel or LAN-reachable server? Skip `SERVER_SSH`:
+
+```bash
+GSFLUENT_SERVER=http://server.lan:8080 ./run-client.sh
 ```
 
 This brings up two cooperating servers:
 
 ```
-┌──────────────────┐  HTTP   ┌─────────────────────┐
-│ gsfluent serve   │ ←─────→ │  React workbench    │
-│ :8080            │         │  (browser)          │
-│  - SPA + REST    │         │  ┌───────────────┐  │
-│  - /api/stream   │         │  │ iframe :8091  │ ←─┐
-│    (WS, Points)  │         │  │  viser splat  │   │  /set, /camera
-└──────────────────┘         │  └───────────────┘   │  → :8092
-                             └─────────────────────┘
-                                                      │
-                             ┌────────────────────────┴─┐
-                             │  tools/viser_headless.py │
-                             │  viser :8091, ctl :8092  │
-                             └──────────────────────────┘
+   SERVER (run-server.sh)             CLIENT (run-client.sh)
+
+  ┌──────────────────┐               ┌──────────────────────────┐
+  │ gsfluent serve   │   /api  HTTP  │ vite preview  :4173      │
+  │ :8080            │ ◀────────────▶│  (serves frontend/dist/) │
+  │  - REST + /api   │   over SSH    │                          │
+  │  - /api/stream   │    tunnel     │ React workbench in       │
+  │    (WS, Points)  │               │  browser ┌─────────────┐ │
+  │                  │               │          │ iframe :8091│◀┐
+  │ runner.py spawns │               │          │ viser splat │ │
+  │ MPM sims         │               │          └─────────────┘ │
+  └──────────────────┘               │                          │
+         ▲                           │ tools/viser_headless.py  │
+         │                           │   :8091 + ctl :8092 ─────┘
+         │ sync_daemon polls         │ tools/sync_daemon.py
+         │ /api/sequences            │ tools/local_stream.py
+         └───────────────────────────┴─────  /set, /camera, /sync-status
 ```
 
-Open `http://localhost:8080` (or `:5173` in dev mode). Outliner picks
+Open `http://localhost:4173` after `./run-client.sh`. Outliner picks
 a sequence; the playback bar scrubs frames; the render-mode toggle
 switches between **Points** (R3F + int16-quantized xyz over WebSocket)
 and **Splats** (viser iframe driven by the control API).
@@ -159,7 +151,7 @@ progress).
 ```
 gsfluent_pkg/
 ├── README.md                README.en.md      # bilingual
-├── setup-view.sh / run-laptop.sh         # laptop side
+├── setup-client.sh / run-client.sh       # client side
 ├── setup-server.sh / run-server.sh       # server side
 ├── docs/ARCHITECTURE.md     # deeper architecture notes
 ├── server/                  # FastAPI + SPA serving
