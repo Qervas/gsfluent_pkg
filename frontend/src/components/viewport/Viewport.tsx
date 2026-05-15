@@ -8,6 +8,7 @@ import { useStore } from "@/lib/store";
 import { SplatScene } from "./SplatScene";
 import { ViserSplatScene } from "./ViserSplatScene";
 import { EmptyState } from "./EmptyState";
+import { DropZone } from "./DropZone";
 import { RenderModeToggle } from "./RenderModeToggle";
 import { FpsIndicator } from "./FpsIndicator";
 import { PlaybackDriver } from "./PlaybackDriver";
@@ -174,6 +175,7 @@ export function Viewport() {
           ViserSplatScene's effect forwards each bump to the control API. */}
       <PlaybackDriver />
       {!staticAttrs && <EmptyState />}
+      <DropZone />
       <RenderModeToggle splatAvailable={splatAvailable} />
       <FpsIndicator />
       <PlaybackBar />
