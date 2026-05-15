@@ -1,7 +1,36 @@
 import { useStore } from "@/lib/store";
-import { deriveStage, computeEta } from "@/lib/derive-progress";
 import { deriveMode, modeAccentClass, modeLabel } from "@/lib/derive-mode";
 import { ConsoleAccordion } from "@/components/runs/ConsoleAccordion";
+
+// Coarse phase label parsed from the most recent log lines. Used in
+// place of the raw simState string so the "running" state can be
+// split into the sub-phases the sim actually goes through.
+function deriveStage(state: string, logTail: string): string {
+  if (state !== "running") return state;
+  if (logTail.includes("[PhaseA-SUMMARY]")) return "fuse drain";
+  if (logTail.includes("step 2/3") && logTail.includes("fuse")) return "fusing";
+  if (logTail.includes("[PhaseA]") || logTail.includes("step 1/3")) return "simulating";
+  return "starting (kernel JIT)";
+}
+
+// ETA from observed fps since the first frame landed. Returns "—" if
+// we haven't seen a frame yet, a `M:SS · fps` string mid-run, and a
+// final fps summary at completion.
+function computeEta(
+  nFrames: number,
+  totalFrames: number,
+  firstFrameAt: number | null,
+): string {
+  if (firstFrameAt === null || nFrames === 0) return "—";
+  const elapsed = Math.max((Date.now() - firstFrameAt) / 1000, 0.001);
+  const fps = nFrames / elapsed;
+  if (nFrames >= totalFrames) return `0:00 (${fps.toFixed(2)} fps avg)`;
+  if (fps <= 0) return "computing…";
+  const remaining = (totalFrames - nFrames) / fps;
+  const m = Math.floor(remaining / 60);
+  const s = Math.floor(remaining % 60);
+  return `${m}:${s.toString().padStart(2, "0")}  ·  ${fps.toFixed(2)} fps`;
+}
 
 export function StatusStrip() {
   const simState = useStore((s) => s.simState);
