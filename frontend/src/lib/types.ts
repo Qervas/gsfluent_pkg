@@ -1,4 +1,4 @@
-export type Workspace = "sim" | "compare" | "render" | "recipes";
+export type Workspace = "sim" | "recipes";
 
 export type Recipe = {
   name: string;

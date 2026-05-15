@@ -5,8 +5,6 @@ type Tab = { id: Workspace; label: string };
 
 const TABS: Tab[] = [
   { id: "sim",     label: "Sim" },
-  { id: "compare", label: "Compare" },
-  { id: "render",  label: "Render" },
   { id: "recipes", label: "Recipes" },
 ];
 

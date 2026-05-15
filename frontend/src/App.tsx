@@ -7,8 +7,6 @@ import { Properties } from "@/components/properties/Properties";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
 import { RecipesWorkspace } from "@/workspaces/RecipesWorkspace";
-import { CompareWorkspace } from "@/workspaces/CompareWorkspace";
-import { RenderWorkspace } from "@/workspaces/RenderWorkspace";
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 import { useShortcuts } from "@/lib/use-shortcuts";
@@ -128,16 +126,6 @@ export default function App() {
       {activeWorkspace === "recipes" && (
         <FullWorkspaceShell subscribe={subscribe}>
           <RecipesWorkspace />
-        </FullWorkspaceShell>
-      )}
-      {activeWorkspace === "compare" && (
-        <FullWorkspaceShell subscribe={subscribe}>
-          <CompareWorkspace />
-        </FullWorkspaceShell>
-      )}
-      {activeWorkspace === "render" && (
-        <FullWorkspaceShell subscribe={subscribe}>
-          <RenderWorkspace />
         </FullWorkspaceShell>
       )}
       <CommandPalette onRun={triggerRun} />
