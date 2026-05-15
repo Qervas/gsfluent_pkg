@@ -127,11 +127,32 @@ def main() -> int:
     # `scale_*` is logged-scale; viser wants the linear stddev. The cov
     # reconstruction (in v2: per-push) uses scales² so we expose the
     # linear value as the canonical artifact.
+    #
+    # fp16 covariance floor: viser casts covariance entries to fp16 for
+    # GPU upload. fp16's smallest normal value is ~6.1e-5. Any scale²
+    # below that lands in subnormal land → clamps to zero on GPU →
+    # covariance becomes singular along the affected axis → the splat
+    # is effectively a needle whose rasterized projection winks out
+    # depending on view angle (the "view-dependent culling" symptom).
+    #
+    # 3DGS training routinely produces splats with one axis < 1e-3
+    # world units (long thin features); on our cluster_6_15 source,
+    # 68% of splats have at least one cov-diagonal entry below the
+    # fp16 floor. We clamp each axis to sqrt(6.1e-5) ≈ 7.81e-3 so that
+    # the squared cov entry stays in fp16 normal range. The visible
+    # effect is invisible: 7.81e-3 world units is 0.015% of a 50-unit
+    # scene, well below screen-pixel resolution.
     print("extracting scales, rgb, opacity from frame 0…")
     sx = np.exp(np.asarray(v0["scale_0"], dtype=np.float32))
     sy = np.exp(np.asarray(v0["scale_1"], dtype=np.float32))
     sz = np.exp(np.asarray(v0["scale_2"], dtype=np.float32))
     scales = np.stack([sx, sy, sz], axis=1).astype(np.float32)        # (n, 3)
+    _FP16_COV_FLOOR_SQRT = np.float32(np.sqrt(6.1e-5))                # ≈ 7.81e-3
+    n_clamped = int((scales < _FP16_COV_FLOOR_SQRT).any(axis=1).sum())
+    if n_clamped:
+        print(f"  clamping {n_clamped} splats with scale^2 below fp16 normal "
+              f"({n_clamped/len(scales)*100:.1f}%) — avoids viser fp16-cov culling")
+        np.maximum(scales, _FP16_COV_FLOOR_SQRT, out=scales)
 
     rgb = np.stack([
         0.5 + np.asarray(v0["f_dc_0"], dtype=np.float32) * SH_C0,
