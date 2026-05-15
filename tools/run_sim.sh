@@ -124,8 +124,13 @@ cd "$PKG_ROOT"
 "$SIM_PY" "$PKG_ROOT/tools/fuse_to_full_ply.py" \
     --reference_ply "$REFERENCE_PLY" \
     --sim_dir       "$SIM_PLY_DIR" \
-    --output_dir    "$FUSED_DIR" \
-    --knn 8 --knn_rotation
+    --out_dir       "$FUSED_DIR" \
+    --knn 8 --no_zup
+# Note: --knn_rotation requires --no_zup (per-frame rotation lives in
+# sim space, no basis transform to a rotated output). With --no_zup
+# the output stays in source coords (Y-up if source is Y-up); for
+# our cluster_6_15 source which is already Z-up, --no_zup is correct
+# anyway. If you later add a Y-up source, revisit.
 
 # ---------- done -------------------------------------------------------------
 echo ""
