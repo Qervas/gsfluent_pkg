@@ -22,11 +22,17 @@ export function CommandPalette({
   const setActiveRecipe = useStore((s) => s.setActiveRecipe);
   const qc = useQueryClient();
 
-  // Listen for the ⌘K toggle event from useShortcuts.
+  // ⌘K / Ctrl-K toggles the palette. Owned here directly so the
+  // palette is self-contained — no external shortcut hook needed.
   useEffect(() => {
-    const handler = () => setOpen((o) => !o);
-    document.addEventListener("gsfluent:open-palette", handler);
-    return () => document.removeEventListener("gsfluent:open-palette", handler);
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setOpen((o) => !o);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, []);
 
   const recipes = qc.getQueryData<{ name: string; source: string }[]>(["recipes"]) ?? [];
