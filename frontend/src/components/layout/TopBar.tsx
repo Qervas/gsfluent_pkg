@@ -1,5 +1,6 @@
 import { useStore } from "@/lib/store";
 import { RunButton } from "@/components/runs/RunButton";
+import { StatusPill } from "@/components/layout/StatusPill";
 import { deriveMode, modeLabel, modeAccentClass } from "@/lib/derive-mode";
 
 export function TopBar({ subscribe }: { subscribe: (run_name: string) => void }) {
@@ -45,7 +46,8 @@ export function TopBar({ subscribe }: { subscribe: (run_name: string) => void })
           {modeLabel(mode)}
         </span>
       )}
-      <div className="ml-auto flex gap-2">
+      <div className="ml-auto flex items-center gap-2">
+        <StatusPill />
         <RunButton subscribe={subscribe} />
       </div>
     </div>

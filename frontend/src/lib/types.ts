@@ -79,3 +79,42 @@ export type BCFieldSpec = {
 };
 export type BCSchemas = Record<string, BCFieldSpec[]>;
 export type MaterialDefaults = Record<string, Record<string, number>>;
+
+// Diagnostics — one row per moving part of the split-topology dev stack.
+// Surfaced through the StatusPill in the top bar so the user sees which
+// piece is down when something silently breaks. Shapes mirror what each
+// endpoint actually returns; null fields mean "not applicable / not yet
+// reported."
+export type BackendHealth = { status: string; pkg_root: string };
+
+export type SyncStatus = {
+  online: boolean;
+  last_check_unix?: number;
+  last_success_unix?: number;
+  server_url?: string;
+  sequences_seen?: number;
+  files_synced?: number;
+  bytes_downloaded?: number;
+  error?: string | null;
+  per_sequence?: Record<string, Record<string, unknown>>;
+};
+
+export type ViserState = {
+  cell: string;
+  frame: number;
+  n_frames: number;
+  cells: string[];
+  bbox: { lo: [number, number, number]; hi: [number, number, number] };
+};
+
+export type DiagPart = {
+  ok: boolean;
+  detail?: string;        // short human-readable status (e.g. "last sync 4s ago")
+  error?: string;         // present when ok=false
+};
+
+export type DiagSnapshot = {
+  backend: DiagPart;
+  sync:    DiagPart & { raw?: SyncStatus };
+  viser:   DiagPart & { raw?: ViserState };
+};

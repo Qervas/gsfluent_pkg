@@ -7,6 +7,7 @@ import type {
   SequenceItem,
   BCSchemas,
   MaterialDefaults,
+  BackendHealth,
 } from "./types";
 
 const j = async <T>(r: Response): Promise<T> => {
@@ -78,6 +79,12 @@ export const api = {
   schemas: {
     boundaries: () => fetch("/api/schemas/boundaries").then(j<BCSchemas>),
     materials:  () => fetch("/api/schemas/materials").then(j<MaterialDefaults>),
+  },
+  diag: {
+    // Backend reachability probe. The vite proxy decides which actual
+    // host this hits (local uvicorn or tunneled server); from the
+    // workbench's perspective, "can we talk to /api/*?" is the signal.
+    health: () => fetch("/api/health").then(j<BackendHealth>),
   },
   sequences: {
     list: () => fetch("/api/sequences").then(j<SequenceItem[]>),

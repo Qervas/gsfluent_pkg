@@ -7,10 +7,11 @@ selection, frame index, playback, camera — via that API. Viser is
 reduced to "splat renderer service".
 
 Endpoints (port 8092 by default, configurable):
-    POST /set     body={"cell": str?, "frame": int?}     advance playback
-    POST /camera  body={"position": [x,y,z], "target": [x,y,z]}  align viewport
-    GET  /state   → {"cell", "frame", "n_frames", "cells", "bbox": {...}}
-    GET  /camera  → {"position": [...], "target": [...], "wxyz": [...]}
+    POST /set         body={"cell": str?, "frame": int?}     advance playback
+    POST /camera      body={"position": [x,y,z], "target": [x,y,z]}  align viewport
+    GET  /state       → {"cell", "frame", "n_frames", "cells", "bbox": {...}}
+    GET  /camera      → {"position": [...], "target": [...], "wxyz": [...]}
+    GET  /sync-status → sync_daemon's last status snapshot (verbatim)
 
 The /set endpoint is fire-and-forget; it returns the resolved state but
 the actual GPU upload happens on viser's render thread on its next tick.
@@ -236,7 +237,19 @@ def main() -> int:
                    help="Port for viser's HTTP+WS (where the iframe points)")
     p.add_argument("--control_port", type=int, default=8092,
                    help="Port for the headless control API (where React POSTs)")
+    p.add_argument("--sync_status_file", type=Path, default=None,
+                   help="Path to tools/sync_daemon.py's status JSON. Default: "
+                        "$XDG_RUNTIME_DIR/gsfluent_sync_status.json (matches the "
+                        "daemon's own default). Surfaced verbatim through "
+                        "GET /sync-status for the workbench's diagnostics pill.")
     args = p.parse_args()
+
+    # Resolve sync-daemon status path the same way the daemon does, so
+    # the default config "just works" without a CLI flag on either side.
+    if args.sync_status_file is None:
+        import os as _os
+        _xdg = _os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/{_os.getuid()}"
+        args.sync_status_file = Path(_xdg) / "gsfluent_sync_status.json"
 
     npz_root = Path(args.npz_dir)
     npz_paths = sorted(npz_root.glob("*.npz"))
@@ -433,6 +446,24 @@ def main() -> int:
                     "hi": cur_c["bbox_hi"].tolist(),
                 },
             }
+
+    @api.get("/sync-status")
+    def sync_status() -> dict:
+        """Return tools/sync_daemon.py's most recent status snapshot.
+
+        The daemon writes this JSON every tick. We pass it through verbatim
+        so the workbench's diagnostics pill can render "online?" + last sync
+        timestamp + per-sequence mirror state without having to know where
+        the file lives on disk. Missing file = daemon not running yet.
+        """
+        try:
+            import json as _json
+            return _json.loads(args.sync_status_file.read_text())
+        except FileNotFoundError:
+            return {"online": False, "error": "no status file yet "
+                                              "(is sync_daemon running?)"}
+        except (OSError, ValueError) as e:
+            return {"online": False, "error": f"status file unreadable: {e}"}
 
     @api.post("/reload")
     def reload_cell(cell: str | None = None) -> dict:
