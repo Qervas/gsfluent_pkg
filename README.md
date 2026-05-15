@@ -41,18 +41,36 @@ cp -r frontend/dist/* server/gsfluent/static/
 
 ## 运行
 
-服务器（sxyin-host）一次：
+两台机器，三条命令。
+
+**服务器（首次）：**
 
 ```bash
-./setup-server.sh
+ssh <server-host>
+cd gsfluent_pkg && ./setup-server.sh
+```
+
+**服务器（每次）：**
+
+```bash
 ./run-server.sh                    # 后端在 :8080
 ```
 
-笔记本：
+**笔记本（每次）：**
 
 ```bash
-./setup-view.sh
-GSFLUENT_SERVER=http://sxyin-host:8080 ./run-laptop.sh
+SERVER_SSH=<server-host> ./run-laptop.sh
+```
+
+`SERVER_SSH` 是 `~/.ssh/config` 里的 SSH 别名。`run-laptop.sh` 会自动
+打通隧道（`-L 8080:localhost:8080`），起 viser + sync_daemon + Points
+WS，并在浏览器里打开 workbench。Ctrl-C 一并清理。
+
+如果你已经有隧道，或者后端在 LAN 上可直连，跳过 `SERVER_SSH`，直接设
+`GSFLUENT_SERVER`：
+
+```bash
+GSFLUENT_SERVER=http://server.lan:8080 ./run-laptop.sh
 ```
 
 启动两个协作服务：
