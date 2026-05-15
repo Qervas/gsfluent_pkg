@@ -1,22 +1,26 @@
 """Laptop-side sync daemon.
 
 Mirrors the server's per-sequence caches (`viser.npz` for Splats mode,
-`frames.bin` for Points mode) onto the local cache so the laptop's
-renderers can read them without going back to the server for every
-frame. See ../docs/ARCHITECTURE.md for the split-topology rationale —
-short version: pushing per-frame xyz over WAN at 30 fps is ~2 Gbps,
-hopeless. A one-time .npz download per sequence then local playback
-is the only path that scales.
+`frames.bin` for Points mode) plus the per-sequence `_meta.json` so the
+laptop's outliner surfaces sim runs produced on the server without a
+manual stub. See ../docs/ARCHITECTURE.md for the split-topology
+rationale — short version: pushing per-frame xyz over WAN at 30 fps is
+~2 Gbps, hopeless. A one-time .npz download per sequence then local
+playback is the only path that scales.
 
 Loop, every `--interval` seconds:
     1. GET ${GSFLUENT_SERVER}/api/sequences
-    2. For each sequence: if server's cache mtime > local file's mtime
-       (or local file is missing), download via HTTP Range.
-    3. Atomic write: stream to <name>.npz.partial, then rename in place.
+    2. For each sequence: write `<library>/<name>/_meta.json` from the
+       response (atomic, compare-and-skip if unchanged) so the laptop's
+       /api/sequences walk surfaces the run with proper source / model
+       / bbox metadata.
+    3. If server's cache mtime > local file's mtime (or local file is
+       missing), download .npz via HTTP Range.
+    4. Atomic write: stream to <name>.npz.partial, then rename in place.
        Partial downloads on the next pass resume via Range.
-    4. After successful .npz download, POST to viser_headless's
+    5. After successful .npz download, POST to viser_headless's
        /reload?cell=<name> so it re-mmaps the new file.
-    5. Write a status snapshot to --status-file (default
+    6. Write a status snapshot to --status-file (default
        /tmp/gsfluent_sync_status.json) for the UI's offline indicator.
 
 Failure modes:
@@ -166,6 +170,71 @@ def _download_resumable(url: str, dst: Path, expected_bytes: Optional[int],
     return written
 
 
+# Fields the server's /api/sequences response carries that belong in
+# the canonical `_meta.json` (everything the `_SequenceMeta` pydantic
+# model defines). We mirror exactly these so writing the local file is
+# byte-stable against a server that augments the response with extra
+# UI-only fields (is_broken, cache, path, frame_count from a live walk).
+_META_FIELDS = (
+    "name", "kind", "source", "source_path", "model_ref",
+    "frame_count", "fps_hint", "n_splats", "bbox_initial",
+    "coord_convention", "first_frame_full", "created_at",
+    "converted_from",
+)
+
+
+def _mirror_meta(seq_dict: dict, library_root: Path) -> bool:
+    """Write `<library_root>/<name>/_meta.json` from the server's
+    sequence entry. Returns True if a write happened (file created or
+    contents changed), False if the local copy already matched or the
+    server response was strictly less informative than the local file.
+
+    The library walk on the laptop's /api/sequences requires the
+    `<name>/` directory to exist for the sequence to surface — we
+    create it if missing so the .npz arriving in cache/viser/ becomes
+    discoverable without a separate `migrate` step.
+
+    Anti-clobber guard: if the server returns source="unknown" (server
+    has the dir but no `_meta.json` for it — e.g. a sequence produced
+    before the runner started writing meta) and a local meta already
+    exists, leave the local file alone. The server has nothing
+    authoritative to say; overwriting with defaults would strictly
+    lose information. This is the bug that destroyed
+    `jelly_cluster_server_v2`'s curated meta on the first run of this
+    daemon."""
+    name = seq_dict.get("name")
+    if not isinstance(name, str) or not _SAFE_NAME.match(name):
+        return False
+    payload: dict = {}
+    for k in _META_FIELDS:
+        if k in seq_dict:
+            payload[k] = seq_dict[k]
+    payload.setdefault("name", name)
+    payload.setdefault("kind", "sequence")
+    payload.setdefault("source", "unknown")
+
+    seq_dir = library_root / name
+    meta_path = seq_dir / "_meta.json"
+    if payload.get("source") == "unknown" and meta_path.is_file():
+        # Server has nothing real to say; preserve whatever the laptop
+        # already knows (could be a curated hand-written meta).
+        return False
+
+    seq_dir.mkdir(parents=True, exist_ok=True)
+    new_bytes = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    if meta_path.is_file():
+        try:
+            old_bytes = meta_path.read_bytes()
+        except OSError:
+            old_bytes = b""
+        if old_bytes == new_bytes:
+            return False
+    tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    tmp.write_bytes(new_bytes)
+    tmp.replace(meta_path)
+    return True
+
+
 def _local_mtime(p: Path) -> Optional[float]:
     try:
         return p.stat().st_mtime
@@ -196,14 +265,16 @@ def _needs_sync(server_mtime: Optional[float], server_bytes: Optional[int],
     return False
 
 
-def sync_once(server: str, cache_root: Path, viser_control: Optional[str],
-              status: SyncStatus, verbose: bool) -> None:
+def sync_once(server: str, cache_root: Path, library_root: Path,
+              viser_control: Optional[str], status: SyncStatus,
+              verbose: bool) -> None:
     """One pass over /api/sequences. Mutates `status` in place so the
     caller can write it to --status-file after each tick.
 
     Layout we mirror to:
-      <cache_root>/viser/<name>.npz       (Splats mode, mmap'd by viser_headless)
-      <cache_root>/frames-bin/<name>.bin  (Points mode, mmap'd by local_stream)
+      <cache_root>/viser/<name>.npz         (Splats mode, mmap'd by viser_headless)
+      <cache_root>/frames-bin/<name>.bin    (Points mode, mmap'd by local_stream)
+      <library_root>/<name>/_meta.json      (Outliner metadata)
     """
     viser_dir = cache_root / "viser"
     frames_bin_dir = cache_root / "frames-bin"
@@ -246,6 +317,24 @@ def sync_once(server: str, cache_root: Path, viser_control: Optional[str],
         # allowlisted it — defense in depth against URL parsers that
         # accept dot-segments differently from our regex.
         name_q = urllib.parse.quote(name, safe="")
+
+        # ---- _meta.json -----------------------------------------------
+        # Mirror first so the seq dir + meta exist before the .npz
+        # arrives in the parallel cache tree. /api/sequences on the
+        # laptop walks library_root to surface entries; without this
+        # the .npz lands in cache/viser/ unreachable from the outliner.
+        try:
+            wrote = _mirror_meta(s, library_root)
+            if wrote:
+                per["meta"] = {"ok": True, "synced_unix": time.time()}
+                if verbose:
+                    print(f"[sync] {name}/_meta.json: updated")
+            else:
+                per.setdefault("meta", {"ok": True, "synced_unix": 0.0})
+        except OSError as e:
+            per["meta"] = {"ok": False, "error": str(e)}
+            if verbose:
+                print(f"[sync] {name}/_meta.json: FAILED — {e}", file=sys.stderr)
 
         # ---- viser .npz ------------------------------------------------
         npz_mtime = cache_info.get("viser_npz_mtime")
@@ -311,6 +400,11 @@ def main() -> int:
                     help="Base URL of the gsfluent backend (or set $GSFLUENT_SERVER)")
     ap.add_argument("--cache-root", required=True, type=Path,
                     help="Local cache root (typically <pkg>/work/cache)")
+    ap.add_argument("--library-root", type=Path, default=None,
+                    help="Local library sequences root "
+                         "(default: <cache-root>/../library/sequences). "
+                         "Where per-sequence _meta.json files are mirrored "
+                         "so the laptop's /api/sequences walk picks them up.")
     ap.add_argument("--viser-control",
                     default=os.environ.get("VISER_CONTROL_URL", "http://localhost:8092"),
                     help="Viser headless control URL for /reload notifications")
@@ -334,6 +428,11 @@ def main() -> int:
     # Strip a trailing slash so all our f-strings are well-formed.
     server = args.server.rstrip("/")
     viser_control = args.viser_control.rstrip("/") if args.viser_control else None
+    library_root = (
+        args.library_root
+        if args.library_root is not None
+        else args.cache_root.parent / "library" / "sequences"
+    )
 
     status = SyncStatus(server_url=server)
     write_status(status, args.status_file)  # initial empty snapshot
@@ -346,12 +445,14 @@ def main() -> int:
 
     print(f">>> sync_daemon: server={server} cache={args.cache_root} "
           f"interval={args.interval}s")
+    print(f">>>             library → {library_root}")
     if viser_control:
         print(f">>>             viser reload → {viser_control}/reload?cell=<name>")
     print(f">>>             status → {args.status_file}")
 
     while not stop_requested[0]:
-        sync_once(server, args.cache_root, viser_control, status, args.verbose)
+        sync_once(server, args.cache_root, library_root, viser_control,
+                  status, args.verbose)
         write_status(status, args.status_file)
         # Sleep in 0.5s slices so SIGINT is responsive.
         slept = 0.0
