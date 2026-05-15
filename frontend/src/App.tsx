@@ -10,12 +10,13 @@ import { RecipesWorkspace } from "@/workspaces/RecipesWorkspace";
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
-import type { SequenceItem } from "@/lib/types";
+import type { SequenceItem, ModelItem } from "@/lib/types";
 
 export default function App() {
   const client = useStreamClient();
   const resetForNewRun = useStore((s) => s.resetForNewRun);
   const activeModel = useStore((s) => s.activeModel);
+  const setActiveModel = useStore((s) => s.setActiveModel);
   const setSimState = useStore((s) => s.setSimState);
   const activeWorkspace = useStore((s) => s.activeWorkspace);
   const simRunName = useStore((s) => s.simRunName);
@@ -46,16 +47,34 @@ export default function App() {
     setFpsHint(seq?.fps_hint ?? 24);
   }, [simRunName, sequences, setFpsHint]);
 
-  // When the user picks a model in the Outliner, render its static ply
-  // as a single-frame snapshot. The run-status UI shouldn't claim a sim
-  // is in progress just because we're previewing a model, so flip
-  // simState back to "idle" right after resetForNewRun.
+  // Switching to a model preview is dispatched imperatively (not via a
+  // useEffect on `activeModel`), so clicking the same model twice still
+  // re-fires the swap. Path: user picks a sequence, then clicks the
+  // already-active model in ModelTree — the React reference didn't
+  // change, so an effect on `activeModel` would no-op. Calling this
+  // function directly from the click handler dodges that.
+  const onPickModel = useCallback(
+    (m: ModelItem) => {
+      setActiveModel(m);
+      resetForNewRun(`_model:${m.name}`);
+      setSimState("idle");
+      client.loadModel(m.path);
+    },
+    [client, resetForNewRun, setActiveModel, setSimState],
+  );
+
+  // Backstop for the non-click flows (DropZone upload, path-paste): when
+  // a new model object lands in the store with a different reference,
+  // mirror the same swap. Skips when activeModel matches the current
+  // sim run (we're already previewing it) to avoid re-loading on
+  // unrelated store updates.
   useEffect(() => {
     if (!activeModel?.path) return;
+    if (simRunName === `_model:${activeModel.name}`) return;
     resetForNewRun(`_model:${activeModel.name}`);
     setSimState("idle");
     client.loadModel(activeModel.path);
-  }, [activeModel, client, resetForNewRun, setSimState]);
+  }, [activeModel, simRunName, client, resetForNewRun, setSimState]);
 
   const subscribe = useCallback(
     (run_name: string) => client.subscribe(run_name),
@@ -105,7 +124,7 @@ export default function App() {
       {activeWorkspace === "sim" && (
         <AppShell
           subscribe={subscribe}
-          outliner={<Outliner onLoadRun={onLoadRun} />}
+          outliner={<Outliner onLoadRun={onLoadRun} onPickModel={onPickModel} />}
           viewport={<Viewport />}
           properties={<Properties />}
         />

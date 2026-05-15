@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import type { ModelItem } from "@/lib/types";
 
 // Same fallback as Viewport / ViserSplatScene — viser_headless's control
 // API is on :8092 by default, overridable via VITE_VISER_CONTROL_URL.
@@ -12,7 +13,7 @@ function viserControlUrl(): string {
   return `http://${host}:8092`;
 }
 
-export function ModelTree() {
+export function ModelTree({ onPick }: { onPick: (m: ModelItem) => void }) {
   const { data = [], isLoading } = useQuery({
     queryKey: ["models"],
     queryFn: api.models.list,
@@ -156,7 +157,7 @@ export function ModelTree() {
       {data.map((m) => (
         <button
           key={m.name}
-          onClick={() => setActiveModel(m)}
+          onClick={() => onPick(m)}
           className={
             "w-full text-left px-3 py-1 text-xs hover:bg-elevated truncate " +
             (activeModel?.name === m.name ? "text-accent" : "text-text-primary")
