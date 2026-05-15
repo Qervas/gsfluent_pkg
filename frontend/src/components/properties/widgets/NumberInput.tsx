@@ -1,3 +1,5 @@
+import { HelpIcon } from "./HelpIcon";
+
 export function NumberInput({
   label,
   value,
@@ -12,8 +14,11 @@ export function NumberInput({
   hint?: string;
 }) {
   return (
-    <div className="flex items-center gap-2 py-0.5" title={hint}>
-      <span className="text-text-secondary text-xs flex-1 truncate">{label}</span>
+    <div className="flex items-center gap-2 py-0.5">
+      <span className="text-text-secondary text-xs flex-1 truncate flex items-center gap-1">
+        <span className="truncate">{label}</span>
+        <HelpIcon hint={hint} />
+      </span>
       <input
         type="number"
         value={value}

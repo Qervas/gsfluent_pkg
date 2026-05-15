@@ -1,5 +1,6 @@
 import { PropertyFolder } from "./PropertyFolder";
 import { useStore } from "@/lib/store";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { MaterialPanel } from "./MaterialPanel";
 import { SolverPanel } from "./SolverPanel";
 import { ForcesPanel } from "./ForcesPanel";
@@ -24,21 +25,25 @@ export function Properties() {
   }
 
   return (
-    <div className="text-xs">
-      <PropertyFolder title="Material"><MaterialPanel /></PropertyFolder>
-      <PropertyFolder title="Solver" defaultOpen={false}><SolverPanel /></PropertyFolder>
-      <PropertyFolder title="Forces" defaultOpen={false}><ForcesPanel /></PropertyFolder>
-      <PropertyFolder title="Sim setup" defaultOpen={false}><SimSetupPanel /></PropertyFolder>
-      <PropertyFolder title="Camera" defaultOpen={false}><CameraPanel /></PropertyFolder>
-      <PropertyFolder title="Particle filling" defaultOpen={false}><ParticleFillingPanel /></PropertyFolder>
-      <PropertyFolder title="Other" defaultOpen={false}><OtherPanel /></PropertyFolder>
-      <PropertyFolder title="Boundary conditions" defaultOpen={false}><BoundaryEditor /></PropertyFolder>
-      <PropertyFolder title="Provenance" defaultOpen={false}>
-        <ProvenanceFooter />
-      </PropertyFolder>
-      <div className="px-3 pt-3 pb-2 border-t border-border">
-        <SavePresetDialog />
+    // One provider for the whole panel — every nested HelpIcon shares
+    // its root state, so the tooltips position + close correctly.
+    <TooltipProvider delayDuration={150}>
+      <div className="text-xs">
+        <PropertyFolder title="Material"><MaterialPanel /></PropertyFolder>
+        <PropertyFolder title="Solver" defaultOpen={false}><SolverPanel /></PropertyFolder>
+        <PropertyFolder title="Forces" defaultOpen={false}><ForcesPanel /></PropertyFolder>
+        <PropertyFolder title="Sim setup" defaultOpen={false}><SimSetupPanel /></PropertyFolder>
+        <PropertyFolder title="Camera" defaultOpen={false}><CameraPanel /></PropertyFolder>
+        <PropertyFolder title="Particle filling" defaultOpen={false}><ParticleFillingPanel /></PropertyFolder>
+        <PropertyFolder title="Other" defaultOpen={false}><OtherPanel /></PropertyFolder>
+        <PropertyFolder title="Boundary conditions" defaultOpen={false}><BoundaryEditor /></PropertyFolder>
+        <PropertyFolder title="Provenance" defaultOpen={false}>
+          <ProvenanceFooter />
+        </PropertyFolder>
+        <div className="px-3 pt-3 pb-2 border-t border-border">
+          <SavePresetDialog />
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
