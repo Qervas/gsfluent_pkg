@@ -1,19 +1,19 @@
 # server/Makefile — convenience targets for the gsfluent backend.
-.PHONY: build dev test install
+# Strong split: this builds/tests the SERVER ONLY. The SPA lives on the
+# client (see ../setup-client.sh + ../run-client.sh).
+.PHONY: install test sync lock
 
-# Build everything: Vite frontend → server/gsfluent/static, then pip install -e.
-build:
-	cd ../frontend && npm install --no-fund --no-audit && npm run build
-	pip install -e .
+# Reproducible install via uv (matches what setup-server.sh does).
+sync:
+	uv sync
 
-# Print dev instructions (interactive, run manually).
-dev:
-	@echo "Run these in separate terminals:"
-	@echo "  terminal 1:  cd server && python -m gsfluent serve --no-browser --reload"
-	@echo "  terminal 2:  cd frontend && npm run dev    # opens http://localhost:5173"
+# Bump the lockfile after editing dependencies in pyproject.toml.
+lock:
+	uv lock
 
 test:
-	pytest -v
+	uv run pytest -v
 
+# Editable install w/ dev extras (for IDE / running pytest manually).
 install:
-	pip install -e ".[dev]"
+	uv sync --extra dev

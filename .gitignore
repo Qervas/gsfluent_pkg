@@ -34,3 +34,11 @@ core.[0-9]*
 
 # Vite build output bundled into the wheel; never committed.
 server/gsfluent/static/
+
+# Vite build output (client-served; strong split). Never committed.
+frontend/dist/
+
+# uv-managed virtualenv. Created by `uv sync`. Lockfile (uv.lock) IS
+# committed — that's what makes installs reproducible.
+.venv/
+**/.venv/
