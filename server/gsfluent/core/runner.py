@@ -126,11 +126,11 @@ def _translate_sim_area_if_local(recipe_data: dict, model_dir: Path) -> dict:
     return out
 
 
-def _read_model_bbox_center(model_dir: Path) -> tuple[float, float, float] | None:
-    """Read the model's point_cloud.ply (highest iteration) and return its
-    bbox center as (x, y, z). Used to translate model-local sim_area
-    bounds to world coords. Returns None if the ply can't be parsed —
-    caller should leave the recipe untouched in that case."""
+def _read_model_bbox(model_dir: Path) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """Read the model's highest-iteration point_cloud.ply and return its
+    axis-aligned bounding box as `((xmin, ymin, zmin), (xmax, ymax, zmax))`.
+    Returns None if the ply can't be parsed. Cheap — only the xyz
+    columns are touched."""
     import re
     pc_root = model_dir / "point_cloud"
     if not pc_root.is_dir():
@@ -147,20 +147,65 @@ def _read_model_bbox_center(model_dir: Path) -> tuple[float, float, float] | Non
     if best is None:
         return None
     try:
-        # Read only x/y/z to keep this cheap.
         from plyfile import PlyData
         v = PlyData.read(str(best[1]))["vertex"].data
         import numpy as np
         x = np.asarray(v["x"], dtype=np.float32)
         y = np.asarray(v["y"], dtype=np.float32)
         z = np.asarray(v["z"], dtype=np.float32)
-        cx = float((x.min() + x.max()) / 2)
-        cy = float((y.min() + y.max()) / 2)
-        cz = float((z.min() + z.max()) / 2)
-        return (cx, cy, cz)
+        lo = (float(x.min()), float(y.min()), float(z.min()))
+        hi = (float(x.max()), float(y.max()), float(z.max()))
+        return (lo, hi)
     except Exception as e:
         _log.warning("failed to read model bbox for %s: %s", model_dir, e)
         return None
+
+
+def _read_model_bbox_center(model_dir: Path) -> tuple[float, float, float] | None:
+    """Centroid of the model's bbox. Used to translate model-local
+    sim_area bounds to world coords. Returns None on parse failure;
+    caller leaves the recipe untouched in that case."""
+    bb = _read_model_bbox(model_dir)
+    if bb is None:
+        return None
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = bb
+    return ((xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2)
+
+
+def _validate_sim_area_intersects_model(
+    sim_area: list[float], model_dir: Path,
+) -> None:
+    """Cheap preflight: ensure the recipe's sim_area (now in world
+    coords after translation) actually overlaps the model's bbox. The
+    upstream sim filters splats by sim_area and crashes with a cryptic
+    `IndexError: min(): Expected reduction dim 0 to have non-zero
+    size.` from torch when 0 splats survive the filter. We catch the
+    empty-intersection case here and raise a readable error.
+
+    `sim_area` is `[xmin, xmax, ymin, ymax, zmin, zmax]`. No-op if we
+    can't read the model bbox (don't block on a flaky read)."""
+    if not sim_area or len(sim_area) != 6:
+        return
+    bb = _read_model_bbox(model_dir)
+    if bb is None:
+        return
+    (mx0, my0, mz0), (mx1, my1, mz1) = bb
+    sx0, sx1, sy0, sy1, sz0, sz1 = (float(x) for x in sim_area)
+    overlap = (
+        sx0 < mx1 and sx1 > mx0 and
+        sy0 < my1 and sy1 > my0 and
+        sz0 < mz1 and sz1 > mz0
+    )
+    if not overlap:
+        raise ValueError(
+            f"recipe's sim_area does not overlap the model bbox — the sim "
+            f"would filter every splat out and crash. "
+            f"sim_area (world): x=[{sx0:.2f},{sx1:.2f}] y=[{sy0:.2f},{sy1:.2f}] z=[{sz0:.2f},{sz1:.2f}]; "
+            f"model bbox: x=[{mx0:.2f},{mx1:.2f}] y=[{my0:.2f},{my1:.2f}] z=[{mz0:.2f},{mz1:.2f}]. "
+            f"Either pick a recipe whose sim_area matches this model's world "
+            f"coords, or set `sim_area_frame: \"model\"` in the recipe so the "
+            f"runner translates model-local bounds to world."
+        )
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
@@ -204,6 +249,15 @@ async def start_run(
     # model-local and translate by the model's bbox center; otherwise leave
     # alone (assume the recipe author already specified world coords).
     effective_recipe = _translate_sim_area_if_local(recipe_data, model_dir)
+
+    # Preflight: the upstream sim filters splats by sim_area then calls
+    # transform2origin on the survivors; if the filter empties the set,
+    # torch raises a cryptic `min(): Expected reduction dim 0 to have
+    # non-zero size.` Catch the empty-intersection case here with a
+    # readable error so the workbench can surface it cleanly.
+    _validate_sim_area_intersects_model(
+        effective_recipe.get("sim_area", []), model_dir,
+    )
 
     # Write the merged effective recipe to a temp file the wrapper consumes.
     recipe_path = run_dir / "_effective_recipe.json"
