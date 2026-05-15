@@ -10,11 +10,11 @@ const MATERIALS = [
 
 // (key, label, [min, max, step], hint?)
 const MATERIAL_FIELDS: Array<[string, string, [number, number, number], string?]> = [
-  ["E",              "Young's E",       [100, 1e7, 100],   "Stiffness — higher = harder material."],
-  ["nu",             "Poisson ν",       [0, 0.499, 0.005], "Lateral contraction."],
-  ["density",        "Density",         [0.01, 100, 0.01], "Mass per unit volume."],
-  ["yield_stress",   "Yield stress",    [0, 1e6, 1],       "Stress threshold for plastic flow."],
-  ["friction_angle", "Friction (deg)",  [0, 90, 1],        "Drucker-Prager friction angle."],
+  ["E",              "Young's E",       [100, 1e7, 100],   "Young's modulus — material stiffness. Soft jelly ≈ 50; firm jelly ≈ 5,000; metal ≈ 1e7."],
+  ["nu",             "Poisson ν",       [0, 0.499, 0.005], "Poisson ratio (0 ≤ ν < 0.5). Higher = less lateral compression. ν=0.49 ≈ incompressible (rubbery)."],
+  ["density",        "Density",         [0.01, 100, 0.01], "Mass per unit volume. Affects gravity / momentum response per particle."],
+  ["yield_stress",   "Yield stress",    [0, 1e6, 1],       "Stress threshold at which the material starts flowing plastically. Below: elastic; above: deforms permanently."],
+  ["friction_angle", "Friction (deg)",  [0, 90, 1],        "Drucker-Prager internal friction angle. Higher = grainier (sand, soil). Ignored by jelly / metal."],
 ];
 
 export function MaterialPanel() {

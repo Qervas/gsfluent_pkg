@@ -28,8 +28,10 @@ export function SimSetupPanel() {
 
   return (
     <div className="space-y-2">
-      <div>
-        <div className="text-text-secondary text-xs mb-0.5">Sim bounds</div>
+      <div
+        title="Axis-aligned bounding box of the sub-region simulated, in world coords. Only splats inside this box become MPM particles; everything else is treated as static background."
+      >
+        <div className="text-text-secondary text-xs mb-0.5">Sim bounds (world)</div>
         {axes.map((axis, i) => (
           <div key={axis} className="flex items-center gap-1 py-0.5">
             <span className="text-text-muted text-xs w-3">{axis}</span>
@@ -38,12 +40,14 @@ export function SimSetupPanel() {
               value={Number(simArea[i * 2] ?? 0)}
               onChange={(n) => setSimAreaIdx(i * 2, n)}
               step={0.5}
+              hint={`${axis}-axis lower bound (world units).`}
             />
             <NumberInput
               label="max"
               value={Number(simArea[i * 2 + 1] ?? 0)}
               onChange={(n) => setSimAreaIdx(i * 2 + 1, n)}
               step={0.5}
+              hint={`${axis}-axis upper bound (world units).`}
             />
           </div>
         ))}
@@ -53,14 +57,14 @@ export function SimSetupPanel() {
         value={tuple(center)}
         onChange={(v) => setField("mpm_space_viewpoint_center", [v[0], v[1], v[2]])}
         step={0.1}
-        hint="MPM coord system origin in world units."
+        hint="World-space point that maps to the center of the MPM-normalized cube (typically (1,1,1) when grid_lim=2)."
       />
       <Vec3Input
         label="Up axis"
         value={tuple(upAxis)}
         onChange={(v) => setField("mpm_space_vertical_upward_axis", [v[0], v[1], v[2]])}
         step={1}
-        hint="Unit vector for up; e.g. (0, 0, 1) for z-up."
+        hint="Unit vector for gravity's opposite direction. Use (0, 0, 1) for z-up (our default); (0, 1, 0) for legacy y-up sources."
       />
     </div>
   );
