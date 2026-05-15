@@ -18,19 +18,36 @@ no CUDA runtime). **Dependencies**: Docker 24+ with BuildKit. Compose v2.
 
 ## Quick start
 
-From the repo root (`gsfluent_pkg/`):
+Two paths:
 
 ```bash
+# A — pull pre-built image from GHCR (no local build, no Node required)
+docker pull ghcr.io/qervas/gsfluent-backend:latest
+docker run --rm -d -p 8080:8080 \
+    -v "$PWD/work:/app/work" \
+    --name gsfluent ghcr.io/qervas/gsfluent-backend:latest
+
+# B — clone + compose up (recommended: gets healthcheck, log rotation,
+#     restart policy out of the box)
+git clone <repo> && cd gsfluent_pkg
 docker compose -f docker/compose.yml up -d
-# wait ~10s for the start-period grace window
+```
+
+Then in both cases:
+
+```bash
+# wait ~10s for the healthcheck grace window
 open http://localhost:8080/                        # the workbench
 curl http://localhost:8080/api/health              # ok
-docker compose -f docker/compose.yml ps            # check Healthy column
+docker compose -f docker/compose.yml ps            # check Healthy column (B only)
 ```
 
 To stop:
 
 ```bash
+# A:
+docker stop gsfluent
+# B:
 docker compose -f docker/compose.yml down
 ```
 
