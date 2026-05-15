@@ -72,6 +72,16 @@ if [[ ! -f "$PKG_ROOT/frontend/dist/index.html" ]]; then
 fi
 note "SPA built at $PKG_ROOT/frontend/dist/"
 
+# ---- 4/3: apply local viser shader patch ----
+# viser ships its own bundled client with two over-aggressive vertex-
+# shader culls that drop renderable splats by camera angle. We patch
+# the source + rebuild the bundle so the workbench's Splats render
+# mode doesn't show view-dependent "winking" regions. Idempotent —
+# safe to re-run after every uv sync. See patches/viser-no-cull.patch
+# for the full diff + rationale.
+note "applying viser shader patch + rebuilding its client bundle"
+"$PKG_ROOT/tools/patch-viser.sh"
+
 note "done."
 echo ""
 echo "Next:"
