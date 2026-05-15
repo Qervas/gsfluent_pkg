@@ -1,6 +1,6 @@
-import { useEffect, useCallback, useRef } from "react";
+import { useEffect, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AppShell, type AppShellHandle } from "@/components/layout/AppShell";
+import { AppShell } from "@/components/layout/AppShell";
 import { FullWorkspaceShell } from "@/components/layout/FullWorkspaceShell";
 import { Outliner } from "@/components/outliner/Outliner";
 import { Properties } from "@/components/properties/Properties";
@@ -9,7 +9,6 @@ import { CommandPalette } from "@/components/command-palette/CommandPalette";
 import { RecipesWorkspace } from "@/workspaces/RecipesWorkspace";
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
-import { useShortcuts } from "@/lib/use-shortcuts";
 import { api } from "@/lib/api";
 import type { SequenceItem } from "@/lib/types";
 
@@ -21,7 +20,6 @@ export default function App() {
   const activeWorkspace = useStore((s) => s.activeWorkspace);
   const simRunName = useStore((s) => s.simRunName);
   const setFpsHint = useStore((s) => s.setFpsHint);
-  const shellRef = useRef<AppShellHandle>(null);
 
   useEffect(() => {
     client.connect();
@@ -72,7 +70,7 @@ export default function App() {
     [client, resetForNewRun],
   );
 
-  // Run-from-keyboard / palette: replicate the RunButton's flow without owning
+  // Run-from-palette: replicate the RunButton's flow without owning
   // the busy state — best-effort fire-and-forget.
   const triggerRun = useCallback(async () => {
     const st = useStore.getState();
@@ -98,25 +96,14 @@ export default function App() {
       });
       client.subscribe(run_name);
     } catch (e) {
-      console.error("failed to start run from keyboard:", e);
+      console.error("failed to start run from palette:", e);
     }
   }, [client]);
-
-  // Wire the keyboard shortcuts.
-  useShortcuts({
-    onOpenPalette: () => {
-      document.dispatchEvent(new CustomEvent("gsfluent:open-palette"));
-    },
-    onRun: triggerRun,
-    onToggleInspector: () => shellRef.current?.toggleInspector(),
-    onToggleSidebar: () => shellRef.current?.toggleSidebar(),
-  });
 
   return (
     <>
       {activeWorkspace === "sim" && (
         <AppShell
-          ref={shellRef}
           subscribe={subscribe}
           outliner={<Outliner onLoadRun={onLoadRun} />}
           viewport={<Viewport />}

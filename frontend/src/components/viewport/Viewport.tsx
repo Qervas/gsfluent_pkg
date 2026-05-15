@@ -12,7 +12,6 @@ import { RenderModeToggle } from "./RenderModeToggle";
 import { FpsIndicator } from "./FpsIndicator";
 import { PlaybackDriver } from "./PlaybackDriver";
 import { PlaybackBar } from "./PlaybackBar";
-import { PlaybackKeybinds } from "./PlaybackKeybinds";
 
 /**
  * Single source of truth for camera.up. Both modes are Z-up: our team's
@@ -178,7 +177,6 @@ export function Viewport() {
       <RenderModeToggle splatAvailable={splatAvailable} />
       <FpsIndicator />
       <PlaybackBar />
-      <PlaybackKeybinds />
     </div>
   );
 }
