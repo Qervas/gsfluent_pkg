@@ -43,18 +43,37 @@ cp -r frontend/dist/* server/gsfluent/static/
 
 ## Run
 
-Once on the server (your-server):
+Two machines, three commands.
+
+**On the server (one-time):**
 
 ```bash
-./setup-server.sh
+ssh <server-host>
+cd gsfluent_pkg && ./setup-server.sh
+```
+
+**On the server (each session):**
+
+```bash
 ./run-server.sh                    # backend on :8080
 ```
 
-On the laptop:
+**On the laptop (each session):**
 
 ```bash
-./setup-view.sh
-GSFLUENT_SERVER=http://your-server:8080 ./run-laptop.sh
+SERVER_SSH=<server-host> ./run-laptop.sh
+```
+
+`SERVER_SSH` is the SSH alias from your `~/.ssh/config`. `run-laptop.sh`
+opens the tunnel for you (`-L 8080:localhost:8080`), starts viser +
+sync_daemon + Points WS, then opens the workbench in your browser. The
+tunnel is torn down with everything else on Ctrl-C.
+
+Got an existing tunnel, or backend on the LAN? Skip `SERVER_SSH` and
+set `GSFLUENT_SERVER` directly:
+
+```bash
+GSFLUENT_SERVER=http://server.lan:8080 ./run-laptop.sh
 ```
 
 This brings up two cooperating servers:
