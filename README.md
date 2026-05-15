@@ -3,7 +3,7 @@
 针对物理仿真后的 3D Gaussian Splatting 序列的浏览器工作台。挑序列、
 拖时间轴、在点云和 splat 两种渲染模式间切换、绕模型转动相机。
 
-仿真跑在服务器（`your-server`），本机只是查看器 + 任务接入层。本机
+仿真跑在远端服务器（GPU 机），客户端只是查看器 + 任务接入层。客户端
 不需要 CUDA、PyTorch、Warp、Taichi——纯 Python 轻依赖。
 
 [English README](README.en.md)
@@ -132,18 +132,14 @@ work/
 ```
 
 序列是核心资产：融合后的每帧 splat ply，加上可选的二进制打包文件和
-viser 缓存。两种填充方式：
+viser 缓存。正常流程下你不用手动填充：
 
-1. **从服务器拉** — `rsync your-server:.../sequences/<name>/` 到
-   `work/library/sequences/`，再 `python tools/batch_convert_to_npz.py`
-   生成 viser 缓存。
-2. **本地融合 sim_*.ply** — 把服务器的 sim 输出 rsync 下来后跑
-   `python tools/fuse_to_full_ply.py`，依赖只有 numpy + plyfile（加
-   `--knn_rotation` 时还需要 torch）。
-
-服务器端的 `runner.py` 在每次 sim 跑完之后自动调用 `batch_convert_to_npz.py`
-（幂等——只重建过期的 .npz）。笔记本上的 `sync_daemon` 随后把新生成的
-.npz mirror 到本地。
+1. `POST /api/runs` 触发仿真（或在 workbench 里点 Run）。
+2. 服务器的 `runner.py` 依次跑 sim → fuse → `batch_convert_to_npz.py`，
+   并写出 `_meta.json`。
+3. 客户端的 `sync_daemon` 下一轮轮询时把 `.npz` + `_meta.json` mirror
+   到本地 `work/` 目录。
+4. 大纲自动出现新序列，viser 自动 reload。
 
 ## 渲染模式
 
@@ -158,8 +154,8 @@ viser 缓存。两种填充方式：
 ## 配方（仿真参数）
 
 `tools/recipes/*.json` 描述材料 + 边界 + 积分参数，由服务器端的仿真
-脚本消费。schema 与 `your-server` 上的 `gs_simulation_building.py`
-匹配。
+脚本消费。schema 与服务器上配置的 sim 脚本（`$GSFLUENT_SIM_SCRIPT_RUNNER`
+指向）匹配。
 
 ```bash
 ls tools/recipes/

@@ -4,9 +4,9 @@ Browser workbench for inspecting and playing back physics-simulated 3D
 Gaussian Splatting sequences. Pick a sequence, scrub the timeline,
 switch between point-cloud and splat rendering, orbit the camera.
 
-Simulation runs on the server (`your-server`); the laptop is a viewer
-and a gateway to the run/job API. No CUDA, no PyTorch, no Warp, no
-Taichi locally — pure-Python deps.
+Simulation runs on a remote server (the GPU box); the client is a
+viewer and a gateway to the run/job API. No CUDA, no PyTorch, no
+Warp, no Taichi locally — pure-Python deps.
 
 [中文 README](README.md)
 
@@ -139,18 +139,15 @@ work/
 ```
 
 A sequence is the canonical artifact: fused per-frame splat plies plus
-optional packed-binary and viser cache files. Two ways to populate it:
+optional packed-binary and viser cache files. In the normal flow, you
+don't populate this manually:
 
-1. **From the server** — `rsync your-server:.../sequences/<name>/`
-   into `work/library/sequences/`, then
-   `python tools/batch_convert_to_npz.py` to build the viser cache.
-2. **From a local sim_*.ply set** — `python tools/fuse_to_full_ply.py`
-   on rsynced sim outputs (this needs only numpy + plyfile + optional
-   torch for `--knn_rotation`).
-
-The server's `runner.py` auto-runs `batch_convert_to_npz.py` after each
-sim completes (idempotent — only rebuilds stale .npz). The laptop's
-`sync_daemon` then mirrors the new .npz over.
+1. Fire a sim via `POST /api/runs` (or the workbench's Run button).
+2. Server's `runner.py` runs sim → fuse → `batch_convert_to_npz.py`
+   → writes `_meta.json`.
+3. Client's `sync_daemon` mirrors the `.npz` + `_meta.json` to the
+   local `work/` tree on its next poll.
+4. The outliner picks up the new sequence; viser auto-reloads.
 
 ## Render modes
 
@@ -167,7 +164,8 @@ active. Toggling modes does not reset playback state.
 
 `tools/recipes/*.json` defines material + boundary + integration
 parameters consumed by the server-side sim. The schema matches what
-`gs_simulation_building.py` on `your-server` expects.
+the canonical sim script (configured via `$GSFLUENT_SIM_SCRIPT_RUNNER`
+on the server) expects.
 
 ```bash
 ls tools/recipes/
