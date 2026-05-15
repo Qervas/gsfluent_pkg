@@ -91,11 +91,18 @@ jobs:
       - name: Smoke test image
         if: github.event_name != 'pull_request'
         env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          REGISTRY: ${{ env.REGISTRY }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -e
+          # Docker reference syntax requires the repo name to be lowercase.
+          # github.repository_owner preserves case (e.g. "Qervas"), so we
+          # downcase here before stitching the image tag.
+          OWNER_LOWER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          IMAGE="$REGISTRY/$OWNER_LOWER/gsfluent-backend"
           SHORT_SHA=$(git rev-parse --short HEAD)
           TAG="$IMAGE:sha-$SHORT_SHA"
+          echo "Smoking $TAG"
           docker pull "$TAG"
           docker run -d --rm --name smoke -p 18080:8080 "$TAG"
           for i in $(seq 1 30); do
