@@ -2,7 +2,7 @@ import { useEffect, useCallback, lazy, Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/layout/AppShell";
 import { FullWorkspaceShell } from "@/components/layout/FullWorkspaceShell";
-import { Outliner } from "@/components/outliner/Outliner";
+import { SourceCard } from "@/components/sim/SourceCard";
 import { Properties } from "@/components/properties/Properties";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
@@ -133,7 +133,7 @@ export default function App() {
       {activeWorkspace === "sim" && (
         <AppShell
           subscribe={subscribe}
-          outliner={<Outliner onLoadRun={onLoadRun} onPickModel={onPickModel} />}
+          outliner={<SourceCard onLoadRun={onLoadRun} onPickModel={onPickModel} />}
           viewport={<Viewport />}
           properties={<Properties />}
         />
