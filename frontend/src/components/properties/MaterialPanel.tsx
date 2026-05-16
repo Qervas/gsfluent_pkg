@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { useOverrides } from "@/lib/use-overrides";
 import { ScientificInput, type Marker } from "./widgets/ScientificInput";
 import { SelectInput } from "./widgets/SelectInput";
 
@@ -139,31 +140,31 @@ const FIELD_SPECS: Record<FieldKey, FieldSpec> = {
 const FIELD_ORDER: FieldKey[] = ["E", "nu", "density", "yield_stress", "friction_angle"];
 
 export function MaterialPanel() {
-  const activeRecipeData = useStore((s) => s.activeRecipeData);
+  const { effective, baselineValue, setOverride, clearOverride } = useOverrides();
   const activeRecipeName = useStore((s) => s.activeRecipeName);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
   const { data: defaults } = useQuery({
     queryKey: ["material_defaults"],
     queryFn: api.schemas.materials,
   });
 
-  if (!activeRecipeData || !activeRecipeName) return null;
+  if (!activeRecipeName || !effective) return null;
 
-  const setField = (key: string, v: unknown) => {
-    setActiveRecipe(activeRecipeName, { ...activeRecipeData, [key]: v });
-  };
+  const setField = (key: string, v: unknown) => setOverride(key, v);
 
   const onMaterialChange = (newMat: string) => {
     if (!defaults) return;
     const mDefaults = defaults[newMat] ?? {};
-    setActiveRecipe(activeRecipeName, {
-      ...activeRecipeData,
-      material: newMat,
-      ...mDefaults,
-    });
+    // Material switch is a baseline edit, not an override. Update both
+    // activeRecipeData (so other panels read the new defaults) and the
+    // store's baseline, then clear overrides — none of the previous
+    // overrides necessarily apply to the new material.
+    const next = { ...effective, material: newMat, ...mDefaults };
+    useStore.getState().setActiveRecipe(activeRecipeName, next);
+    useStore.getState().setSimRecipeBaseline(next);
+    useStore.getState().clearAllOverrides();
   };
 
-  const currentMat = (activeRecipeData.material as string | undefined) ?? "jelly";
+  const currentMat = (effective.material as string | undefined) ?? "jelly";
   const visibility = MATERIAL_FIELDS[currentMat] ?? MATERIAL_FIELDS.jelly;
 
   return (
@@ -177,13 +178,16 @@ export function MaterialPanel() {
       />
       {FIELD_ORDER.filter((k) => visibility[k]).map((key) => {
         const spec = FIELD_SPECS[key];
-        const v = Number(activeRecipeData[key] ?? 0);
+        const v = Number(effective[key] ?? 0);
+        const b = Number(baselineValue(key) ?? NaN);
         return (
           <ScientificInput
             key={key}
             label={spec.label}
             value={v}
+            baselineValue={Number.isFinite(b) ? b : undefined}
             onChange={(n) => setField(key, n)}
+            onRevert={() => clearOverride(key)}
             min={spec.min}
             max={spec.max}
             step={spec.step}
