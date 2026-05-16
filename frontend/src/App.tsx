@@ -1,21 +1,11 @@
-import { useEffect, useCallback, lazy, Suspense } from "react";
+import { useEffect, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/layout/AppShell";
-import { FullWorkspaceShell } from "@/components/layout/FullWorkspaceShell";
 import { SourceCard } from "@/components/sim/SourceCard";
 import { SimulationCard } from "@/components/sim/SimulationCard";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
-
-// Code-split the Recipes workspace — most sessions live in the Sim
-// workspace and never load this bundle. Saves ~40 KB gz from the
-// initial load (Properties + all material/solver/forces sub-panels
-// are only pulled in once the user switches tabs).
-const RecipesWorkspace = lazy(() =>
-  import("@/workspaces/RecipesWorkspace").then((m) => ({
-    default: m.RecipesWorkspace,
-  })),
-);
+import { RecipesModal } from "@/components/recipes/RecipesModal";
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
@@ -27,7 +17,6 @@ export default function App() {
   const activeModel = useStore((s) => s.activeModel);
   const setActiveModel = useStore((s) => s.setActiveModel);
   const setSimState = useStore((s) => s.setSimState);
-  const activeWorkspace = useStore((s) => s.activeWorkspace);
   const simRunName = useStore((s) => s.simRunName);
   const setFpsHint = useStore((s) => s.setFpsHint);
 
@@ -55,6 +44,26 @@ export default function App() {
     );
     setFpsHint(seq?.fps_hint ?? 24);
   }, [simRunName, sequences, setFpsHint]);
+
+  // Cmd-R toggles the recipes modal. Registered globally so it works
+  // anywhere in the app, with the standard editable-element guard.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta || e.key.toLowerCase() !== "r") return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase();
+      const editable =
+        tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+        target?.isContentEditable === true;
+      if (editable) return;
+      e.preventDefault();
+      const st = useStore.getState();
+      st.setRecipesModalOpen(!st.recipesModalOpen);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   // Switching to a model preview is dispatched imperatively (not via a
   // useEffect on `activeModel`), so clicking the same model twice still
@@ -130,27 +139,13 @@ export default function App() {
 
   return (
     <>
-      {activeWorkspace === "sim" && (
-        <AppShell
-          subscribe={subscribe}
-          sourceCard={<SourceCard onLoadRun={onLoadRun} onPickModel={onPickModel} />}
-          simCard={<SimulationCard subscribe={subscribe} />}
-          viewport={<Viewport />}
-        />
-      )}
-      {activeWorkspace === "recipes" && (
-        <FullWorkspaceShell subscribe={subscribe}>
-          <Suspense
-            fallback={
-              <div className="h-full flex items-center justify-center text-text-muted text-sm">
-                Loading recipes…
-              </div>
-            }
-          >
-            <RecipesWorkspace />
-          </Suspense>
-        </FullWorkspaceShell>
-      )}
+      <AppShell
+        subscribe={subscribe}
+        sourceCard={<SourceCard onLoadRun={onLoadRun} onPickModel={onPickModel} />}
+        simCard={<SimulationCard subscribe={subscribe} />}
+        viewport={<Viewport />}
+      />
+      <RecipesModal />
       <CommandPalette onRun={triggerRun} />
     </>
   );
