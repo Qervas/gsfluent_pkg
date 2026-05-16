@@ -4,6 +4,7 @@ import { X, Trash2, Copy, Upload, Download } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { useOverrides } from "@/lib/use-overrides";
+import { JsonEditor } from "@/components/properties/widgets/JsonEditor";
 import type { RecipeListItem } from "@/lib/types";
 
 /** RecipesModal — center-screen library manager. Replaces the
@@ -233,14 +234,38 @@ export function RecipesModal() {
  *  Sim workspace's variant; here in the modal it shows the unmodified
  *  recipe). */
 function RecipeDetail({ name }: { name: string }) {
+  const qc = useQueryClient();
   const { data: r, isLoading } = useQuery({
     queryKey: ["recipes", name],
     queryFn: () => api.recipes.get(name),
   });
   if (isLoading || !r) return <div className="p-4 text-text-muted text-xs">Loading…</div>;
+  const isUser = r.source === "user";
+
+  const onSave = async (next: Record<string, unknown>) => {
+    if (!isUser) return; // built-ins are read-only
+    try {
+      await api.recipes.save(name, next);
+      qc.invalidateQueries({ queryKey: ["recipes", name] });
+      qc.invalidateQueries({ queryKey: ["recipes"] });
+    } catch (e) {
+      console.error("save failed", e);
+    }
+  };
+
   return (
-    <pre className="px-4 py-3 text-[11px] font-mono text-text-secondary whitespace-pre-wrap">
-      {JSON.stringify(r.data, null, 2)}
-    </pre>
+    <div className="px-3 py-3">
+      {!isUser && (
+        <div className="mb-2 px-2 py-1 bg-warning/10 text-warning text-[10px] rounded">
+          Built-in recipe — read-only. Click <strong>Duplicate</strong> to edit.
+        </div>
+      )}
+      <JsonEditor
+        value={r.data}
+        baseline={null}
+        readOnly={!isUser}
+        onChange={(next) => { void onSave(next); }}
+      />
+    </div>
   );
 }
