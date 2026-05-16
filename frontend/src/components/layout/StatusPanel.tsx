@@ -50,11 +50,9 @@ export function StatusPanel() {
   const simRunName = useStore((s) => s.simRunName);
   const staticAttrs = useStore((s) => s.staticAttrs);
   const frameCount = useStore((s) => s.frameXyz.size);
-  // Track both side panels so the pill + console drawer don't collide
-  // with them post-swap (Properties → left, Outliner → right).
-  const propertiesOpen = useStore(
-    (s) => s.activeRecipeData != null && s.panels.properties !== "collapsed",
-  );
+  // Track the unified left rail so the console drawer doesn't collide
+  // with it. The right side has no glass card after Phase 3, so only
+  // the left-side reactivity is needed.
   const outlinerOpen = useStore((s) => s.panels.outliner !== "collapsed");
 
   const [consoleOpen, setConsoleOpen] = useState(false);
@@ -82,14 +80,15 @@ export function StatusPanel() {
   return (
     <>
       {/* Console drawer — fixed band above the pill when open. Clears
-          the left-anchored Outliner (w-72 + gap = 300px) and the
-          right-anchored Properties (w-80 + gap = 332px) reactively;
-          extends into whichever side is collapsed. */}
+          the unified left rail (w-80 + 12px left-3 + 12px gap = 344px)
+          when open; extends to `left-3` when the rail is collapsed.
+          The right edge stays at `right-3` since Phase 3 dropped the
+          right-anchored Properties card. */}
       {consoleOpen && (
         <div
-          className={`fixed bottom-14 h-72 z-30 glass-card overflow-hidden flex flex-col transition-[left,right] duration-panel ease-motion ${
-            outlinerOpen ? "left-[312px]" : "left-3"
-          } ${propertiesOpen ? "right-[344px]" : "right-3"}`}
+          className={`fixed bottom-14 right-3 h-72 z-30 glass-card overflow-hidden flex flex-col transition-[left] duration-panel ease-motion ${
+            outlinerOpen ? "left-[344px]" : "left-3"
+          }`}
           role="region"
           aria-label="Run console"
         >
@@ -110,8 +109,9 @@ export function StatusPanel() {
         </div>
       )}
 
-      {/* Floating pill — bottom-right corner. Properties glass card
-          ends at bottom-20 so this never overlaps. */}
+      {/* Floating pill — bottom-right corner. The right edge of the
+          viewport has no glass card after Phase 3, so the pill sits
+          freely at `right-3 bottom-3`. */}
       <div
         className="fixed bottom-3 right-3 z-40 glass-card px-3 h-9 flex items-center gap-2 text-xs text-text-muted font-mono"
         role="status"

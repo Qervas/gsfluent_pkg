@@ -34,9 +34,6 @@ export function DropZone() {
   const convertYUpRef = useRef(false);
   convertYUpRef.current = convertYUp;
   const setActiveModel = useStore((s) => s.setActiveModel);
-  const propertiesOpen = useStore(
-    (s) => s.activeRecipeData != null && s.panels.properties !== "collapsed",
-  );
   const qc = useQueryClient();
 
   useEffect(() => {
@@ -167,13 +164,10 @@ export function DropZone() {
        *  is in progress to avoid suggesting it does anything.
        *  Parked below the TopBar (top-[104px] = 68 TopBar bottom +
        *  ~36 RenderModeToggle height) so it sits in a column with
-       *  the render-mode toggle. Slides left to clear the Properties
-       *  panel when it's open. */}
+       *  the render-mode toggle. */}
       {dragKind !== "npz" && (
         <div
-          className={`absolute top-[104px] z-10 transition-[right] duration-panel ease-motion ${
-            propertiesOpen ? "right-[344px]" : "right-3"
-          }`}
+          className="absolute top-[104px] right-3 z-10"
         >
           <label
             className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-text-muted hover:text-text-primary cursor-pointer select-none bg-elevated/70 border border-border rounded px-1.5 py-0.5 backdrop-blur-sm"
