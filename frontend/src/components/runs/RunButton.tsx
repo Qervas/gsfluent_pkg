@@ -2,6 +2,7 @@ import { Play, Check, X, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { useOverrides } from "@/lib/use-overrides";
 
 /** Run button with five visual states, consolidating what used to be
  *  split across the StatusPill + StatusStrip + console. One source of
@@ -22,6 +23,7 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
   const activeModel = useStore((s) => s.activeModel);
   const activeRecipeName = useStore((s) => s.activeRecipeName);
   const activeRecipeData = useStore((s) => s.activeRecipeData);
+  const { effective } = useOverrides();
   const simState = useStore((s) => s.simState);
   const simRunName = useStore((s) => s.simRunName);
   const simNFrames = useStore((s) => s.simNFrames);
@@ -64,7 +66,7 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
       await api.runs.start({
         run_name,
         model_path: activeModel!.path,
-        recipe_data: activeRecipeData!,
+        recipe_data: effective,
         recipe_source: activeRecipeName!,
         particles: 200_000,
       });
