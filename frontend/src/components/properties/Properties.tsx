@@ -12,8 +12,9 @@ import { BoundaryEditor } from "./BoundaryEditor";
 import { ProvenanceFooter } from "./ProvenanceFooter";
 import { useOverrides } from "@/lib/use-overrides";
 import { api } from "@/lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import type { RecipeListItem } from "@/lib/types";
 
 export function Properties() {
   const activeRecipeName = useStore((s) => s.activeRecipeName);
@@ -22,6 +23,14 @@ export function Properties() {
   const qc = useQueryClient();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const { data: recipes = [] } = useQuery({
+    queryKey: ["recipes"],
+    queryFn: api.recipes.list,
+  });
+  const baselineExists = activeRecipeName
+    ? (recipes as RecipeListItem[]).some((r) => r.name === activeRecipeName)
+    : true;
 
   if (!activeRecipeName || !activeRecipeData) {
     return (
@@ -68,6 +77,13 @@ export function Properties() {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="text-xs">
+        {!baselineExists && activeRecipeName && (
+          <div className="px-3 py-2 border-b border-warning bg-warning/10 text-warning text-[11px]">
+            Baseline <span className="font-mono">{activeRecipeName}</span> was
+            deleted. Your {overrideCount} edits are now standalone — save them
+            as a new recipe.
+          </div>
+        )}
         {/* Override status strip — surfaces deviation count + bulk actions */}
         {overrideCount > 0 && (
           <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-accent/5">
