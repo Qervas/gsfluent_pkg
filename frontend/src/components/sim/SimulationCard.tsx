@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { useOverrides } from "@/lib/use-overrides";
@@ -24,11 +24,25 @@ export function SimulationCard({ subscribe }: Props) {
   const activeModel       = useStore((s) => s.activeModel);
   const activeRecipeName  = useStore((s) => s.activeRecipeName);
   const simRunName        = useStore((s) => s.simRunName);
+  const simState          = useStore((s) => s.simState);
   const loadActiveRecipe  = useStore((s) => s.loadActiveRecipe);
   const { overrideCount } = useOverrides();
   const [view, setView]   = useState<"form" | "json">(
     () => (localStorage.getItem("gsfluent.sim_view_mode") as "form" | "json") || "form",
   );
+
+  const prevSimState = useRef<string>(simState);
+  const [showFinishedToast, setShowFinishedToast] = useState(false);
+
+  useEffect(() => {
+    if (prevSimState.current === "running" && simState === "done") {
+      setShowFinishedToast(true);
+      const t = setTimeout(() => setShowFinishedToast(false), 6000);
+      prevSimState.current = simState;
+      return () => clearTimeout(t);
+    }
+    prevSimState.current = simState;
+  }, [simState]);
 
   const { data: recipes = [] } = useQuery({
     queryKey: ["recipes"],
@@ -186,6 +200,31 @@ export function SimulationCard({ subscribe }: Props) {
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto">
           {view === "form" ? <Properties /> : <SimJsonBody />}
+        </div>
+      )}
+
+      {showFinishedToast && (
+        <div className="mx-3 mb-2 px-3 py-2 bg-success/10 border border-success/30 text-success text-[11px] rounded flex items-center gap-2">
+          <span>Run finished</span>
+          <button
+            onClick={() => {
+              const lastSeq = useStore.getState().simRunName;
+              if (lastSeq) {
+                useStore.getState().resetForNewRun(lastSeq);
+                useStore.getState().setSimState("done");
+              }
+              setShowFinishedToast(false);
+            }}
+            className="ml-auto text-success hover:underline"
+          >
+            View sequence
+          </button>
+          <button
+            onClick={() => setShowFinishedToast(false)}
+            className="text-text-muted hover:text-text-primary"
+          >
+            ✕
+          </button>
         </div>
       )}
 
