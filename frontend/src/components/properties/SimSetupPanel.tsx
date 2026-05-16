@@ -1,13 +1,15 @@
 import { useStore } from "@/lib/store";
+import { useOverrides } from "@/lib/use-overrides";
 import { Vec3Input } from "./widgets/Vec3Input";
 import { NumberInput } from "./widgets/NumberInput";
 
 export function SimSetupPanel() {
-  const data = useStore((s) => s.activeRecipeData);
+  const { effective, setOverride } = useOverrides();
   const name = useStore((s) => s.activeRecipeName);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
-  if (!data || !name) return null;
-  const setField = (key: string, v: unknown) => setActiveRecipe(name, { ...data, [key]: v });
+  if (!name || !effective) return null;
+  const setField = (key: string, v: unknown) => setOverride(key, v);
+  // Local alias so the remaining `data.<key>` reads keep working.
+  const data = effective;
 
   const center = (data.mpm_space_viewpoint_center as number[] | undefined) ?? [1, 1, 1];
   const upAxis = (data.mpm_space_vertical_upward_axis as number[] | undefined) ?? [0, 0, 1];

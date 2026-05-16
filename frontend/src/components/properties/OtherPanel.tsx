@@ -1,13 +1,15 @@
 import { useStore } from "@/lib/store";
+import { useOverrides } from "@/lib/use-overrides";
 import { SliderInput } from "./widgets/SliderInput";
 import { SwitchInput } from "./widgets/SwitchInput";
 
 export function OtherPanel() {
-  const data = useStore((s) => s.activeRecipeData);
+  const { effective, setOverride } = useOverrides();
   const name = useStore((s) => s.activeRecipeName);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
-  if (!data || !name) return null;
-  const setField = (key: string, v: unknown) => setActiveRecipe(name, { ...data, [key]: v });
+  if (!name || !effective) return null;
+  const setField = (key: string, v: unknown) => setOverride(key, v);
+  // Local alias so the remaining `data.<key>` reads keep working.
+  const data = effective;
 
   return (
     <div className="space-y-1">

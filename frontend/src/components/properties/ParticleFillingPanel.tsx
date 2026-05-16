@@ -1,4 +1,5 @@
 import { useStore } from "@/lib/store";
+import { useOverrides } from "@/lib/use-overrides";
 import { NumberInput } from "./widgets/NumberInput";
 
 // Hints for the known particle_filling sub-keys. The block is an opaque
@@ -16,10 +17,11 @@ const HINTS: Record<string, string> = {
 };
 
 export function ParticleFillingPanel() {
-  const data = useStore((s) => s.activeRecipeData);
+  const { effective, setOverride } = useOverrides();
   const name = useStore((s) => s.activeRecipeName);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
-  if (!data || !name) return null;
+  if (!name || !effective) return null;
+  // Local alias so the remaining `data.<key>` reads keep working.
+  const data = effective;
 
   const pf = (data.particle_filling as Record<string, unknown> | undefined) ?? {};
   const keys = Object.keys(pf);
@@ -32,8 +34,10 @@ export function ParticleFillingPanel() {
     );
   }
 
+  // particle_filling is a nested object; override the whole block as a
+  // single key so the engine's top-level merge stays simple.
   const setChild = (key: string, v: number) => {
-    setActiveRecipe(name, { ...data, particle_filling: { ...pf, [key]: v } });
+    setOverride("particle_filling", { ...pf, [key]: v });
   };
 
   return (
