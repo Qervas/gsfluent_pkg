@@ -148,7 +148,10 @@ export function ViserSplatScene() {
           width: "100%",
           height: "100%",
           border: "none",
-          background: "#0d1117",
+          // tailwind `canvas` (#0a0f1a) — keep iframe background in
+          // lockstep with the R3F Canvas's parent div so toggling
+          // modes doesn't flash a different bg color.
+          background: "#0a0f1a",
           display: "block",
         }}
         sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-fullscreen"

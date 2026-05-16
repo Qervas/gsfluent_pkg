@@ -47,7 +47,7 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 # Workbench dark palette (mirrors frontend/tailwind.config.js). Keeping
 # this in sync visually means the iframe inside the React workbench
 # doesn't look like a foreign element pasted in. RGB tuples are 0-255.
-_CANVAS_RGB    = (13, 17, 23)     # tailwind `canvas`     #0d1117
+_CANVAS_RGB    = (10, 15, 26)     # tailwind `canvas`     #0a0f1a
 _GRID_CELL_RGB = (33, 38, 45)     # tailwind `border`     #21262d
 _ACCENT_RGB    = (34, 211, 238)   # tailwind `accent`     #22d3ee
 
@@ -178,14 +178,18 @@ def _camera_for_bbox(lo: np.ndarray, hi: np.ndarray) -> tuple[tuple[float, float
                                                               tuple[float, float, float]]:
     """Frame a camera that comfortably contains the bbox.
 
-    Look-at = bbox center. Position = bbox center + (1, 1, 0.7) × scene_scale,
-    which roughly mirrors the React Canvas default (`position=[5,5,6]`)
-    when sceneScale ≈ 7. The +Z component is smaller than +X/+Y so the
-    camera looks slightly *down* on the model — most fluid/destruction
-    scenes read better from above-eye level."""
+    Look-at = bbox center. Position = bbox center + (diag, diag, diag×0.7)
+    where diag = ‖bbox.size‖₂ — same formula SplatScene's auto-fit uses
+    on the R3F side (THREE.Vector3.length() of the bbox extents). Using
+    the diagonal instead of max-extent × 0.8 makes the two modes frame
+    the model at identical distances, so toggling Points ↔ Splat doesn't
+    visibly jump the camera. The +Z component is smaller than +X/+Y so
+    the camera looks slightly *down* on the model — most fluid /
+    destruction scenes read better from above-eye level."""
     center = ((lo + hi) * 0.5).astype(float)
-    scene_scale = float(np.maximum(hi - lo, 1e-6).max())
-    offset = np.array([1.0, 1.0, 0.7], dtype=float) * scene_scale * 0.8
+    extent = np.maximum(hi - lo, 1e-6).astype(float)
+    diag = float(np.linalg.norm(extent))
+    offset = np.array([diag, diag, diag * 0.7], dtype=float)
     position = tuple((center + offset).tolist())
     look_at = tuple(center.tolist())
     return position, look_at  # type: ignore[return-value]
@@ -260,10 +264,20 @@ def main() -> int:
     print(f"mmap-loading {len(npz_paths)} cells from {npz_root}...")
     cells: dict[str, dict] = {}
     for path in npz_paths:
-        cells[path.stem] = mmap_cell(path)
+        try:
+            cells[path.stem] = mmap_cell(path)
+        except (KeyError, ValueError, OSError) as e:
+            # A single malformed .npz (missing cov / quats / scales /
+            # truncated archive) shouldn't kill the whole renderer.
+            # Skip it with a warning so the remaining cells still load.
+            print(f"  {path.stem}: SKIPPED — {type(e).__name__}: {e}")
+            continue
         c = cells[path.stem]
         print(f"  {path.stem}: {c['frames'].shape}  "
               f"bbox=({c['bbox_lo']}, {c['bbox_hi']})")
+    if not cells:
+        print(f"ERROR: every .npz in {npz_root} was malformed")
+        return 2
 
     # --- viser scene -----------------------------------------------------
     server = viser.ViserServer(port=args.viser_port)
@@ -281,6 +295,16 @@ def main() -> int:
     )
     # Hide the right-side panel label entirely — there's nothing in it.
     server.gui.set_panel_label(None)
+
+    # Force the GL clear color to match tailwind `canvas` (#0a0f1a) so
+    # toggling Points ↔ Splat in the React workbench doesn't flash a
+    # different background. Viser doesn't expose a direct clear-color
+    # API — `set_background_image` is the supported hook; a uniform
+    # 16×16 tile gets stretched over the viewport and behaves like a
+    # solid clear color. The image is stamped once at startup; viser
+    # composites it behind every frame.
+    _clear_tile = np.full((16, 16, 3), _CANVAS_RGB, dtype=np.uint8)
+    server.scene.set_background_image(_clear_tile)
     # World axes overlay (the big +X/+Y/+Z triad at world origin) — off;
     # we add a smaller frame at the scene's floor corner so the iframe
     # still carries an orientation cue without dominating the view.
