@@ -1,5 +1,4 @@
-import { useStore } from "@/lib/store";
-import { useOverrides } from "@/lib/use-overrides";
+import { usePanelData } from "@/lib/use-overrides";
 import { SliderInput } from "./widgets/SliderInput";
 import { NumberInput } from "./widgets/NumberInput";
 import { SwitchInput } from "./widgets/SwitchInput";
@@ -22,12 +21,9 @@ const NUMBER_FIELDS: Array<[string, string, number, string?]> = [
 ];
 
 export function CameraPanel() {
-  const { effective, setOverride } = useOverrides();
-  const name = useStore((s) => s.activeRecipeName);
-  if (!name || !effective) return null;
-  const setField = (key: string, v: unknown) => setOverride(key, v);
-  // Local alias so the remaining `data.<key>` reads keep working.
-  const data = effective;
+  const panel = usePanelData();
+  if (!panel) return null;
+  const { data, setField } = panel;
 
   return (
     <div className="space-y-1">
