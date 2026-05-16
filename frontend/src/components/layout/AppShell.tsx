@@ -4,44 +4,44 @@ import { StatusPanel } from "./StatusPanel";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useStore } from "@/lib/store";
 
-/** Stage AppShell — fullscreen viewport with floating glass cards
- *  layered above. Replaces the old react-resizable-panels split that
- *  fought the viewport-first commitment.
+/** Stage AppShell — fullscreen viewport with a single left-anchored
+ *  glass card layered above. Phase 3 of the sim-workspace-redesign
+ *  collapsed the old left Outliner + right Properties cards into one
+ *  rail containing SourceCard above and SimulationCard below.
  *
  *  Layout:
- *    z-0   <Viewport>    inset-0, fills the screen
- *    z-20  <Outliner>    fixed left, glass card (slides off when collapsed)
- *    z-20  <Properties>  fixed right, glass card (auto-hidden when no recipe)
+ *    z-0   <Viewport>     inset-0, fills the screen
+ *    z-20  <Sim panel>    fixed left, glass card stacking SourceCard
+ *                         (top) + SimulationCard (bottom). Slides off
+ *                         when collapsed.
  *    z-20  <PlaybackDock> fixed bottom-center (Phase 4: only when sequence active)
- *    z-30  <TopBar>      fixed top, thin glass bar
- *    z-40  <StatusPanel> floating bottom-right pill
+ *    z-30  <TopBar>       fixed top, thin glass bar
+ *    z-40  <StatusPanel>  floating bottom-right pill
  *
  *  Keyboard:
- *    Cmd/Ctrl-B  toggles Outliner collapsed/expanded
- *    Cmd/Ctrl-I  toggles Properties collapsed/expanded
+ *    Cmd/Ctrl-B  toggles the Sim panel collapsed/expanded
  *    Cmd/Ctrl-K  opens the command palette (handled by CommandPalette)
  */
 type Props = {
-  outliner: React.ReactNode;
-  viewport: React.ReactNode;
-  properties: React.ReactNode;
-  subscribe: (run_name: string) => void;
+  sourceCard: React.ReactNode;
+  simCard:    React.ReactNode;
+  viewport:   React.ReactNode;
+  subscribe:  (run_name: string) => void;
 };
 
-export function AppShell({ outliner, viewport, properties, subscribe }: Props) {
+export function AppShell({ sourceCard, simCard, viewport, subscribe }: Props) {
   const panels = useStore((s) => s.panels);
   const setPanelCollapsed = useStore((s) => s.setPanelCollapsed);
-  const hasRecipe = useStore((s) => s.activeRecipeData != null);
   const simState = useStore((s) => s.simState);
   const simNFrames = useStore((s) => s.simNFrames);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simLog = useStore((s) => s.simLog);
 
-  // Cmd/Ctrl-B + Cmd/Ctrl-I — scoped collapse toggles. Cmd/Ctrl-/ jumps
-  // focus to the Outliner (skip-link, replaces the more conventional
-  // anchor-based skip-link because we have no body anchor — the
-  // viewport is a canvas). All three skip when the user is typing in
-  // an input.
+  // Cmd/Ctrl-B — collapse toggle for the unified Sim panel.
+  // Cmd/Ctrl-/ jumps focus into the Sim panel (skip-link, replaces the
+  // more conventional anchor-based skip-link because we have no body
+  // anchor — the viewport is a canvas). Both skip when the user is
+  // typing in an input.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey;
@@ -56,9 +56,6 @@ export function AppShell({ outliner, viewport, properties, subscribe }: Props) {
       if (e.key.toLowerCase() === "b") {
         e.preventDefault();
         setPanelCollapsed("outliner", panels.outliner !== "collapsed");
-      } else if (e.key.toLowerCase() === "i") {
-        e.preventDefault();
-        setPanelCollapsed("properties", panels.properties !== "collapsed");
       } else if (e.key === "/") {
         e.preventDefault();
         if (panels.outliner === "collapsed") {
@@ -67,15 +64,15 @@ export function AppShell({ outliner, viewport, properties, subscribe }: Props) {
         // Defer focus so the panel has finished transitioning open.
         requestAnimationFrame(() => {
           const el =
-            document.querySelector<HTMLElement>('[aria-label="Outliner"] [role="button"], [aria-label="Outliner"] button, [aria-label="Outliner"] [tabindex="0"]') ||
-            document.querySelector<HTMLElement>('[aria-label="Outliner"]');
+            document.querySelector<HTMLElement>('[aria-label="Sim panel"] [role="button"], [aria-label="Sim panel"] button, [aria-label="Sim panel"] [tabindex="0"]') ||
+            document.querySelector<HTMLElement>('[aria-label="Sim panel"]');
           el?.focus();
         });
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [panels.outliner, panels.properties, setPanelCollapsed]);
+  }, [panels.outliner, setPanelCollapsed]);
 
   // Live-region: announce sim state transitions to assistive tech.
   // We coalesce on `simState` changes (not progress ticks — those
@@ -111,11 +108,11 @@ export function AppShell({ outliner, viewport, properties, subscribe }: Props) {
   return (
     <div className="h-screen w-screen relative bg-canvas text-text-primary text-sm overflow-hidden">
       {/* Skip-link — invisible until focused, jumps screen-reader /
-          keyboard users straight into the Outliner. Companion to the
+          keyboard users straight into the Sim panel. Companion to the
           Cmd-/ shortcut above for keyboard-only users without a
           modifier key. */}
       <a
-        href="#outliner"
+        href="#sim-panel"
         onClick={(e) => {
           e.preventDefault();
           if (panels.outliner === "collapsed") {
@@ -123,7 +120,7 @@ export function AppShell({ outliner, viewport, properties, subscribe }: Props) {
           }
           requestAnimationFrame(() => {
             document
-              .querySelector<HTMLElement>('[aria-label="Outliner"]')
+              .querySelector<HTMLElement>('[aria-label="Sim panel"]')
               ?.focus();
           });
         }}
@@ -132,7 +129,7 @@ export function AppShell({ outliner, viewport, properties, subscribe }: Props) {
                    transition-transform duration-fast ease-motion shadow-glass
                    focus:outline-none focus:ring-2 focus:ring-accent-glow"
       >
-        Skip to Outliner
+        Skip to Sim panel
       </a>
 
       {/* Live-region for sim state announcements. `polite` so it
@@ -155,34 +152,25 @@ export function AppShell({ outliner, viewport, properties, subscribe }: Props) {
       {/* Top bar — z-30, fixed */}
       <TopBar subscribe={subscribe} />
 
-      {/* Outliner — z-20, left-anchored glass card */}
+      {/* Left rail — single glass card containing SourceCard above and
+          SimulationCard below. Properties has moved into SimulationCard;
+          the right side of the viewport now has no glass card at all. */}
       <GlassCard
         side="left"
         collapsed={panels.outliner === "collapsed"}
-        onCollapse={() =>
-          setPanelCollapsed("outliner", panels.outliner !== "collapsed")
-        }
+        onCollapse={() => setPanelCollapsed("outliner", panels.outliner !== "collapsed")}
         shortcut="⌘B"
-        ariaLabel="Outliner"
-        className="fixed left-3 top-[68px] bottom-3 w-72 z-20"
+        ariaLabel="Sim panel"
+        className="fixed left-3 top-[68px] bottom-3 w-80 z-20 flex flex-col"
       >
-        <GlassCard.Body className="pr-6">{outliner}</GlassCard.Body>
-      </GlassCard>
-
-      {/* Properties — z-20, right-anchored glass card. Auto-hidden when
-          no recipe is active (no dead controls). User can also manually
-          collapse to a rail via Cmd-I. */}
-      <GlassCard
-        side="right"
-        collapsed={!hasRecipe || panels.properties === "collapsed"}
-        onCollapse={() =>
-          setPanelCollapsed("properties", panels.properties !== "collapsed")
-        }
-        shortcut="⌘I"
-        ariaLabel="Properties"
-        className="fixed right-3 top-[68px] bottom-20 w-80 z-20"
-      >
-        <GlassCard.Body className="pl-6">{properties}</GlassCard.Body>
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 overflow-y-auto border-b border-border">
+            {sourceCard}
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            {simCard}
+          </div>
+        </div>
       </GlassCard>
 
       {/* Status panel — z-40, compact bottom-left floating pill. Replaces
