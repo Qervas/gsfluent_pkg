@@ -91,6 +91,9 @@ type State = {
   };
   setPanelCollapsed: (panel: "outliner" | "properties", collapsed: boolean) => void;
 
+  recipesModalOpen: boolean;
+  setRecipesModalOpen: (open: boolean) => void;
+
   // Active render path. "points" uses the lightweight Three.js Points
   // pipeline that streams over the websocket and supports per-frame
   // position updates (sim playback). "splat" loads the raw .ply via
@@ -207,6 +210,9 @@ export const useStore = create<State>((set) => ({
   renderMode: "points",
   pointsCamera: null,
   panels: loadPanels(),
+
+  recipesModalOpen: false,
+  setRecipesModalOpen: (open) => set({ recipesModalOpen: open }),
 
   setPanelCollapsed: (panel, collapsed) =>
     set((st) => {
