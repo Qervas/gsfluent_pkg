@@ -94,6 +94,9 @@ type State = {
   recipesModalOpen: boolean;
   setRecipesModalOpen: (open: boolean) => void;
 
+  runBlockedByJson: boolean;
+  setRunBlockedByJson: (v: boolean) => void;
+
   // Active render path. "points" uses the lightweight Three.js Points
   // pipeline that streams over the websocket and supports per-frame
   // position updates (sim playback). "splat" loads the raw .ply via
@@ -213,6 +216,9 @@ export const useStore = create<State>((set) => ({
 
   recipesModalOpen: false,
   setRecipesModalOpen: (open) => set({ recipesModalOpen: open }),
+
+  runBlockedByJson: false,
+  setRunBlockedByJson: (v) => set({ runBlockedByJson: v }),
 
   setPanelCollapsed: (panel, collapsed) =>
     set((st) => {
