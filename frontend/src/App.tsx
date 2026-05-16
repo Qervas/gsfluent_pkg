@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/layout/AppShell";
 import { FullWorkspaceShell } from "@/components/layout/FullWorkspaceShell";
 import { SourceCard } from "@/components/sim/SourceCard";
-import { Properties } from "@/components/properties/Properties";
+import { SimulationCard } from "@/components/sim/SimulationCard";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
 
@@ -133,9 +133,9 @@ export default function App() {
       {activeWorkspace === "sim" && (
         <AppShell
           subscribe={subscribe}
-          outliner={<SourceCard onLoadRun={onLoadRun} onPickModel={onPickModel} />}
+          sourceCard={<SourceCard onLoadRun={onLoadRun} onPickModel={onPickModel} />}
+          simCard={<SimulationCard subscribe={subscribe} />}
           viewport={<Viewport />}
-          properties={<Properties />}
         />
       )}
       {activeWorkspace === "recipes" && (
