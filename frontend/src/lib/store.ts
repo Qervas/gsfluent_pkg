@@ -64,6 +64,17 @@ type State = {
   // negative-z extent, hiding the grid behind opaque points).
   sceneFloor: number;
 
+  // Stage redesign: floating-panel collapse state. Persisted to
+  // localStorage so the user's last layout choice survives reload.
+  // Outliner / Properties each have two states (collapsed / expanded);
+  // Playback dock is auto-shown when a sequence is active and auto-
+  // hidden after camera idle (handled in the dock component, not stored).
+  panels: {
+    outliner: "expanded" | "collapsed";
+    properties: "expanded" | "collapsed";
+  };
+  setPanelCollapsed: (panel: "outliner" | "properties", collapsed: boolean) => void;
+
   // Active render path. "points" uses the lightweight Three.js Points
   // pipeline that streams over the websocket and supports per-frame
   // position updates (sim playback). "splat" loads the raw .ply via
@@ -108,6 +119,23 @@ type State = {
   setPointsCamera: (cam: State["pointsCamera"]) => void;
 };
 
+/** Read the persisted panel-collapse state from localStorage, defaulting
+ *  cleanly if missing / malformed. Both panels open by default — first-
+ *  time users see everything; collapse is a power-user move. */
+function loadPanels(): State["panels"] {
+  try {
+    const raw = localStorage.getItem("gsfluent.panels");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const valid = (v: unknown) => v === "expanded" || v === "collapsed";
+      if (valid(parsed?.outliner) && valid(parsed?.properties)) {
+        return parsed as State["panels"];
+      }
+    }
+  } catch { /* private mode / no storage */ }
+  return { outliner: "expanded", properties: "expanded" };
+}
+
 export const useStore = create<State>((set) => ({
   activeWorkspace: "sim",
   setActiveWorkspace: (w) => set({ activeWorkspace: w }),
@@ -137,6 +165,17 @@ export const useStore = create<State>((set) => ({
   sceneFloor: 0,
   renderMode: "points",
   pointsCamera: null,
+  panels: loadPanels(),
+
+  setPanelCollapsed: (panel, collapsed) =>
+    set((st) => {
+      const next = {
+        ...st.panels,
+        [panel]: collapsed ? "collapsed" : "expanded",
+      };
+      try { localStorage.setItem("gsfluent.panels", JSON.stringify(next)); } catch { /* private mode */ }
+      return { panels: next };
+    }),
 
   setActiveModel: (m) => set({ activeModel: m }),
   setActiveRecipe: (n, d) => set({ activeRecipeName: n, activeRecipeData: d }),
