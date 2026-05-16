@@ -42,3 +42,4 @@ frontend/dist/
 # committed — that's what makes installs reproducible.
 .venv/
 **/.venv/
+docs/viser_culling_issue.md

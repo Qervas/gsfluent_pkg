@@ -109,108 +109,154 @@ export function SequenceTree({
           (no sequences — run a sim on the server)
         </div>
       )}
-      {visible.map((s: SequenceItem) => {
-        const isActive = simRunName === s.name;
-        const isArmed = armed === s.name;
-        const sourceColor =
-          s.source === "import" ? "text-accent" : "text-text-muted";
-        const age = formatRelativeTime(s.created_at);
-        return (
-          <div
-            key={s.name}
-            className="group w-full flex items-center px-3 py-1 text-xs hover:bg-elevated"
-          >
+      <div className="space-y-1 px-1">
+        {visible.map((s: SequenceItem) => {
+          const isActive = simRunName === s.name;
+          const isArmed = armed === s.name;
+          const age = formatRelativeTime(s.created_at);
+          // Provenance is the killer metadata: model + recipe + age.
+          // model_ref comes straight from _meta.json (server writes it
+          // in runner._write_sequence_meta). When missing (imported
+          // sequences), we just show source.
+          const model = s.model_ref ?? null;
+          const recipeFromName = extractRecipeHint(s.name, model);
+          return (
             <button
+              key={s.name}
+              type="button"
               onClick={() => {
                 setArmed(null);
                 onPick(s.name);
               }}
               className={
-                "flex-1 text-left truncate " +
-                (isActive ? "text-accent" : "text-text-primary")
+                "group relative w-full text-left rounded-md p-2 " +
+                "transition-colors duration-fast " +
+                (isActive
+                  ? "bg-accent/10 ring-1 ring-accent/40"
+                  : "hover:bg-elevated/60")
               }
               title={
                 s.source_path
                   ? `${s.name}\nsource: ${s.source_path}`
                   : s.name
               }
+              aria-current={isActive ? "true" : undefined}
             >
-              <span className="truncate">{s.name}</span>
-            </button>
-            {s.is_broken && (
-              <span
-                className="shrink-0 text-warning mx-1"
-                title="source folder is missing — re-link or delete"
-              >
-                <AlertTriangle size={11} />
-              </span>
-            )}
-            <span
-              className={"shrink-0 text-[10px] mx-2 " + sourceColor}
-              title={s.source === "import" ? "imported folder" : "produced by a sim run"}
-            >
-              {s.source}
-            </span>
-            {/* Metadata badges: frame count + splat count + age.
-                Each column is shrink-0 so a long name truncates
-                instead of pushing the badges off-screen. */}
-            <span
-              className="shrink-0 text-[10px] text-text-muted mr-2 tabular-nums"
-              title={`${s.frame_count} frames at ${s.fps_hint} fps hint`}
-            >
-              {s.frame_count}f
-            </span>
-            {s.n_splats != null && (
-              <span
-                className="shrink-0 text-[10px] text-text-muted mr-2 tabular-nums"
-                title={`${s.n_splats.toLocaleString()} splats`}
-              >
-                {formatSplats(s.n_splats)}
-              </span>
-            )}
-            {age && (
-              <span
-                className="shrink-0 text-[10px] text-text-muted mr-2 tabular-nums"
-                title={s.created_at ?? ""}
-              >
-                {age}
-              </span>
-            )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                if (isArmed) {
-                  del.mutate(s.name);
-                } else {
-                  setArmed(s.name);
-                }
-              }}
-              disabled={del.isPending}
-              className={
-                "shrink-0 px-1 rounded transition-colors " +
-                (isArmed
-                  ? "text-error bg-error/10 hover:bg-error/20"
-                  : "text-text-muted opacity-0 group-hover:opacity-100 hover:text-error hover:bg-elevated")
-              }
-              title={
-                isArmed
-                  ? "Click again to confirm delete"
-                  : s.source === "import"
-                  ? "Remove the library entry (source folder is preserved)"
-                  : "Delete this sequence from disk"
-              }
-            >
-              {isArmed ? (
-                <span className="text-[10px] uppercase tracking-wider px-1">
-                  delete?
-                </span>
-              ) : (
-                <X size={11} />
+              {/* Active accent strip on the left edge. */}
+              {isActive && (
+                <span
+                  className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r bg-accent shadow-accent-glow-soft"
+                  aria-hidden
+                />
               )}
+
+              {/* Top row: name + broken indicator + delete */}
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={
+                    "flex-1 truncate text-xs font-medium " +
+                    (isActive ? "text-accent" : "text-text-primary")
+                  }
+                >
+                  {s.name}
+                </span>
+                {s.is_broken && (
+                  <AlertTriangle
+                    size={11}
+                    className="shrink-0 text-warning"
+                    aria-label="source folder is missing"
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (isArmed) {
+                      del.mutate(s.name);
+                    } else {
+                      setArmed(s.name);
+                    }
+                  }}
+                  disabled={del.isPending}
+                  className={
+                    "shrink-0 px-1 py-0.5 rounded transition-opacity duration-fast " +
+                    (isArmed
+                      ? "text-error bg-error/15 opacity-100"
+                      : "text-text-muted opacity-0 group-hover:opacity-100 hover:text-error hover:bg-error/10")
+                  }
+                  title={
+                    isArmed
+                      ? "Click again to confirm delete"
+                      : "Delete sequence"
+                  }
+                  aria-label="delete sequence"
+                >
+                  {isArmed ? (
+                    <span className="text-xxs uppercase tracking-wider px-1">
+                      delete?
+                    </span>
+                  ) : (
+                    <X size={11} />
+                  )}
+                </button>
+              </div>
+
+              {/* Bottom row: provenance badges. model · recipe · counts · age */}
+              <div className="flex items-center gap-1.5 mt-0.5 text-xxs text-text-muted font-mono tabular-nums">
+                {model && (
+                  <span
+                    className="truncate"
+                    title={`model: ${model}`}
+                  >
+                    {model}
+                  </span>
+                )}
+                {model && recipeFromName && <span aria-hidden>·</span>}
+                {recipeFromName && (
+                  <span
+                    className="truncate"
+                    title={`recipe (guessed from name): ${recipeFromName}`}
+                  >
+                    {recipeFromName}
+                  </span>
+                )}
+                <span className="ml-auto flex items-center gap-1.5 shrink-0">
+                  <span title={`${s.frame_count} frames at ${s.fps_hint} fps`}>
+                    {s.frame_count}f
+                  </span>
+                  {s.n_splats != null && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span title={`${s.n_splats.toLocaleString()} splats`}>
+                        {formatSplats(s.n_splats)}
+                      </span>
+                    </>
+                  )}
+                  {age && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span title={s.created_at ?? ""}>{age}</span>
+                    </>
+                  )}
+                </span>
+              </div>
             </button>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
+}
+
+/** Best-effort: pull the recipe name out of the sequence name. Sim
+ *  runs are named `<model>_<recipe>_<timestamp>` by the workbench;
+ *  imports use whatever the user chose. Returns null if we can't
+ *  identify a recipe segment confidently. */
+function extractRecipeHint(name: string, model: string | null): string | null {
+  if (!model) return null;
+  if (!name.startsWith(model + "_")) return null;
+  const rest = name.slice(model.length + 1);
+  // Drop the trailing timestamp segment (matches our YYYYMMDDTHHMMSS shape).
+  const stripped = rest.replace(/_\d{8,15}$/, "");
+  return stripped || null;
 }

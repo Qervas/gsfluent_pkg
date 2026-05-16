@@ -8,12 +8,14 @@ export function RecipeTree() {
     queryFn: api.recipes.list,
   });
   const activeRecipeName = useStore((s) => s.activeRecipeName);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
+  const loadActiveRecipe = useStore((s) => s.loadActiveRecipe);
 
   const onPick = async (name: string) => {
     try {
       const r = await api.recipes.get(name);
-      setActiveRecipe(r.name, r.data);
+      // Fresh-from-server load — use loadActiveRecipe so pristine
+      // snapshot resets and the dirty flag goes back to false.
+      loadActiveRecipe(r.name, r.data);
     } catch (e) {
       console.error("failed to load recipe", name, e);
     }

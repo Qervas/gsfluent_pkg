@@ -19,7 +19,7 @@ export function CommandPalette({
   const [open, setOpen] = useState(false);
   const activeModel = useStore((s) => s.activeModel);
   const activeRecipeName = useStore((s) => s.activeRecipeName);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
+  const loadActiveRecipe = useStore((s) => s.loadActiveRecipe);
   const qc = useQueryClient();
 
   // ⌘K / Ctrl-K toggles the palette. Owned here directly so the
@@ -40,7 +40,8 @@ export function CommandPalette({
   const onPickRecipe = async (name: string) => {
     try {
       const r = await api.recipes.get(name);
-      setActiveRecipe(r.name, r.data);
+      // Fresh-from-server load → resets dirty snapshot.
+      loadActiveRecipe(r.name, r.data);
     } catch (e) {
       console.error("failed to load recipe", e);
     }

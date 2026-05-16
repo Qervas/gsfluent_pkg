@@ -20,6 +20,10 @@ type State = {
   activeModel: ModelItem | null;
   activeRecipeName: string | null;
   activeRecipeData: Record<string, unknown> | null;
+  // Pristine snapshot of the loaded recipe (what the server has).
+  // Compared against `activeRecipeData` to compute the dirty flag the
+  // Properties panel surfaces. `null` when no recipe is loaded.
+  activeRecipePristine: Record<string, unknown> | null;
 
   // Sim status
   simState: SimState;
@@ -95,7 +99,18 @@ type State = {
 
   // Setters
   setActiveModel: (m: ModelItem | null) => void;
+  // Edit-style setter: panels call this to update individual fields.
+  // Touches activeRecipeData only — pristine snapshot is preserved so
+  // the dirty flag (data !== pristine) lights up.
   setActiveRecipe: (n: string | null, d: Record<string, unknown> | null) => void;
+  // Load-style setter: called when a fresh recipe is fetched from the
+  // server. Updates BOTH activeRecipeData and activeRecipePristine, so
+  // the dirty flag goes back to false even if the new data happens to
+  // equal the old.
+  loadActiveRecipe: (n: string | null, d: Record<string, unknown> | null) => void;
+  // Called after a successful Save — re-snapshots pristine = current
+  // data without changing activeRecipeData.
+  markRecipeClean: () => void;
   setSimState: (s: SimState) => void;
   appendLog: (line: string) => void;
   putFrame: (idx: number, xyz: Float32Array) => void;
@@ -142,6 +157,7 @@ export const useStore = create<State>((set) => ({
   activeModel: null,
   activeRecipeName: null,
   activeRecipeData: null,
+  activeRecipePristine: null,
   simState: "idle",
   simRunName: null,
   simNFrames: 0,
@@ -179,6 +195,22 @@ export const useStore = create<State>((set) => ({
 
   setActiveModel: (m) => set({ activeModel: m }),
   setActiveRecipe: (n, d) => set({ activeRecipeName: n, activeRecipeData: d }),
+  loadActiveRecipe: (n, d) =>
+    set({
+      activeRecipeName: n,
+      activeRecipeData: d,
+      // Clone via JSON round-trip so subsequent edits to activeRecipeData
+      // don't mutate the snapshot (panels do `{...data, key: v}` which
+      // is a shallow copy — nested mutation would silently flip dirty
+      // state).
+      activeRecipePristine: d ? JSON.parse(JSON.stringify(d)) : null,
+    }),
+  markRecipeClean: () =>
+    set((st) => ({
+      activeRecipePristine: st.activeRecipeData
+        ? JSON.parse(JSON.stringify(st.activeRecipeData))
+        : null,
+    })),
   setSimState: (s) => set({ simState: s }),
   appendLog: (line) =>
     set((st) => ({
