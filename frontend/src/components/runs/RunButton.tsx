@@ -30,6 +30,7 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simFirstFrameAt = useStore((s) => s.simFirstFrameAt);
   const resetForNewRun = useStore((s) => s.resetForNewRun);
+  const runBlockedByJson = useStore((s) => s.runBlockedByJson);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +56,7 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
     !!activeModel && !!activeRecipeName && !!activeRecipeData;
 
   const onRun = async () => {
-    if (!ready || simState === "running" || busy) return;
+    if (!ready || simState === "running" || busy || runBlockedByJson) return;
     setBusy(true);
     setError(null);
     try {
@@ -163,8 +164,12 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
       <button
         type="button"
         onClick={onRun}
-        disabled={busy}
-        title="Submit a sim run (200k particles)"
+        disabled={busy || runBlockedByJson}
+        title={
+          runBlockedByJson
+            ? "Recipe JSON has a parse error"
+            : "Submit a sim run (200k particles)"
+        }
         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
                    bg-gradient-to-br from-accent to-cyan-600 text-canvas
                    font-semibold text-xs shadow-accent-glow

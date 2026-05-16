@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { useOverrides } from "@/lib/use-overrides";
 import { Properties } from "@/components/properties/Properties";
+import { JsonEditor } from "@/components/properties/widgets/JsonEditor";
 import { RunButton } from "@/components/runs/RunButton";
 import type { RecipeListItem } from "@/lib/types";
 
@@ -113,11 +114,13 @@ export function SimulationCard({ subscribe }: Props) {
               Form
             </button>
             <button
-              disabled
-              className="flex-1 px-2 py-1 text-[10px] rounded text-text-muted/40 cursor-not-allowed"
-              title="JSON view ships in Phase 5"
+              onClick={() => setViewPersist("json")}
+              className={
+                "flex-1 px-2 py-1 text-[10px] rounded " +
+                (view === "json" ? "bg-accent/15 text-accent" : "text-text-muted")
+              }
             >
-              JSON (soon)
+              JSON
             </button>
           </div>
         </div>
@@ -129,7 +132,7 @@ export function SimulationCard({ subscribe }: Props) {
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-y-auto">
-          {view === "form" && <Properties />}
+          {view === "form" ? <Properties /> : <SimJsonBody />}
         </div>
       )}
 
@@ -137,5 +140,52 @@ export function SimulationCard({ subscribe }: Props) {
         <RunButton subscribe={subscribe} />
       </div>
     </div>
+  );
+}
+
+/** JSON body: edits the effective config. Diffing back to overrides is
+ *  handled by computing per-key diffs and dispatching setOverride or
+ *  clearOverride. Run button is disabled while a parse error is active.
+ *
+ *  Note on "key removed from JSON": we treat it as a no-op rather than
+ *  reverting to baseline. Aggressive interpretation would clear the
+ *  override; conservative interpretation leaves it untouched. The
+ *  conservative version is what's implemented: the user has to
+ *  explicitly type the baseline value (or use the Form's ⤺ button) to
+ *  revert. */
+function SimJsonBody() {
+  const baseline      = useStore((s) => s.simRecipeBaseline);
+  const setRunBlocked = useStore((s) => s.setRunBlockedByJson);
+  const { effective, setOverride, clearOverride } = useOverrides();
+
+  const onChange = (parsed: Record<string, unknown>) => {
+    if (!baseline) return;
+    // Diff parsed against baseline. For every key in parsed:
+    //   - different from baseline → setOverride
+    //   - equal to baseline       → clearOverride
+    // Keys missing from parsed are left alone (see SimJsonBody comment).
+    const allKeys = new Set([
+      ...Object.keys(baseline),
+      ...Object.keys(parsed),
+    ]);
+    for (const k of allKeys) {
+      const inParsed = Object.prototype.hasOwnProperty.call(parsed, k);
+      if (!inParsed) continue;
+      const a = JSON.stringify(parsed[k]);
+      const b = JSON.stringify(baseline[k]);
+      if (a !== b) setOverride(k, parsed[k]);
+      else clearOverride(k);
+    }
+  };
+
+  const onError = (msg: string | null) => setRunBlocked(!!msg);
+
+  return (
+    <JsonEditor
+      value={effective}
+      baseline={baseline}
+      onChange={onChange}
+      onError={onError}
+    />
   );
 }
