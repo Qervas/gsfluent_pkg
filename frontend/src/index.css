@@ -1,7 +1,41 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
+/* Variable fonts — bundled via @fontsource-variable so the SPA serves
+   them locally instead of round-tripping to Google. Both fonts ship as
+   single 'wght' variable files (~30–70 kB gz each) — one network round
+   trip for the whole weight range we use (400–700). */
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer components {
+  /* Glass-card surface — single token applied to every floating panel
+     (Outliner, Properties, Playback dock, future panels). Defined once
+     here so we never re-derive the blur / opacity / shadow values per
+     component. */
+  .glass-card {
+    @apply bg-elevated/85 backdrop-blur-md
+           border border-border/50
+           shadow-glass
+           rounded-xl;
+  }
+
+  /* Fallback for engines without `backdrop-filter` support (rare on
+     desktop, common on older webviews). Drops the transparency so the
+     card stays opaque rather than disappearing into the canvas. */
+  @supports not (backdrop-filter: blur(12px)) {
+    .glass-card {
+      background-color: theme("colors.elevated");
+    }
+  }
+
+  /* Topbar surface — thinner blur than cards, more transparent so the
+     viewport behind it stays readable. */
+  .glass-topbar {
+    @apply bg-canvas/60 backdrop-blur-sm border border-border/50;
+  }
+}
 
 html, body, #root {
   height: 100%;
@@ -9,4 +43,19 @@ html, body, #root {
 body {
   @apply bg-canvas text-text-primary font-sans;
   font-feature-settings: "tnum"; /* tabular figures globally */
+  /* Inter Variable supports the 'cv11' stylistic set (slashed zero) and
+     'ss03' (curved r). 'tnum' alone is enough for our use; the rest
+     would make every row repaint differently. */
+}
+
+/* Reduced-motion users: collapse every animation to a fast opacity-only
+   fade. Anything decorative (the run-button pulse, the empty-state
+   arrow bob) gets removed entirely. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 50ms !important;
+    scroll-behavior: auto !important;
+  }
 }
