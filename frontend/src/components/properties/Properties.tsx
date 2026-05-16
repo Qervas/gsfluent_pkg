@@ -36,12 +36,15 @@ export function Properties() {
     if (!name?.trim()) return;
     setSaving(true);
     setError(null);
+    // Snapshot the effective config at call-start so in-flight slider
+    // drags between save → load don't clobber what we're persisting.
+    const snapshot = JSON.parse(JSON.stringify(effective));
     try {
-      await api.recipes.save(name.trim(), effective, activeRecipeName);
+      await api.recipes.save(name.trim(), snapshot, activeRecipeName);
       qc.invalidateQueries({ queryKey: ["recipes"] });
       // Switch the active recipe to the new one. The new recipe IS
       // the effective config, so overrides clear naturally.
-      useStore.getState().loadActiveRecipe(name.trim(), effective);
+      useStore.getState().loadActiveRecipe(name.trim(), snapshot);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -49,8 +52,14 @@ export function Properties() {
     }
   };
 
+  // Confirm before bulk reset only when the user has accumulated
+  // enough overrides that an accidental click would lose real work.
+  // 3 is the threshold where "I might lose a tweak I forgot about"
+  // becomes plausible — below it the cost of undo is one drag.
+  const CONFIRM_RESET_THRESHOLD = 3;
+
   const onResetAll = () => {
-    if (overrideCount >= 3) {
+    if (overrideCount >= CONFIRM_RESET_THRESHOLD) {
       if (!confirm(`Reset ${overrideCount} overrides?`)) return;
     }
     clearAllOverrides();
@@ -75,7 +84,8 @@ export function Properties() {
               </button>
               <button
                 onClick={onResetAll}
-                className="text-[10px] text-warning hover:text-text-primary"
+                disabled={saving}
+                className="text-[10px] text-warning hover:text-text-primary disabled:opacity-50"
               >
                 Reset all
               </button>

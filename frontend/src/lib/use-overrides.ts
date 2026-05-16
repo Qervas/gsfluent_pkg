@@ -42,3 +42,20 @@ export function useOverrides() {
     clearAllOverrides: clearAll,
   };
 }
+
+/** Convenience wrapper for property panels: returns the merged effective
+ *  config as `data` plus a `setField(key, value)` that routes through
+ *  overrides. Returns `null` when no recipe is active so the caller can
+ *  early-return with one check. */
+export function usePanelData(): {
+  data: Record<string, unknown>;
+  setField: (key: string, value: unknown) => void;
+} | null {
+  const { effective, setOverride } = useOverrides();
+  const name = useStore((s) => s.activeRecipeName);
+  if (!name || !effective) return null;
+  return {
+    data: effective,
+    setField: (key, value) => setOverride(key, value),
+  };
+}
