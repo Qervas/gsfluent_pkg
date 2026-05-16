@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { useOverrides } from "@/lib/use-overrides";
 import { BoundaryRow } from "./BoundaryRow";
 
 type BC = { type: string; [k: string]: unknown };
@@ -11,21 +12,24 @@ export function BoundaryEditor() {
     queryKey: ["bc_schemas"],
     queryFn: api.schemas.boundaries,
   });
-  const data = useStore((s) => s.activeRecipeData);
+  const { effective, setOverride } = useOverrides();
   const name = useStore((s) => s.activeRecipeName);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
 
-  if (!data || !name) return null;
+  if (!name || !effective) return null;
   if (isLoading || !schemas) {
     return <div className="text-text-muted text-xs py-1">Loading BC schemas…</div>;
   }
+  // Local alias so the remaining `data.<key>` reads keep working.
+  const data = effective;
 
   const bcs: BC[] = Array.isArray(data.boundary_conditions)
     ? (data.boundary_conditions as BC[])
     : [];
 
+  // boundary_conditions is an array; override it as a single key so the
+  // engine's top-level merge stays simple.
   const setBcs = (next: BC[]) => {
-    setActiveRecipe(name, { ...data, boundary_conditions: next });
+    setOverride("boundary_conditions", next);
   };
 
   const addBC = () => {
