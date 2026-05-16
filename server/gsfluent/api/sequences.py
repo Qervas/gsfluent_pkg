@@ -12,7 +12,7 @@ in api/runs.py so the frontend WebSocket bootstrap (which hardcodes
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -186,6 +186,124 @@ def import_endpoint(req: ImportRequest):
             raise HTTPException(500, f"disk error during import: {msg}")
         raise HTTPException(500, f"import failed: {msg}")
 
+    return _sequence_dict(seq)
+
+
+@router.post("/upload-npz")
+async def upload_npz(
+    file: UploadFile = File(..., description="A pre-built .npz playback cache"),
+    name: str | None = Form(None, description="Sequence name (defaults to basename without .npz)"),
+):
+    """Accept a drag-dropped .npz from the workbench and register it as
+    a Sequence in the library — the laptop-local sibling of POST
+    /api/models/upload but for sequence playback caches instead of
+    .ply models. After this returns, the new sequence shows up in
+    /api/sequences and is mmap'd by viser_headless on its next /reload.
+
+    Validation strategy:
+      1. Magic-byte sniff (PK\\x03\\x04 = zip header used by .npz).
+      2. Stream the upload to a temp file under work/cache/viser/.
+      3. Open with np.load(mmap_mode="r") to verify shape — derives
+         frame_count from the first per-frame array's axis 0 and
+         n_splats from axis 1. Works for both v1 (cov) and v2 (quats)
+         schemas because both have `frames: (T, N, 3)`.
+      4. Atomic rename to <name>.npz, then write a stub _meta.json
+         under work/library/sequences/<name>/ so the outliner shows
+         the sequence with provenance.
+
+    Size cap: 8 GB (our largest production .npz is ~3 GB; doubled for
+    headroom). Upload streams to disk via UploadFile's spooled buffer
+    — never holds the whole file in process memory.
+    """
+    import shutil
+    import tempfile
+    import numpy as np
+
+    fname = file.filename or ""
+    if not fname.lower().endswith(".npz"):
+        raise HTTPException(422, "file must have a .npz extension")
+    seq_name = (name or fname[: -len(".npz")]).strip()
+    if not seq_name or "/" in seq_name or seq_name.startswith("."):
+        raise HTTPException(422, f"invalid sequence name: {seq_name!r}")
+
+    _VISER_CACHE.mkdir(parents=True, exist_ok=True)
+    final_path = _VISER_CACHE / f"{seq_name}.npz"
+
+    if Sequence.exists(seq_name) or final_path.exists():
+        raise HTTPException(
+            409,
+            f"sequence already exists: {seq_name}. "
+            f"Delete it first or upload under a different name.",
+        )
+
+    SIZE_CAP = 8 * 1024 * 1024 * 1024  # 8 GB
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=f"{seq_name}.", suffix=".npz.partial",
+        dir=str(_VISER_CACHE), delete=False,
+    )
+    try:
+        total = 0
+        while True:
+            chunk = await file.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > SIZE_CAP:
+                raise HTTPException(
+                    413, f"upload exceeds {SIZE_CAP // (1024**3)} GB cap",
+                )
+            tmp.write(chunk)
+        tmp.flush()
+        tmp.close()
+
+        with open(tmp.name, "rb") as f:
+            magic = f.read(4)
+        if magic != b"PK\x03\x04":
+            raise HTTPException(422, "file is not a valid .npz (zip header missing)")
+
+        # numpy defaults to refusing object arrays (allow_pickle defaults
+        # False since 1.16.4) — anything weird in the payload will raise
+        # below rather than execute.
+        try:
+            d = np.load(tmp.name, mmap_mode="r")
+            keys = set(d.files)
+            if "frames" not in keys:
+                raise HTTPException(422, "npz is missing the 'frames' array")
+            frames_shape = d["frames"].shape
+            if len(frames_shape) != 3 or frames_shape[2] != 3:
+                raise HTTPException(
+                    422,
+                    f"'frames' has shape {frames_shape}; expected (T, N, 3)",
+                )
+            frame_count = int(frames_shape[0])
+            n_splats = int(frames_shape[1])
+            del d
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(422, f"npz parse failed: {e}")
+
+        shutil.move(tmp.name, final_path)
+    except HTTPException:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    Sequence.write_meta(
+        name=seq_name,
+        source="import",
+        source_path=f"upload:{fname}",
+        model_ref=None,
+        frame_count=frame_count,
+        n_splats=n_splats,
+        coord_convention="z-up",
+        first_frame_full=True,
+    )
+    seq = Sequence.load(seq_name)
+    if seq is None:
+        raise HTTPException(500, "write_meta succeeded but Sequence.load returned None")
     return _sequence_dict(seq)
 
 

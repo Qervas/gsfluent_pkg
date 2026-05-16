@@ -137,6 +137,17 @@ export function SplatScene() {
     controls.target.copy(look);
     controls.update?.();
 
+    // Publish the auto-fit camera into pointsCamera even when the user
+    // hasn't orbited yet. Without this, the first Points→Splat toggle
+    // reads `pointsCamera === null`, skips the camera transfer, and viser
+    // falls back to its own (different) framing — producing a visible
+    // jump. Writing here means the toggle always has a real position to
+    // forward, so the two worlds align on first toggle.
+    useStore.getState().setPointsCamera({
+      position: [camPos.x, camPos.y, camPos.z],
+      target:   [look.x, look.y, look.z],
+    });
+
     // Bbox-derived point size: 0.4% of the diagonal. Scale-invariant — works
     // for a 30-unit-diag building or a 30,000-unit-diag city. Tuned so a
     // typical 200k-splat building reads as a continuous surface, not pixels.

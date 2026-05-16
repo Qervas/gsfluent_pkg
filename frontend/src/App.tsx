@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from "react";
+import { useEffect, useCallback, lazy, Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/layout/AppShell";
 import { FullWorkspaceShell } from "@/components/layout/FullWorkspaceShell";
@@ -6,7 +6,16 @@ import { Outliner } from "@/components/outliner/Outliner";
 import { Properties } from "@/components/properties/Properties";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
-import { RecipesWorkspace } from "@/workspaces/RecipesWorkspace";
+
+// Code-split the Recipes workspace — most sessions live in the Sim
+// workspace and never load this bundle. Saves ~40 KB gz from the
+// initial load (Properties + all material/solver/forces sub-panels
+// are only pulled in once the user switches tabs).
+const RecipesWorkspace = lazy(() =>
+  import("@/workspaces/RecipesWorkspace").then((m) => ({
+    default: m.RecipesWorkspace,
+  })),
+);
 import { useStreamClient } from "@/lib/use-stream";
 import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
@@ -131,7 +140,15 @@ export default function App() {
       )}
       {activeWorkspace === "recipes" && (
         <FullWorkspaceShell subscribe={subscribe}>
-          <RecipesWorkspace />
+          <Suspense
+            fallback={
+              <div className="h-full flex items-center justify-center text-text-muted text-sm">
+                Loading recipes…
+              </div>
+            }
+          >
+            <RecipesWorkspace />
+          </Suspense>
         </FullWorkspaceShell>
       )}
       <CommandPalette onRun={triggerRun} />

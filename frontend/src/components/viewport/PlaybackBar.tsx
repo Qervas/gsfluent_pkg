@@ -53,6 +53,67 @@ export function PlaybackBar() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [speedOpen]);
 
+  // Scoped keyboard layer — only active when the playback bar is on
+  // screen. The button `title`s advertise these shortcuts; this is the
+  // wiring. Skips when the user is in any editable element (palette
+  // input, recipe name prompt, etc.) so we don't fight text entry.
+  useEffect(() => {
+    if (!simRunName || frameCount < 2) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toUpperCase();
+      const editable =
+        tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+        t?.isContentEditable === true;
+      if (editable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          setPlaying(!playing);
+          break;
+        case "ArrowLeft":
+          e.preventDefault();
+          stepFrame(-1);
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          stepFrame(1);
+          break;
+        case "l":
+        case "L":
+          e.preventDefault();
+          setLoop(!loop);
+          break;
+        case ",": {
+          e.preventDefault();
+          const i = SPEED_X_VALUES.indexOf(speedX);
+          if (i > 0) setSpeedX(SPEED_X_VALUES[i - 1]);
+          break;
+        }
+        case ".": {
+          e.preventDefault();
+          const i = SPEED_X_VALUES.indexOf(speedX);
+          if (i < SPEED_X_VALUES.length - 1) setSpeedX(SPEED_X_VALUES[i + 1]);
+          break;
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    simRunName,
+    frameCount,
+    playing,
+    loop,
+    speedX,
+    setPlaying,
+    setLoop,
+    setSpeedX,
+    stepFrame,
+  ]);
+
   // Visibility gate: we need an active sequence with >= 2 frames. Hides
   // the bar for the single-frame static-model preview case (simRunName
   // is set but frameXyz.size === 1).

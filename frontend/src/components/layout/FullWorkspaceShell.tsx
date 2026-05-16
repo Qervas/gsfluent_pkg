@@ -1,11 +1,10 @@
 import { TopBar } from "./TopBar";
-import { StatusStrip } from "./StatusStrip";
+import { StatusPanel } from "./StatusPanel";
 
 /** Full-screen shell for non-Sim workspaces (Recipes). The Sim
  *  workspace uses AppShell directly with the Stage layout; this shell
- *  keeps the same TopBar + StatusStrip chrome but gives `children` the
- *  whole middle band. TopBar/StatusStrip are fixed-position so we just
- *  pad the content area to avoid them. */
+ *  keeps the same TopBar chrome and the floating StatusPanel, giving
+ *  `children` the whole middle band. */
 export function FullWorkspaceShell({
   subscribe,
   children,
@@ -17,11 +16,13 @@ export function FullWorkspaceShell({
     <div className="h-screen w-screen relative bg-canvas text-text-primary text-sm overflow-hidden">
       <TopBar subscribe={subscribe} />
       {/* Top: clear the 12 (top-3) + 48 (h-12 topbar) = 60 px chrome,
-          add 8 px gutter → 68 px. Bottom: clear the 32 px StatusStrip. */}
-      <div className="absolute inset-0 pt-[68px] pb-8 overflow-hidden">
+          add 8 px gutter → 68 px. Bottom margin is just the 12 px
+          gutter; the StatusPanel pill floats over content rather than
+          reserving its own row. */}
+      <div className="absolute inset-0 pt-[68px] pb-3 overflow-hidden">
         <div className="h-full">{children}</div>
       </div>
-      <StatusStrip />
+      <StatusPanel />
     </div>
   );
 }
