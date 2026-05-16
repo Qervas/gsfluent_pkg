@@ -35,6 +35,8 @@ export function ScientificInput({
   hint,
   markers,
   format,
+  baselineValue,
+  onRevert,
 }: {
   label: string;
   value: number;
@@ -49,8 +51,17 @@ export function ScientificInput({
   markers?: Marker[];
   /** Override the rendered value text. Defaults to compact-number formatting. */
   format?: (v: number) => string;
+  /** Baseline value from the recipe. When provided AND different from
+   *  `value`, the value text renders accent-colored and a ⤺ revert
+   *  button appears, calling `onRevert`. */
+  baselineValue?: number;
+  onRevert?: () => void;
 }) {
   const fmt = format ?? defaultFormat;
+  const isOverride =
+    baselineValue !== undefined &&
+    Number.isFinite(baselineValue) &&
+    Math.abs(value - baselineValue) > 1e-9;
   return (
     <div className="py-1.5 px-0.5">
       <div className="flex items-center gap-2 mb-1">
@@ -58,11 +69,27 @@ export function ScientificInput({
           <span className="truncate">{label}</span>
           <HelpIcon hint={hint} />
         </span>
-        <span className="font-mono text-[11px] text-text-primary tabular-nums">
+        <span
+          className={
+            "font-mono text-[11px] tabular-nums " +
+            (isOverride ? "text-accent" : "text-text-primary")
+          }
+        >
           {fmt(value)}
         </span>
         {unit && (
           <span className="font-mono text-[10px] text-text-muted">{unit}</span>
+        )}
+        {isOverride && onRevert && (
+          <button
+            type="button"
+            onClick={onRevert}
+            className="text-warning hover:text-text-primary text-[11px] cursor-pointer"
+            title={`Revert to recipe (${fmt(baselineValue!)})`}
+            aria-label="Revert to recipe baseline"
+          >
+            ⤺
+          </button>
         )}
       </div>
       {scale === "log" ? (
