@@ -48,7 +48,7 @@ export function StatusStrip() {
   if (mode.kind === "model_preview") {
     const n = staticAttrs?.n ?? 0;
     return (
-      <div className="h-8 border-t border-border px-3 flex items-center gap-3 text-xs text-text-muted shrink-0 font-mono relative">
+      <div className="fixed bottom-0 left-0 right-0 z-40 h-8 border-t border-border bg-canvas/80 backdrop-blur-sm px-3 flex items-center gap-3 text-xs text-text-muted font-mono">
         <span className={modeAccentClass(mode)}>●</span>
         <span className="capitalize">{modeLabel(mode)}</span>
         <span className="text-text-muted">·</span>
@@ -76,7 +76,7 @@ export function StatusStrip() {
     : "—";
 
   return (
-    <div className="h-8 border-t border-border px-3 flex items-center gap-3 text-xs text-text-muted shrink-0 font-mono relative">
+    <div className="fixed bottom-0 left-0 right-0 z-40 h-8 border-t border-border bg-canvas/80 backdrop-blur-sm px-3 flex items-center gap-3 text-xs text-text-muted font-mono">
       <span className={modeAccentClass(mode)}>●</span>
       <span className="capitalize w-32 truncate">{stage}</span>
       <div className="flex-1 max-w-md h-1 bg-elevated rounded overflow-hidden">
