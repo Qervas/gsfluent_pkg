@@ -220,15 +220,15 @@ export const useStore = create<State>((set) => ({
 
   setActiveModel: (m) => set({ activeModel: m }),
   setActiveRecipe: (n, d) => set({ activeRecipeName: n, activeRecipeData: d }),
-  loadActiveRecipe: (n, d) =>
+  loadActiveRecipe: (name, data) =>
     set({
-      activeRecipeName: n,
-      activeRecipeData: d,
-      // Clone via JSON round-trip so subsequent edits to activeRecipeData
-      // don't mutate the snapshot (panels do `{...data, key: v}` which
-      // is a shallow copy — nested mutation would silently flip dirty
-      // state).
-      activeRecipePristine: d ? JSON.parse(JSON.stringify(d)) : null,
+      activeRecipeName:     name,
+      activeRecipeData:     data,
+      activeRecipePristine: data ? JSON.parse(JSON.stringify(data)) : null,
+      // Snapshot the recipe as the sim baseline + clear any overrides
+      // from the previous recipe (they don't apply to a new baseline).
+      simRecipeBaseline:    data ? JSON.parse(JSON.stringify(data)) : null,
+      simOverrides:         {},
     }),
   markRecipeClean: () =>
     set((st) => ({
