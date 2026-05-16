@@ -2,7 +2,6 @@ import { useStore } from "@/lib/store";
 import { RunButton } from "@/components/runs/RunButton";
 import { StatusPill } from "@/components/layout/StatusPill";
 import { ChevronRight } from "lucide-react";
-import type { Workspace } from "@/lib/types";
 import { useRecipeDirty } from "@/lib/use-recipe-dirty";
 
 /** Unified top bar (Stage redesign Phase 2). One thin (h-12) row pinned
@@ -16,8 +15,6 @@ import { useRecipeDirty } from "@/lib/use-recipe-dirty";
  *  segment jumps focus to the matching panel (Phase 4 wires the focus
  *  jump; Phase 2 just shows the text). */
 export function TopBar({ subscribe }: { subscribe: (run_name: string) => void }) {
-  const activeWorkspace = useStore((s) => s.activeWorkspace);
-  const setActiveWorkspace = useStore((s) => s.setActiveWorkspace);
   const activeModel = useStore((s) => s.activeModel);
   const activeRecipeName = useStore((s) => s.activeRecipeName);
   const simRunName = useStore((s) => s.simRunName);
@@ -46,8 +43,14 @@ export function TopBar({ subscribe }: { subscribe: (run_name: string) => void })
         <span className="font-semibold tracking-tight">gsfluent</span>
       </div>
 
-      {/* Workspace chip group — replaces the old WorkspaceTabs strip */}
-      <WorkspaceChips active={activeWorkspace} onChange={setActiveWorkspace} />
+      <button
+        type="button"
+        onClick={() => useStore.getState().setRecipesModalOpen(true)}
+        className="px-2 py-1 rounded-md text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-elevated/60 flex items-center gap-1"
+        title="Open recipe library (⌘R)"
+      >
+        📚 Recipes
+      </button>
 
       {/* Breadcrumb — model / recipe / sequence. Clickable segments are
           wired in Phase 4; for now they're plain text. */}
@@ -68,47 +71,6 @@ export function TopBar({ subscribe }: { subscribe: (run_name: string) => void })
       <StatusPill />
       <RunButton subscribe={subscribe} />
     </header>
-  );
-}
-
-function WorkspaceChips({
-  active,
-  onChange,
-}: {
-  active: Workspace;
-  onChange: (w: Workspace) => void;
-}) {
-  const chips: { id: Workspace; label: string }[] = [
-    { id: "sim", label: "Sim" },
-    { id: "recipes", label: "Recipes" },
-  ];
-  return (
-    <div
-      role="tablist"
-      aria-label="Workspace"
-      className="flex items-center gap-1 p-1 bg-elevated/40 rounded-lg shrink-0"
-    >
-      {chips.map((c) => {
-        const isActive = active === c.id;
-        return (
-          <button
-            key={c.id}
-            type="button"
-            role="tab"
-            aria-selected={isActive}
-            onClick={() => onChange(c.id)}
-            className={
-              "px-3 py-1 rounded-md text-xs font-medium transition-colors duration-fast " +
-              (isActive
-                ? "bg-accent/15 text-accent"
-                : "text-text-secondary hover:text-text-primary hover:bg-elevated/60")
-            }
-          >
-            {c.label}
-          </button>
-        );
-      })}
-    </div>
   );
 }
 
