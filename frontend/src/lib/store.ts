@@ -25,6 +25,18 @@ type State = {
   // Properties panel surfaces. `null` when no recipe is loaded.
   activeRecipePristine: Record<string, unknown> | null;
 
+  // Sim override engine. `simRecipeBaseline` is a snapshot of the recipe
+  // as selected (server-authoritative). `simOverrides` is a sparse map of
+  // user edits; only keys the user touched live here. effective config is
+  // computed by useOverrides() as {...baseline, ...overrides}. Cleared on
+  // recipe switch, Reset all, Save as new, page reload.
+  simRecipeBaseline: Record<string, unknown> | null;
+  simOverrides:      Record<string, unknown>;
+  setSimRecipeBaseline: (data: Record<string, unknown> | null) => void;
+  setOverride:    (key: string, value: unknown) => void;
+  clearOverride:  (key: string) => void;
+  clearAllOverrides: () => void;
+
   // Sim status
   simState: SimState;
   simRunName: string | null;
@@ -158,6 +170,19 @@ export const useStore = create<State>((set) => ({
   activeRecipeName: null,
   activeRecipeData: null,
   activeRecipePristine: null,
+  simRecipeBaseline: null,
+  simOverrides:      {},
+  setSimRecipeBaseline: (data) =>
+    set({ simRecipeBaseline: data, simOverrides: {} }),
+  setOverride: (key, value) =>
+    set((s) => ({ simOverrides: { ...s.simOverrides, [key]: value } })),
+  clearOverride: (key) =>
+    set((s) => {
+      const next = { ...s.simOverrides };
+      delete next[key];
+      return { simOverrides: next };
+    }),
+  clearAllOverrides: () => set({ simOverrides: {} }),
   simState: "idle",
   simRunName: null,
   simNFrames: 0,
