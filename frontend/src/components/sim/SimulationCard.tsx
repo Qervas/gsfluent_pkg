@@ -6,7 +6,7 @@ import { useOverrides } from "@/lib/use-overrides";
 import { Properties } from "@/components/properties/Properties";
 import { JsonEditor } from "@/components/properties/widgets/JsonEditor";
 import { RunButton } from "@/components/runs/RunButton";
-import type { RecipeListItem } from "@/lib/types";
+import type { RecipeListItem, SequenceItem } from "@/lib/types";
 
 type Props = {
   subscribe: (run_name: string) => void;
@@ -23,6 +23,7 @@ type Props = {
 export function SimulationCard({ subscribe }: Props) {
   const activeModel       = useStore((s) => s.activeModel);
   const activeRecipeName  = useStore((s) => s.activeRecipeName);
+  const simRunName        = useStore((s) => s.simRunName);
   const loadActiveRecipe  = useStore((s) => s.loadActiveRecipe);
   const { overrideCount } = useOverrides();
   const [view, setView]   = useState<"form" | "json">(
@@ -34,10 +35,62 @@ export function SimulationCard({ subscribe }: Props) {
     queryFn: api.recipes.list,
   });
 
+  const isSequenceRun =
+    !!simRunName && !simRunName.startsWith("_model:");
+  const { data: sequences = [] } = useQuery({
+    queryKey: ["sequences"],
+    queryFn: api.sequences.list,
+  });
+  const seq = (sequences as SequenceItem[]).find((s) => s.name === simRunName);
+  const isOrphan = isSequenceRun && (!seq || seq.model_ref == null);
+  const isSequenceUnderModel = isSequenceRun && !isOrphan;
+  // SequenceItem doesn't currently declare recipe_source (backend-side
+  // change deferred per Phase 2 review); cast for read-only access.
+  const seqRecipeSource =
+    (seq as unknown as { recipe_source?: string })?.recipe_source;
+
   const setViewPersist = (v: "form" | "json") => {
     setView(v);
     localStorage.setItem("gsfluent.sim_view_mode", v);
   };
+
+  if (isOrphan) return null;
+
+  if (isSequenceUnderModel) {
+    return (
+      <div className="px-3 py-3 text-xs space-y-2">
+        <div className="text-text-muted text-[10px] uppercase tracking-wider">
+          ② Simulation (read-only)
+        </div>
+        <div className="text-text-secondary">
+          Based on recipe{" "}
+          <span className="font-mono text-accent">
+            {seqRecipeSource ?? "(unknown)"}
+          </span>
+        </div>
+        <div className="text-text-muted text-[10px]">
+          This is a finished sequence — params can't be edited.
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const m = useStore.getState().activeModel;
+            const rname = seqRecipeSource ?? null;
+            if (m && rname) {
+              useStore.getState().resetForNewRun(`_model:${m.name}`);
+              useStore.getState().setSimState("idle");
+              api.recipes.get(rname).then((r) =>
+                useStore.getState().loadActiveRecipe(r.name, r.data)
+              ).catch(() => {});
+            }
+          }}
+          className="mt-2 w-full px-3 py-1.5 bg-accent/15 text-accent rounded text-[11px] font-medium hover:bg-accent/25"
+        >
+          New run from this recipe…
+        </button>
+      </div>
+    );
+  }
 
   if (!activeModel) {
     return (
