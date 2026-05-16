@@ -3,6 +3,7 @@ import { RunButton } from "@/components/runs/RunButton";
 import { StatusPill } from "@/components/layout/StatusPill";
 import { ChevronRight } from "lucide-react";
 import type { Workspace } from "@/lib/types";
+import { useRecipeDirty } from "@/lib/use-recipe-dirty";
 
 /** Unified top bar (Stage redesign Phase 2). One thin (h-12) row pinned
  *  to the top of the viewport that holds everything the user needs to
@@ -20,6 +21,7 @@ export function TopBar({ subscribe }: { subscribe: (run_name: string) => void })
   const activeModel = useStore((s) => s.activeModel);
   const activeRecipeName = useStore((s) => s.activeRecipeName);
   const simRunName = useStore((s) => s.simRunName);
+  const recipeDirty = useRecipeDirty();
 
   // Breadcrumb segments. Skip the `_model:foo` synthetic name we use
   // for static model previews — those are the same as the activeModel
@@ -52,9 +54,13 @@ export function TopBar({ subscribe }: { subscribe: (run_name: string) => void })
       <Breadcrumb
         items={[
           activeModel?.name && { label: activeModel.name, kind: "model" as const },
-          activeRecipeName && { label: activeRecipeName.replace(/^★ /, ""), kind: "recipe" as const },
+          activeRecipeName && {
+            label: activeRecipeName.replace(/^★ /, "") + (recipeDirty ? " *" : ""),
+            kind: "recipe" as const,
+            dirty: recipeDirty,
+          },
           simSegment && { label: simSegment, kind: "sequence" as const },
-        ].filter(Boolean) as { label: string; kind: "model" | "recipe" | "sequence" }[]}
+        ].filter(Boolean) as Array<{ label: string; kind: "model" | "recipe" | "sequence"; dirty?: boolean }>}
       />
 
       <div className="flex-1" />
@@ -109,7 +115,7 @@ function WorkspaceChips({
 function Breadcrumb({
   items,
 }: {
-  items: { label: string; kind: "model" | "recipe" | "sequence" }[];
+  items: { label: string; kind: "model" | "recipe" | "sequence"; dirty?: boolean }[];
 }) {
   if (items.length === 0) {
     return (
@@ -137,9 +143,15 @@ function Breadcrumb({
               "truncate font-mono " +
               (it.kind === "sequence"
                 ? "text-accent"
+                : it.dirty
+                ? "text-warning"
                 : "text-text-secondary")
             }
-            title={`${it.kind}: ${it.label}`}
+            title={
+              it.dirty
+                ? `${it.kind}: ${it.label} (unsaved edits)`
+                : `${it.kind}: ${it.label}`
+            }
           >
             {it.label}
           </span>

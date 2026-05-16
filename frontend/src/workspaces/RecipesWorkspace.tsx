@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Trash2, Copy, Save, Upload } from "lucide-react";
+import { Trash2, Copy, Save, Upload, Undo2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Properties } from "@/components/properties/Properties";
 import { useStore } from "@/lib/store";
+import { useRecipeDirty } from "@/lib/use-recipe-dirty";
 
 /** Recipes workspace.
  *
@@ -23,7 +24,18 @@ export function RecipesWorkspace() {
 
   const activeRecipeName = useStore((s) => s.activeRecipeName);
   const activeRecipeData = useStore((s) => s.activeRecipeData);
-  const setActiveRecipe = useStore((s) => s.setActiveRecipe);
+  const activeRecipePristine = useStore((s) => s.activeRecipePristine);
+  const loadActiveRecipe = useStore((s) => s.loadActiveRecipe);
+  const markRecipeClean = useStore((s) => s.markRecipeClean);
+  const dirty = useRecipeDirty();
+
+  /** Revert any in-progress edits to the last loaded version. Re-uses
+   *  loadActiveRecipe with the pristine snapshot — the cleanest way to
+   *  reset both data and snapshot atomically. */
+  const onDiscard = () => {
+    if (!dirty || !activeRecipeName || !activeRecipePristine) return;
+    loadActiveRecipe(activeRecipeName, activeRecipePristine);
+  };
 
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -37,7 +49,7 @@ export function RecipesWorkspace() {
     setError(null);
     try {
       const r = await api.recipes.get(name);
-      setActiveRecipe(r.name, r.data);
+      loadActiveRecipe(r.name, r.data);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -49,7 +61,7 @@ export function RecipesWorkspace() {
     try {
       await api.recipes.delete(selected);
       qc.invalidateQueries({ queryKey: ["recipes"] });
-      setActiveRecipe(null, null);
+      loadActiveRecipe(null, null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -77,7 +89,7 @@ export function RecipesWorkspace() {
       await api.recipes.save(newName, activeRecipeData, provenance);
       await api.recipes.delete(selected);
       qc.invalidateQueries({ queryKey: ["recipes"] });
-      setActiveRecipe(newName, activeRecipeData);
+      loadActiveRecipe(newName, activeRecipeData);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -91,6 +103,8 @@ export function RecipesWorkspace() {
       const provenance = (activeRecipeData?._provenance as { based_on?: string } | undefined)?.based_on;
       await api.recipes.save(selected, activeRecipeData, provenance);
       qc.invalidateQueries({ queryKey: ["recipes"] });
+      // After-save: re-snapshot pristine so the dirty flag clears.
+      markRecipeClean();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -188,14 +202,34 @@ export function RecipesWorkspace() {
         ) : (
           <>
             <div className="flex items-center gap-2 px-4 py-2 border-b border-border shrink-0">
-              <span className="font-mono text-sm text-text-primary truncate">
+              <span className="font-mono text-sm text-text-primary truncate flex items-center gap-1.5">
                 {isUser ? "★ " : ""}
                 {selected}
+                {dirty && (
+                  <span
+                    className="text-warning text-xs ml-1"
+                    title="Unsaved edits"
+                    aria-label="unsaved edits"
+                  >
+                    *
+                  </span>
+                )}
               </span>
               <span className="text-text-muted text-xs shrink-0">
-                {isUser ? "user preset" : "built-in (read-only)"}
+                {isUser
+                  ? dirty ? "user preset · modified" : "user preset"
+                  : dirty ? "built-in · modified (Duplicate to save)" : "built-in (read-only)"}
               </span>
               <div className="ml-auto flex gap-2 shrink-0">
+                {dirty && (
+                  <Button
+                    variant="secondary"
+                    onClick={onDiscard}
+                    title="Revert to the last loaded version"
+                  >
+                    <Undo2 size={11} /> Discard
+                  </Button>
+                )}
                 <Button variant="secondary" onClick={onDuplicate}>
                   <Copy size={11} /> Duplicate
                 </Button>
@@ -204,7 +238,7 @@ export function RecipesWorkspace() {
                     <Button variant="secondary" onClick={onRename}>
                       Rename
                     </Button>
-                    <Button onClick={onSaveEdits} disabled={saving}>
+                    <Button onClick={onSaveEdits} disabled={saving || !dirty}>
                       <Save size={11} /> {saving ? "Saving…" : "Save edits"}
                     </Button>
                     <Button variant="destructive" onClick={onDelete}>
