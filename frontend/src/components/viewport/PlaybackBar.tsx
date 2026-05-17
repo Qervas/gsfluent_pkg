@@ -23,6 +23,7 @@ import { useStore, SPEED_X_VALUES, type SpeedX } from "@/lib/store";
 export function PlaybackBar() {
   const simRunName = useStore((s) => s.simRunName);
   const simState = useStore((s) => s.simState);
+  const simTotalFrames = useStore((s) => s.simTotalFrames);
   const frameCount = useStore((s) => s.frameXyz.size);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
@@ -58,7 +59,8 @@ export function PlaybackBar() {
   // wiring. Skips when the user is in any editable element (palette
   // input, recipe name prompt, etc.) so we don't fight text entry.
   useEffect(() => {
-    if (!simRunName || frameCount < 2) return;
+    const totalKnown = simTotalFrames > 0 ? simTotalFrames : frameCount;
+    if (!simRunName || (totalKnown < 2 && frameCount < 2)) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       const tag = t?.tagName?.toUpperCase();
@@ -104,6 +106,7 @@ export function PlaybackBar() {
     return () => window.removeEventListener("keydown", onKey);
   }, [
     simRunName,
+    simTotalFrames,
     frameCount,
     playing,
     loop,
@@ -114,13 +117,19 @@ export function PlaybackBar() {
     stepFrame,
   ]);
 
-  // Visibility gate: we need an active sequence with >= 2 frames. Hides
-  // the bar for the single-frame static-model preview case (simRunName
-  // is set but frameXyz.size === 1).
-  if (!simRunName || frameCount < 2) return null;
+  // Prefer the server-authoritative total so the scrubber spans the
+  // full range from the start of streaming. Fall back to the loaded
+  // count for orphan sequences with no metadata.
+  const totalFrames = simTotalFrames > 0 ? simTotalFrames : frameCount;
+  const loadedFrames = frameCount;          // how many frames have streamed in
+  const lastIdx = Math.max(totalFrames - 1, 0);
+
+  // Visibility gate: bar shows once we know the run has more than one
+  // frame — either from the server total or by loaded count. Hides the
+  // single-frame static-model preview (simRunName set + total=1).
+  if (!simRunName || (totalFrames < 2 && frameCount < 2)) return null;
 
   const isLive = simState === "running";
-  const last = frameCount - 1;
 
   const onScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = parseInt(e.target.value, 10);
@@ -170,28 +179,42 @@ export function PlaybackBar() {
         <SkipForward size={14} />
       </button>
 
-      {/* Scrubber */}
-      <input
-        type="range"
-        min={0}
-        max={last}
-        step={1}
-        value={currentFrameIdx}
-        onChange={onScrubChange}
-        onMouseDown={armScrub}
-        onMouseUp={releaseScrub}
-        onTouchStart={armScrub}
-        onTouchEnd={releaseScrub}
-        onBlur={releaseScrub}
-        className="playback-scrubber w-56 accent-accent"
-        aria-label="Frame scrubber"
-      />
+      {/* Scrubber with buffer overlay showing loaded fraction */}
+      <div className="relative w-56 flex items-center">
+        <div
+          className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-1 bg-elevated/60 rounded pointer-events-none overflow-hidden"
+          aria-hidden
+        >
+          {/* Loaded buffer — accent at low opacity, ends at the most-recent loaded frame */}
+          <div
+            className="h-full bg-accent/30"
+            style={{
+              width: `${totalFrames > 0 ? (loadedFrames / totalFrames) * 100 : 100}%`,
+            }}
+          />
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={lastIdx}
+          step={1}
+          value={currentFrameIdx}
+          onChange={onScrubChange}
+          onMouseDown={armScrub}
+          onMouseUp={releaseScrub}
+          onTouchStart={armScrub}
+          onTouchEnd={releaseScrub}
+          onBlur={releaseScrub}
+          className="playback-scrubber relative w-full accent-accent"
+          aria-label="Frame scrubber"
+        />
+      </div>
 
       {/* Frame counter */}
       <div className="font-mono text-[11px] tabular-nums text-text-secondary whitespace-nowrap">
         <span className="text-text-primary">{currentFrameIdx}</span>
         <span className="text-text-muted"> / </span>
-        <span>{last}</span>
+        <span>{lastIdx}</span>
         {isLive && (
           <span className="ml-1 text-accent">(sim running)</span>
         )}
