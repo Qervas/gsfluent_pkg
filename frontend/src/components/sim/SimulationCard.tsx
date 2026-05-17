@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { useActiveCell } from "@/lib/use-active-cell";
 import { useOverrides } from "@/lib/use-overrides";
 import { Properties } from "@/components/properties/Properties";
 import { JsonEditor } from "@/components/properties/widgets/JsonEditor";
@@ -23,7 +24,7 @@ type Props = Record<string, never>;
 export function SimulationCard(_: Props) {
   const activeModel       = useStore((s) => s.activeModel);
   const activeRecipeName  = useStore((s) => s.activeRecipeName);
-  const simRunName        = useStore((s) => s.simRunName);
+  const { isSequence, activeCell } = useActiveCell();
   const simState          = useStore((s) => s.simState);
   const loadActiveRecipe  = useStore((s) => s.loadActiveRecipe);
   const { overrideCount, clearAllOverrides } = useOverrides();
@@ -88,13 +89,12 @@ export function SimulationCard(_: Props) {
     queryFn: api.recipes.list,
   });
 
-  const isSequenceRun =
-    !!simRunName && !simRunName.startsWith("_model:");
+  const isSequenceRun = isSequence;
   const { data: sequences = [] } = useQuery({
     queryKey: ["sequences"],
     queryFn: api.sequences.list,
   });
-  const seq = (sequences as SequenceItem[]).find((s) => s.name === simRunName);
+  const seq = (sequences as SequenceItem[]).find((s) => s.name === activeCell?.name);
   const isOrphan = isSequenceRun && (!seq || seq.model_ref == null);
   const isSequenceUnderModel = isSequenceRun && !isOrphan;
   // SequenceItem doesn't currently declare recipe_source (backend-side
