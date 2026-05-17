@@ -170,7 +170,10 @@ def mmap_model_cell(ply_path: Path) -> dict:
     v = PlyData.read(str(ply_path)).elements[0]
 
     xyz = np.stack([v["x"], v["y"], v["z"]], axis=-1).astype(np.float32)
+    # viser's splat primitive requires opacity shape (N, 1), not (N,)
+    # — same convention sequence_to_viser_npz.py writes to .npz.
     opacity = 1.0 / (1.0 + np.exp(-np.asarray(v["opacity"]).astype(np.float32)))
+    opacity = opacity.reshape(-1, 1)
     scales = np.exp(np.stack(
         [v["scale_0"], v["scale_1"], v["scale_2"]], axis=-1,
     )).astype(np.float32)
@@ -329,6 +332,10 @@ def main() -> int:
                    help="Port for viser's HTTP+WS (where the iframe points)")
     p.add_argument("--control_port", type=int, default=8092,
                    help="Port for the headless control API (where React POSTs)")
+    p.add_argument("--server", default="http://localhost:8080",
+                   help="Backend base URL (where /api/models/file lives). "
+                        "Default: http://localhost:8080 (the SSH tunnel "
+                        "target run-client.sh sets up).")
     p.add_argument("--sync_status_file", type=Path, default=None,
                    help="Path to tools/sync_daemon.py's status JSON. Default: "
                         "$XDG_RUNTIME_DIR/gsfluent_sync_status.json (matches the "
@@ -366,6 +373,66 @@ def main() -> int:
     if not cells:
         print(f"ERROR: every .npz in {npz_root} was malformed")
         return 2
+
+    def resolve_cell_lazily(name: str) -> bool:
+        """If `name` is not yet a loaded cell, try to load it.
+
+        Resolution order:
+          1. model:<modelName>  → fetch via /api/models, then .ply, then mmap_model_cell
+          2. sequence:<seqName> → look for <seqName>.npz under npz_root
+          3. bare <name>        → try sequence first, then model (transition fallback)
+
+        Returns True if the cell is now in `cells`, False otherwise.
+        Updates `cells` in place. Idempotent — a re-call with an
+        already-loaded name is a no-op.
+        """
+        import urllib.request, json as _json
+        if name in cells:
+            return True
+
+        def _try_model(model_name: str) -> bool:
+            try:
+                with urllib.request.urlopen(
+                    f"{args.server.rstrip('/')}/api/models",
+                    timeout=10,
+                ) as r:
+                    listing = _json.loads(r.read())
+            except Exception as e:
+                print(f"  resolve {name}: failed to list models: {e}")
+                return False
+            entry = next((m for m in listing if m["name"] == model_name), None)
+            if entry is None:
+                return False
+            try:
+                local_ply = fetch_model_ply(args.server, entry["path"])
+            except Exception as e:
+                print(f"  resolve {name}: model fetch failed: {e}")
+                return False
+            try:
+                cells[name] = mmap_model_cell(local_ply)
+                print(f"  loaded model cell {name} (from {local_ply})")
+                return True
+            except Exception as e:
+                print(f"  resolve {name}: ply parse failed: {e}")
+                return False
+
+        def _try_sequence(seq_name: str) -> bool:
+            p = npz_root / f"{seq_name}.npz"
+            if not p.is_file():
+                return False
+            try:
+                cells[name] = mmap_cell(p)
+                print(f"  loaded sequence cell {name} from {p}")
+                return True
+            except Exception as e:
+                print(f"  resolve {name}: npz mmap failed: {e}")
+                return False
+
+        if name.startswith("model:"):
+            return _try_model(name[len("model:"):])
+        if name.startswith("sequence:"):
+            return _try_sequence(name[len("sequence:"):])
+        return _try_sequence(name) or _try_model(name)
 
     # --- viser scene -----------------------------------------------------
     server = viser.ViserServer(port=args.viser_port)
@@ -527,8 +594,11 @@ def main() -> int:
         with lock:
             if body.cell is not None:
                 if body.cell not in cells:
-                    return {"ok": False, "error": f"unknown cell: {body.cell}",
-                            "cells": list(cells)}
+                    # Try lazy resolution (model:/sequence: prefix, or
+                    # bare-name fallback during the transition phase).
+                    if not resolve_cell_lazily(body.cell):
+                        return {"ok": False, "error": f"unknown cell: {body.cell}",
+                                "cells": list(cells)}
                 if body.cell != state["cell"]:
                     state["cell"] = body.cell
                     state["scene_dirty"] = True   # grid + camera resize next tick
