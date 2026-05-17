@@ -177,6 +177,17 @@ def mmap_model_cell(ply_path: Path) -> dict:
     scales = np.exp(np.stack(
         [v["scale_0"], v["scale_1"], v["scale_2"]], axis=-1,
     )).astype(np.float32)
+    # fp16 cov floor: viser transports cov as fp16 over the websocket.
+    # Splats with any scale axis below sqrt(6.1e-5) ≈ 7.81e-3 produce
+    # cov-diagonal entries below fp16's normal floor → silently flushed
+    # to zero or culled at the renderer. ~68% of splats in a typical
+    # 3DGS scan hit this. Without the clamp, only the anisotropic
+    # outliers (whose covariance survives fp16) render — visually a
+    # field of vertical streaks instead of proper Gaussian blobs.
+    # 7.81e-3 world units is sub-pixel on any practical scene. Mirrors
+    # the clamp tools/sequence_to_viser_npz.py applies for sim outputs.
+    _FP16_COV_FLOOR_SQRT = np.float32(np.sqrt(6.1e-5))
+    np.maximum(scales, _FP16_COV_FLOOR_SQRT, out=scales)
     quats_raw = np.stack(
         [v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=-1,
     ).astype(np.float32)
