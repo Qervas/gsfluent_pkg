@@ -39,6 +39,14 @@ type State = {
 
   // Sim status
   simState: SimState;
+  /** Distinguishes how the current activity began. Set by call sites
+   *  that initiate (Run button, sequence click, model pick). Used by
+   *  StatusPanel to decide whether to show sim-progress UI ("sim") or
+   *  a quieter replay indicator ("replay") or nothing ("preview"/null).
+   *  The stream protocol doesn't carry this — server replays look
+   *  identical to live sim runs on the wire. */
+  simKind: "sim" | "replay" | "preview" | null;
+  setSimKind: (kind: "sim" | "replay" | "preview" | null) => void;
   simRunName: string | null;
   simNFrames: number;
   simTotalFrames: number;
@@ -197,6 +205,8 @@ export const useStore = create<State>((set) => ({
     }),
   clearAllOverrides: () => set({ simOverrides: {} }),
   simState: "idle",
+  simKind: null,
+  setSimKind: (kind) => set({ simKind: kind }),
   simRunName: null,
   simNFrames: 0,
   simTotalFrames: 150,

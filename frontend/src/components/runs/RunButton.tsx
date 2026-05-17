@@ -64,6 +64,7 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
       const baseName = activeRecipeName!.replace(/^★ /, "");
       const run_name = `${activeModel!.name}_${baseName}_${ts}`;
       resetForNewRun(run_name);
+      useStore.getState().setSimKind("sim");
       await api.runs.start({
         run_name,
         model_path: activeModel!.path,
