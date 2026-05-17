@@ -17,7 +17,7 @@ import { useActiveCell } from "@/lib/use-active-cell";
  *   └───────────────────────────────┘                   └─────────────────────┘
  *
  * Viser's built-in GUI is gone (viser_headless.py omits `server.gui.*` calls).
- * All controls live in the React UI: outliner picks `simRunName`, PlaybackBar
+ * All controls live in the React UI: outliner picks `activeCell`, PlaybackBar
  * advances `currentFrameIdx`, this component forwards both to viser.
  *
  * URLs are configurable via Vite env vars; defaults match the headless

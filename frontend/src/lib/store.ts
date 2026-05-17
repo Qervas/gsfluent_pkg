@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ModelItem, StaticAttrs, Workspace } from "./types";
+import type { ModelItem, Workspace } from "./types";
 
 type SimState = "idle" | "running" | "done" | "error" | "cancelled";
 
@@ -44,18 +44,10 @@ type State = {
 
   // Sim status
   simState: SimState;
-  /** Distinguishes how the current activity began. Set by call sites
-   *  that initiate (Run button, sequence click, model pick). Used by
-   *  StatusPanel to decide whether to show sim-progress UI ("sim") or
-   *  a quieter replay indicator ("replay") or nothing ("preview"/null).
-   *  The stream protocol doesn't carry this — server replays look
-   *  identical to live sim runs on the wire. */
-  simKind: "sim" | "replay" | "preview" | null;
-  setSimKind: (kind: "sim" | "replay" | "preview" | null) => void;
-  simRunName: string | null;
-  /** Replaces the simRunName-as-string overload. Encodes both what
-   *  kind of resource is loaded (model vs sequence) and its name,
-   *  with no prefix-shenanigans. Null when nothing is loaded. */
+  /** Canonical "what's loaded in the viewer". Encodes both the kind of
+   *  resource (model preview vs simulation sequence) and its name.
+   *  Null when nothing is loaded. Phase 4 promoted this to the sole
+   *  source of truth, dropping the legacy `simRunName` / `simKind` pair. */
   activeCell: { kind: "model" | "sequence"; name: string } | null;
   setActiveCell: (cell: { kind: "model" | "sequence"; name: string } | null) => void;
   simNFrames: number;
@@ -71,9 +63,9 @@ type State = {
   // also produce no output for minutes at a stretch.
   simLastLogAt: number | null;
 
-  // Frames
-  staticAttrs: StaticAttrs | null;
-  frameXyz: Map<number, Float32Array>;
+  // Playback cursor — viser owns the actual frame buffer; this is just
+  // the canonical scrubber index. ViserSplatScene forwards each change
+  // to viser's /set endpoint.
   currentFrameIdx: number;
   playing: boolean;
 
@@ -87,15 +79,14 @@ type State = {
   fpsHint: number;
   scrubbing: boolean;
 
-  // Scene scale — diag of the active model's bbox. Used by the Grid + camera
-  // far/fade so they follow the model whether it lives at world (3, 3, 3) or
-  // (3460, 29045, 5). Set by SplatScene's auto-fit effect.
+  // Scene scale — diag of the active model's bbox. Phase 1 used this to
+  // size the three.js grid + camera fade; viser owns its own camera fit
+  // now, so these fields are vestigial but cheap to keep around in case
+  // a future overlay needs world-scale info.
   sceneScale: number;
   sceneCenter: [number, number, number];
   // World-Z of the bbox bottom — the "floor" that the model sits on.
-  // Grid is positioned here so it sits underneath the model rather than
-  // bisecting it at z=0 (which would be inside the model for anything with
-  // negative-z extent, hiding the grid behind opaque points).
+  // Vestigial alongside sceneScale; kept for the same reason.
   sceneFloor: number;
 
   // Stage redesign: floating-panel collapse state. Persisted to
@@ -122,17 +113,6 @@ type State = {
   showToast: (message: string, kind?: "info" | "success" | "error") => void;
   clearToast: () => void;
 
-  // Last-known Points-mode camera state. Written continuously by
-  // SplatScene as the user orbits, read by Viewport.tsx's mode-toggle
-  // effect so the Splats iframe gets POSTed the same viewpoint. Null
-  // until the user has interacted with the Points-mode controls at
-  // least once (initial auto-fit doesn't count — we want the user's
-  // chosen view to carry over, not the auto-framed one).
-  pointsCamera: {
-    position: [number, number, number];
-    target:   [number, number, number];
-  } | null;
-
   // Setters
   setActiveModel: (m: ModelItem | null) => void;
   // Edit-style setter: panels call this to update individual fields.
@@ -149,8 +129,6 @@ type State = {
   markRecipeClean: () => void;
   setSimState: (s: SimState) => void;
   appendLog: (line: string) => void;
-  putFrame: (idx: number, xyz: Float32Array) => void;
-  setStaticAttrs: (a: StaticAttrs) => void;
   setCurrentFrame: (i: number) => void;
   setPlaying: (p: boolean) => void;
   setSceneScale: (diag: number, center: [number, number, number]) => void;
@@ -161,12 +139,10 @@ type State = {
   setFpsHint: (fps: number) => void;
   setScrubbing: (b: boolean) => void;
   // Step the current frame by `delta` (positive or negative). Clamped to
-  // [0, frameXyz.size - 1] so we don't run off either end. `frameXyz.size`
-  // is the truth-source for the upper bound — for a live sim it grows as
-  // frames land, so this clamp tracks production naturally.
+  // [0, viserState.n_frames - 1] so we don't run off either end —
+  // viser is the truth-source for frame availability.
   stepFrame: (delta: number) => void;
   resetForNewRun: (name: string) => void;
-  setPointsCamera: (cam: State["pointsCamera"]) => void;
 };
 
 /** Read the persisted panel-collapse state from localStorage, defaulting
@@ -209,9 +185,6 @@ export const useStore = create<State>((set) => ({
     }),
   clearAllOverrides: () => set({ simOverrides: {} }),
   simState: "idle",
-  simKind: null,
-  setSimKind: (kind) => set({ simKind: kind }),
-  simRunName: null,
   activeCell: null,
   setActiveCell: (cell) => set({ activeCell: cell }),
   simNFrames: 0,
@@ -222,8 +195,6 @@ export const useStore = create<State>((set) => ({
   simStartedAt: null,
   simFirstFrameAt: null,
   simLastLogAt: null,
-  staticAttrs: null,
-  frameXyz: new Map(),
   currentFrameIdx: 0,
   playing: true,
   speedX: 1,
@@ -233,7 +204,6 @@ export const useStore = create<State>((set) => ({
   sceneScale: 10,
   sceneCenter: [0, 0, 0],
   sceneFloor: 0,
-  pointsCamera: null,
   panels: loadPanels(),
 
   recipesModalOpen: false,
@@ -280,20 +250,6 @@ export const useStore = create<State>((set) => ({
       simLog: [...st.simLog.slice(-1999), line],
       simLastLogAt: Date.now(),
     })),
-  putFrame: (idx, xyz) =>
-    set((st) => {
-      const m = new Map(st.frameXyz);
-      m.set(idx, xyz);
-      return {
-        frameXyz: m,
-        simNFrames: m.size,
-        simFirstFrameAt: st.simFirstFrameAt ?? Date.now(),
-      };
-    }),
-  // Clearing pointsCamera here means a new model load triggers a fresh
-  // auto-fit in SplatScene instead of reusing a viewpoint from the
-  // previously-loaded scene (which would likely be off-scale).
-  setStaticAttrs: (a) => set({ staticAttrs: a, pointsCamera: null }),
   setCurrentFrame: (i) => set({ currentFrameIdx: i }),
   setPlaying: (p) => set({ playing: p }),
   setSceneScale: (diag, center) => set({ sceneScale: diag, sceneCenter: center }),
@@ -304,19 +260,15 @@ export const useStore = create<State>((set) => ({
   setScrubbing: (b) => set({ scrubbing: b }),
   stepFrame: (delta) =>
     set((st) => {
-      const upper = Math.max(0, st.frameXyz.size - 1);
+      const upper = Math.max(0, st.viserState.n_frames - 1);
       const next = Math.min(upper, Math.max(0, st.currentFrameIdx + delta));
       return { currentFrameIdx: next };
     }),
-  setPointsCamera: (cam) => set({ pointsCamera: cam }),
-  resetForNewRun: (name) =>
+  resetForNewRun: (_name) =>
     set({
-      simRunName: name,
       simState: "running",
       simNFrames: 0,
       simLog: [],
-      staticAttrs: null,
-      frameXyz: new Map(),
       currentFrameIdx: 0,
       simStage: "starting",
       simStartedAt: Date.now(),

@@ -71,7 +71,6 @@ export default function App() {
       useStore.getState().setActiveCell({ kind: "model", name: m.name });
       resetForNewRun(m.name);
       setSimState("idle");
-      useStore.getState().setSimKind("preview");
     },
     [resetForNewRun, setActiveModel, setSimState],
   );
@@ -88,14 +87,12 @@ export default function App() {
     useStore.getState().setActiveCell({ kind: "model", name: activeModel.name });
     resetForNewRun(activeModel.name);
     setSimState("idle");
-    useStore.getState().setSimKind("preview");
   }, [activeModel, resetForNewRun, setSimState]);
 
   const onLoadRun = useCallback(
     (run_name: string) => {
       resetForNewRun(run_name);
       useStore.getState().setActiveCell({ kind: "sequence", name: run_name });
-      useStore.getState().setSimKind("replay");
     },
     [resetForNewRun],
   );
@@ -117,7 +114,6 @@ export default function App() {
     const run_name = `${st.activeModel.name}_${baseName}_${ts}`;
     st.resetForNewRun(run_name);
     st.setActiveCell({ kind: "sequence", name: run_name });
-    useStore.getState().setSimKind("sim");
     try {
       await api.runs.start({
         run_name,

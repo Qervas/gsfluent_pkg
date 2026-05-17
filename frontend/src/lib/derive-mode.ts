@@ -4,19 +4,27 @@ export type WorkbenchMode =
   | { kind: "sim_running"; runName: string }
   | { kind: "sim_replay"; runName: string };
 
+type ActiveCellArg = { kind: "model" | "sequence"; name: string } | null;
+
+/** Derive the workbench display mode from the active cell + sim state.
+ *  Phase 4 dropped the legacy `simRunName` (with its `_model:` prefix
+ *  hack) in favor of the typed `activeCell`; this function now consumes
+ *  the cell directly. */
 export function deriveMode(
   simState: string,
-  simRunName: string | null,
-  frameCount: number,
+  activeCell: ActiveCellArg,
+  nFrames: number,
 ): WorkbenchMode {
-  if (simRunName && simRunName.startsWith("_model:")) {
-    return { kind: "model_preview", modelName: simRunName.slice("_model:".length) };
+  if (!activeCell) return { kind: "idle" };
+  if (activeCell.kind === "model") {
+    return { kind: "model_preview", modelName: activeCell.name };
   }
-  if (simState === "running" && simRunName) {
-    return { kind: "sim_running", runName: simRunName };
+  // activeCell.kind === "sequence"
+  if (simState === "running") {
+    return { kind: "sim_running", runName: activeCell.name };
   }
-  if (simRunName && frameCount > 1 && (simState === "done" || simState === "idle")) {
-    return { kind: "sim_replay", runName: simRunName };
+  if (nFrames > 1 && (simState === "done" || simState === "idle")) {
+    return { kind: "sim_replay", runName: activeCell.name };
   }
   return { kind: "idle" };
 }

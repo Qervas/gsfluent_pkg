@@ -130,7 +130,8 @@ export function SimulationCard(_: Props) {
             const m = useStore.getState().activeModel;
             const rname = seqRecipeSource ?? null;
             if (m && rname) {
-              useStore.getState().resetForNewRun(`_model:${m.name}`);
+              useStore.getState().resetForNewRun(m.name);
+              useStore.getState().setActiveCell({ kind: "model", name: m.name });
               useStore.getState().setSimState("idle");
               api.recipes.get(rname).then((r) =>
                 useStore.getState().loadActiveRecipe(r.name, r.data)
@@ -258,9 +259,9 @@ export function SimulationCard(_: Props) {
           <span>Run finished</span>
           <button
             onClick={() => {
-              const lastSeq = useStore.getState().simRunName;
-              if (lastSeq) {
-                useStore.getState().resetForNewRun(lastSeq);
+              const cell = useStore.getState().activeCell;
+              if (cell?.kind === "sequence") {
+                useStore.getState().resetForNewRun(cell.name);
                 useStore.getState().setSimState("done");
               }
               setShowFinishedToast(false);

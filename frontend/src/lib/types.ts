@@ -61,16 +61,6 @@ export type SequenceItem = {
   };
 };
 
-export type StaticAttrs = {
-  n: number;
-  R: Float32Array;       // (n, 3, 3)
-  scales: Float32Array;  // (n, 3)
-  rgb: Float32Array;     // (n, 3) in [0,1]
-  opacity: Float32Array; // (n,)
-};
-
-export type FrameMeta = { run_name: string; frame_idx: number; n: number };
-
 export type BCFieldSpec = {
   name: string;
   type: "vec3" | "float" | "string";
