@@ -19,13 +19,13 @@ import { useOverrides } from "@/lib/use-overrides";
  *  next to each other. The user always looks at the button to know
  *  what's happening.
  */
-export function RunButton({ subscribe }: { subscribe: (run_name: string) => void }) {
+export function RunButton() {
   const activeModel = useStore((s) => s.activeModel);
   const activeRecipeName = useStore((s) => s.activeRecipeName);
   const activeRecipeData = useStore((s) => s.activeRecipeData);
   const { effective } = useOverrides();
   const simState = useStore((s) => s.simState);
-  const simRunName = useStore((s) => s.simRunName);
+  const activeCell = useStore((s) => s.activeCell);
   const simNFrames = useStore((s) => s.simNFrames);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simFirstFrameAt = useStore((s) => s.simFirstFrameAt);
@@ -100,7 +100,6 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
         recipe_source: activeRecipeName!,
         particles: 200_000,
       });
-      subscribe(run_name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -109,11 +108,13 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
   };
 
   const onCancel = async () => {
-    if (!simRunName) return;
+    const runName =
+      activeCell?.kind === "sequence" ? activeCell.name : null;
+    if (!runName) return;
     setBusy(true);
     try {
       const all = await api.runs.list();
-      const r = all.find((x) => x.name === simRunName);
+      const r = all.find((x) => x.name === runName);
       if (r) await api.runs.cancel(r.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
