@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { useActiveCell } from "@/lib/use-active-cell";
 import type { ModelItem, SequenceItem } from "@/lib/types";
 
 const TREE_STATE_KEY = "gsfluent.source_tree_open";
@@ -44,7 +45,7 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
   });
 
   const activeModel = useStore((s) => s.activeModel);
-  const simRunName  = useStore((s) => s.simRunName);
+  const { activeCell } = useActiveCell();
 
   const [open, setOpen] = useState<Record<string, boolean>>(() => loadTreeState());
   useEffect(() => { persistTreeState(open); }, [open]);
@@ -166,7 +167,7 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
                         key={s.name}
                         className={
                           "group flex items-center gap-1 py-1 hover:bg-elevated rounded " +
-                          (simRunName === s.name ? "text-accent" : "text-text-secondary")
+                          (activeCell?.kind === "sequence" && activeCell.name === s.name ? "text-accent" : "text-text-secondary")
                         }
                       >
                         <button
@@ -224,7 +225,7 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
               key={s.name}
               className={
                 "group flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
-                (simRunName === s.name ? "text-accent" : "text-text-secondary")
+                (activeCell?.kind === "sequence" && activeCell.name === s.name ? "text-accent" : "text-text-secondary")
               }
             >
               <button
