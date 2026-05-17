@@ -5,6 +5,44 @@ import { useStore } from "@/lib/store";
 
 type DragKind = "ply" | "npz" | "mixed" | "unknown";
 
+// SubtleCrypto SHA-256 of a File. Hex-encoded to match the server's
+// hashlib.sha256(content).hexdigest() format so /api/models/check_hash
+// can compare directly without normalization.
+async function sha256OfFile(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Compact byte formatter for the progress overlay. We always show one
+// fractional digit above 1KB to keep the column width stable as the
+// counter ticks up — nicer than the staircase you'd get with Math.round.
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function safeToast(message: string, kind: "info" | "success" | "error") {
+  // The toast slice was added in a previous phase; older builds (and
+  // tests with a stubbed store) may not have it. Degrade to console
+  // instead of crashing the whole upload flow over a missing helper.
+  try {
+    const t = useStore.getState().showToast;
+    if (typeof t === "function") {
+      t(message, kind);
+      return;
+    }
+  } catch {
+    // fall through
+  }
+  // eslint-disable-next-line no-console
+  console.log(`[toast:${kind}] ${message}`);
+}
+
 /**
  * Window-level drag-drop overlay for both model and sequence uploads.
  *
@@ -24,6 +62,13 @@ export function DropZone() {
   const [dragKind, setDragKind] = useState<DragKind>("unknown");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | "ply" | "npz">(null);
+  // Live transport progress for the .ply upload path (post-dedup).
+  // Stays null while hashing/dedup-checking and during the npz path —
+  // those phases produce no bytes-on-the-wire signal so the overlay
+  // simply shows the spinning "Uploading…" line without a bar.
+  const [progress, setProgress] = useState<
+    { loaded: number; total: number } | null
+  >(null);
   // Persistent Y-up toggle that applies to .ply uploads. Drag-drop
   // fires straight into the upload mutation with no chance for the
   // user to click an option mid-drop, so the toggle has to be set
@@ -131,10 +176,35 @@ export function DropZone() {
       const ply = files.find((f) => f.name.toLowerCase().endsWith(".ply"))!;
       const cam = files.find((f) => f.name.toLowerCase() === "cameras.json");
       setBusy("ply");
+      setProgress(null);
       try {
-        const m = await api.models.upload(ply, cam, convertYUpRef.current);
+        // 1) Hash the file client-side and ask the server if it
+        //    already has it. Skips a potentially-multi-GB transport
+        //    on identical re-drops (common when iterating on recipes
+        //    against the same scene).
+        const hash = await sha256OfFile(ply);
+        const check = await api.models.checkHash(hash, ply.name);
+        if (check.exists && check.name) {
+          // Cache hit: pull the full ModelItem off the listing so the
+          // active-model state has every field downstream code reads.
+          // Falls back to a synthesized record if list/find races.
+          const all = await api.models.list();
+          const existing = all.find((mm) => mm.name === check.name);
+          if (existing) {
+            setActiveModel(existing);
+            qc.invalidateQueries({ queryKey: ["models"] });
+            safeToast(`Already in library — using ${check.name}`, "info");
+            return; // skip upload entirely
+          }
+        }
+
+        // 2) Cache miss: gzip + XHR upload with live progress.
+        const m = await api.models.upload(ply, cam, convertYUpRef.current, {
+          onProgress: (loaded, total) => setProgress({ loaded, total }),
+        });
         setActiveModel(m);
         qc.invalidateQueries({ queryKey: ["models"] });
+        safeToast(`Uploaded ${m.name}`, "success");
       } catch (err) {
         setError(
           `model upload failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -142,6 +212,7 @@ export function DropZone() {
         setTimeout(() => setError(null), 6000);
       } finally {
         setBusy(null);
+        setProgress(null);
       }
     };
 
@@ -192,8 +263,32 @@ export function DropZone() {
       )}
       {busy && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="glass-card px-4 py-2 text-text-secondary text-xs">
-            Uploading {busy === "ply" ? "model" : "sequence"}…
+          <div className="glass-card px-4 py-3 text-text-secondary text-xs min-w-[280px]">
+            <div className="flex items-center gap-2">
+              <span className="text-text-primary">
+                Uploading {busy === "ply" ? "model" : "sequence"}…
+              </span>
+              {progress && progress.total > 0 && (
+                <span className="ml-auto font-mono text-[10px] tabular-nums">
+                  {Math.round((progress.loaded / progress.total) * 100)}%
+                </span>
+              )}
+            </div>
+            {progress && progress.total > 0 && (
+              <>
+                <div className="mt-2 h-1 bg-elevated rounded overflow-hidden">
+                  <div
+                    className="h-full bg-accent transition-[width] duration-fast"
+                    style={{
+                      width: `${(progress.loaded / progress.total) * 100}%`,
+                    }}
+                  />
+                </div>
+                <div className="mt-1 text-[10px] text-text-muted font-mono">
+                  {fmtBytes(progress.loaded)} / {fmtBytes(progress.total)}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
