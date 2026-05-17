@@ -51,6 +51,10 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path, convert_y_up: !!convertYUp }),
       }).then(j<ModelItem>),
+    delete: (n: string) =>
+      fetch(`/api/models/${encodeURIComponent(n)}`, { method: "DELETE" }).then(
+        j<{ deleted: string }>,
+      ),
   },
   runs: {
     list:    () => fetch("/api/runs").then(j<RunStatus[]>),
