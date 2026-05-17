@@ -5,6 +5,7 @@ import { DoubleSide } from "three";
 import type * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { useStore } from "@/lib/store";
+import { useActiveCell } from "@/lib/use-active-cell";
 import { SplatScene } from "./SplatScene";
 import { ViserSplatScene } from "./ViserSplatScene";
 import { EmptyState } from "./EmptyState";
@@ -43,16 +44,12 @@ export function Viewport() {
   const sceneCenter = useStore((s) => s.sceneCenter);
   const sceneFloor = useStore((s) => s.sceneFloor);
   const renderMode = useStore((s) => s.renderMode);
-  const simRunName = useStore((s) => s.simRunName);
+  const { activeCell } = useActiveCell();
   // Splat mode is available for both static model preview AND sim run
   // playback. Static models bootstrap from /api/models/file/...; sim runs
-  // come from /api/runs/<name>/frame/0.ply. In Phase 2 this mounts the
-  // ViserSplatScene iframe; in Phase 1 it's a placeholder.
-  const isModelPreview =
-    typeof simRunName === "string" && simRunName.startsWith("_model:");
-  const isSimRun =
-    typeof simRunName === "string" && simRunName.length > 0 && !isModelPreview;
-  const splatAvailable = isModelPreview || isSimRun;
+  // come from /api/runs/<name>/frame/0.ply. Viser handles both kinds
+  // behind the same control API now, so any non-null cell is splat-eligible.
+  const splatAvailable = !!activeCell;
   const effectiveMode = splatAvailable && renderMode === "splat" ? "splat" : "points";
 
   // Scale the grid + fade to the active model. Without this, models living
