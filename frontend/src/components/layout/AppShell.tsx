@@ -26,10 +26,9 @@ type Props = {
   sourceCard: React.ReactNode;
   simCard:    React.ReactNode;
   viewport:   React.ReactNode;
-  subscribe:  (run_name: string) => void;
 };
 
-export function AppShell({ sourceCard, simCard, viewport, subscribe }: Props) {
+export function AppShell({ sourceCard, simCard, viewport }: Props) {
   const panels = useStore((s) => s.panels);
   const setPanelCollapsed = useStore((s) => s.setPanelCollapsed);
   const simState = useStore((s) => s.simState);
@@ -150,7 +149,7 @@ export function AppShell({ sourceCard, simCard, viewport, subscribe }: Props) {
       </main>
 
       {/* Top bar — z-30, fixed */}
-      <TopBar subscribe={subscribe} />
+      <TopBar />
 
       {/* Left rail — single glass card containing SourceCard above and
           SimulationCard below. Properties has moved into SimulationCard;

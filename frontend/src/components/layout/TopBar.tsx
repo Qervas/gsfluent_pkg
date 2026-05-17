@@ -14,17 +14,17 @@ import { useRecipeDirty } from "@/lib/use-recipe-dirty";
  *  surfaces the current model/recipe/sequence selection — clicking a
  *  segment jumps focus to the matching panel (Phase 4 wires the focus
  *  jump; Phase 2 just shows the text). */
-export function TopBar({ subscribe }: { subscribe: (run_name: string) => void }) {
+export function TopBar() {
   const activeModel = useStore((s) => s.activeModel);
   const activeRecipeName = useStore((s) => s.activeRecipeName);
-  const simRunName = useStore((s) => s.simRunName);
+  const activeCell = useStore((s) => s.activeCell);
   const recipeDirty = useRecipeDirty();
 
-  // Breadcrumb segments. Skip the `_model:foo` synthetic name we use
-  // for static model previews — those are the same as the activeModel
-  // segment, no point showing twice.
+  // Breadcrumb sequence segment is the active cell's name only when it
+  // is a sequence — static model previews already surface via the
+  // model segment, no point showing twice.
   const simSegment =
-    simRunName && !simRunName.startsWith("_model:") ? simRunName : null;
+    activeCell?.kind === "sequence" ? activeCell.name : null;
 
   return (
     <header
@@ -69,7 +69,7 @@ export function TopBar({ subscribe }: { subscribe: (run_name: string) => void })
       <div className="flex-1" />
 
       <StatusPill />
-      <RunButton subscribe={subscribe} />
+      <RunButton />
     </header>
   );
 }
