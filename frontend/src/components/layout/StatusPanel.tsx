@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronUp } from "lucide-react";
 import { useStore } from "@/lib/store";
+import { useActiveCell } from "@/lib/use-active-cell";
 import { deriveMode, modeAccentClass, modeLabel } from "@/lib/derive-mode";
 
 /** Floating status pill — replaces the fixed bottom StatusStrip.
@@ -43,7 +44,8 @@ function computeEta(
 
 export function StatusPanel() {
   const simState = useStore((s) => s.simState);
-  const simKind = useStore((s) => s.simKind);
+  const { activeCell } = useActiveCell();
+  const isReplay = activeCell?.kind === "sequence" && simState !== "running";
   const simNFrames = useStore((s) => s.simNFrames);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simLog = useStore((s) => s.simLog);
@@ -78,7 +80,7 @@ export function StatusPanel() {
     ? "0:00 (complete)"
     : "—";
 
-  if (simKind === "replay") {
+  if (isReplay) {
     // Replay of a saved sequence — show a quiet playback indicator,
     // not sim-run progress. PlaybackBar (bottom-center) carries the
     // frame counter + scrubber; this pill just identifies what's loaded
