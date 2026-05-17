@@ -1,3 +1,5 @@
+import gzip as _gz
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -17,19 +19,72 @@ def list_endpoint():
     return m.list_models()
 
 
+class HashCheckRequest(BaseModel):
+    sha256: str
+    filename: str | None = None  # diagnostic logging only — not persisted
+
+
+@router.post("/check_hash")
+def check_hash(req: HashCheckRequest):
+    """Look up an existing model by content hash.
+
+    Frontend calls this before uploading so a re-drop of the same .ply
+    skips transport entirely. Returns {"exists": false} when no model
+    in the library carries this sha256.
+    """
+    if not req.sha256 or len(req.sha256) != 64:
+        raise HTTPException(422, "sha256 must be a 64-char hex string")
+    existing = Model.find_by_hash(req.sha256)
+    if existing is None:
+        return {"exists": False}
+    meta = existing.meta_dict()
+    return {
+        "exists": True,
+        "name": existing.name,
+        "path": str(existing.path),
+        "n_splats": meta.get("n_splats"),
+    }
+
+
 @router.post("/upload")
 async def upload(
     ply: UploadFile = File(..., description=".ply file"),
     cameras_json: UploadFile | None = File(None, description="optional cameras.json"),
     convert_y_up: bool = Form(False, description="rewrite Y-up source to Z-up at import"),
+    ply_encoding: str = Form(
+        "identity",
+        description="transport encoding of the ply field: 'identity' or 'gzip'",
+    ),
 ):
     if not (ply.filename or "").lower().endswith(".ply"):
         raise HTTPException(422, "ply field must be a .ply file")
     content = await ply.read()  # TODO Phase 4: stream to disk for production-sized plys (>1GB)
+
+    # Decompress before validation. We signal via a Form field rather
+    # than HTTP Content-Encoding because FastAPI / Starlette doesn't
+    # auto-decompress request bodies, and intercepting the raw multipart
+    # body to do so is a much bigger change than just gzipping the .ply
+    # bytes in the browser before they go into FormData.
+    if ply_encoding == "gzip":
+        try:
+            content = _gz.decompress(content)
+        except Exception as e:
+            raise HTTPException(422, f"failed to gunzip uploaded ply: {e}")
+    elif ply_encoding != "identity":
+        raise HTTPException(422, f"unsupported ply_encoding: {ply_encoding!r}")
+
     if len(content) < 64:
         raise HTTPException(422, "uploaded ply is too small to be valid")
     if not (content.startswith(b"ply\n") or content.startswith(b"ply\r")):
         raise HTTPException(422, "uploaded ply is missing magic header")
+
+    # Defensive dedup: hash the decompressed bytes here too so a client
+    # that skipped /check_hash (network blip, stale build) still can't
+    # create a duplicate model entry.
+    sha = hashlib.sha256(content).hexdigest()
+    existing = Model.find_by_hash(sha)
+    if existing is not None:
+        return existing.meta_dict()
 
     cam_bytes: bytes | None = None
     if cameras_json is not None and (cameras_json.filename or ""):
@@ -45,7 +100,8 @@ async def upload(
 
     try:
         name, path = m.wrap_ply_upload(
-            ply.filename, content, cam_bytes, convert_y_up=convert_y_up,
+            ply.filename, content, cam_bytes,
+            convert_y_up=convert_y_up, sha256=sha,
         )
     except Exception as e:
         msg = str(e)

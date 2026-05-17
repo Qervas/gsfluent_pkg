@@ -64,6 +64,7 @@ def wrap_ply_upload(
     content: bytes,
     cameras_json_bytes: bytes | None = None,
     convert_y_up: bool = False,
+    sha256: str | None = None,
 ) -> tuple[str, Path]:
     """Wrap a raw .ply upload into the 3DGS directory layout the sim expects.
 
@@ -80,6 +81,11 @@ def wrap_ply_upload(
     The synthetic cameras.json is generated AFTER conversion so its
     bbox reflects the converted ply. Sets `_meta.json:converted_from =
     "y-up"` for audit.
+
+    `sha256` (when supplied) is recorded into `_meta.json:sha256`.
+    Pre-computed by the caller so /api/models/check_hash can short-circuit
+    re-uploads of identical content. If None, the meta records None —
+    legacy/back-compat.
 
     Returns (model_name, model_dir_path).
     """
@@ -135,6 +141,7 @@ def wrap_ply_upload(
             bbox=bbox,
             coord_convention="z-up",
             converted_from="y-up" if convert_y_up else None,
+            sha256=sha256,
         )
     except Exception as e:
         _log.warning("model %s wrote ply but _meta.json failed: %s", name, e)

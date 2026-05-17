@@ -124,6 +124,12 @@ class _ModelMeta(BaseModel):
     # code reads `coord_convention` (which is always "z-up") for
     # routing decisions.
     converted_from: Optional[str] = None  # "y-up" | None
+    # Content-hash of the originally uploaded ply bytes (pre-conversion).
+    # Lets the upload endpoint skip transport on re-drops via
+    # /api/models/check_hash. Legacy uploads pre-dedup carry None — the
+    # first re-drop misses the cache, hits the upload path, and the new
+    # meta written includes the hash so subsequent drops do skip.
+    sha256: Optional[str] = None
 
 
 class _SequenceMeta(BaseModel):
@@ -272,6 +278,24 @@ class Model:
                 continue
         return sorted(names)
 
+    @classmethod
+    def find_by_hash(cls, sha256: str) -> Optional["Model"]:
+        """Scan library models for one whose meta carries this sha256.
+
+        Returns the first match (there should only be one). Returns None if
+        no model in the library has this hash. Skips models with no sha256
+        (legacy uploads before dedup landed).
+        """
+        if not sha256:
+            return None
+        for name in cls.list():
+            m = cls.load(name)
+            if m is None or m.meta is None:
+                continue
+            if m.meta.get("sha256") == sha256:
+                return m
+        return None
+
     # ---- meta IO ----
 
     @staticmethod
@@ -298,6 +322,7 @@ class Model:
         imported_at: Optional[str] = None,
         path: Optional[Path] = None,
         converted_from: Optional[str] = None,
+        sha256: Optional[str] = None,
     ) -> Path:
         """Write `_meta.json` for the model.
 
@@ -317,6 +342,7 @@ class Model:
             coord_convention=coord_convention,
             imported_at=imported_at or _now_iso(),
             converted_from=converted_from,
+            sha256=sha256,
         ).model_dump()
         primary = cls._meta_path_for(target_dir)
         try:
