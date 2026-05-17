@@ -177,6 +177,32 @@ export function AppShell({ sourceCard, simCard, viewport, subscribe }: Props) {
           the old fixed-bottom strip so the viewport reads as one
           continuous canvas instead of being chopped by a status row. */}
       <StatusPanel />
+
+      {/* Transient toast — bottom-center, auto-dismisses after 3s */}
+      <ToastRenderer />
+    </div>
+  );
+}
+
+function ToastRenderer() {
+  const toast = useStore((s) => s.toast);
+  const clear = useStore((s) => s.clearToast);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => clear(), 3000);
+    return () => clearTimeout(t);
+  }, [toast, clear]);
+  if (!toast) return null;
+  const color =
+    toast.kind === "success" ? "border-success/40 bg-success/10 text-success"
+    : toast.kind === "error" ? "border-error/40 bg-error/10 text-error"
+    : "border-border bg-elevated text-text-primary";
+  return (
+    <div
+      role="status"
+      className={`fixed bottom-16 left-1/2 -translate-x-1/2 z-[70] px-4 py-2 rounded border text-xs font-medium backdrop-blur-sm ${color}`}
+    >
+      {toast.message}
     </div>
   );
 }

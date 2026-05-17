@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { X, Trash2, Copy, Upload, Download } from "lucide-react";
+import { X, Trash2, Copy, Upload, Download, Lock } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { useOverrides } from "@/lib/use-overrides";
@@ -53,6 +53,7 @@ export function RecipesModal() {
     try {
       const r = await api.recipes.get(selected);
       loadActive(r.name, r.data);
+      useStore.getState().showToast(`Loaded ${r.name} into Sim`, "success");
       setOpen(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -229,43 +230,100 @@ export function RecipesModal() {
   );
 }
 
-/** Phase 4: detail view shows raw JSON via <pre>. Phase 5 replaces this
- *  with the JsonEditor widget (with override-aware coloring for the
- *  Sim workspace's variant; here in the modal it shows the unmodified
- *  recipe). */
+/** Detail view: edits buffer in `draft` and only persist on explicit
+ *  Save. Avoids per-keystroke writes (which the previous version did,
+ *  causing surprise commits + race conditions with optimistic refetch). */
 function RecipeDetail({ name }: { name: string }) {
   const qc = useQueryClient();
   const { data: r, isLoading } = useQuery({
     queryKey: ["recipes", name],
     queryFn: () => api.recipes.get(name),
   });
+  const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+
+  // Reset draft whenever the loaded recipe changes (different name or
+  // server-side update).
+  useEffect(() => {
+    setDraft(null);
+    setSaveErr(null);
+  }, [name, r?.data]);
+
   if (isLoading || !r) return <div className="p-4 text-text-muted text-xs">Loading…</div>;
   const isUser = r.source === "user";
+  const current = draft ?? r.data;
+  const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(r.data);
 
-  const onSave = async (next: Record<string, unknown>) => {
-    if (!isUser) return; // built-ins are read-only
+  const onSave = async () => {
+    if (!isUser || !draft) return;
+    setSaving(true);
+    setSaveErr(null);
     try {
-      await api.recipes.save(name, next);
-      qc.invalidateQueries({ queryKey: ["recipes", name] });
-      qc.invalidateQueries({ queryKey: ["recipes"] });
+      await api.recipes.save(name, draft);
+      await qc.invalidateQueries({ queryKey: ["recipes", name] });
+      await qc.invalidateQueries({ queryKey: ["recipes"] });
+      setDraft(null);
     } catch (e) {
-      console.error("save failed", e);
+      setSaveErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
     }
   };
 
+  const onDiscard = () => {
+    setDraft(null);
+    setSaveErr(null);
+  };
+
   return (
-    <div className="px-3 py-3">
+    <div className="px-3 py-3 flex flex-col gap-2 h-full">
       {!isUser && (
-        <div className="mb-2 px-2 py-1 bg-warning/10 text-warning text-[10px] rounded">
-          Built-in recipe — read-only. Click <strong>Duplicate</strong> to edit.
+        <div className="px-2 py-1 bg-warning/10 text-warning text-[10px] rounded flex items-center gap-2">
+          <Lock size={10} />
+          <span>Built-in recipe — read-only. Click <strong>Duplicate</strong> to edit.</span>
         </div>
       )}
-      <JsonEditor
-        value={r.data}
-        baseline={null}
-        readOnly={!isUser}
-        onChange={(next) => { void onSave(next); }}
-      />
+      {isUser && (
+        <div className="flex items-center gap-2 text-[10px]">
+          {dirty ? (
+            <>
+              <span className="text-warning">● modified</span>
+              <div className="ml-auto flex gap-2">
+                <button
+                  onClick={onDiscard}
+                  disabled={saving}
+                  className="text-text-muted hover:text-text-primary disabled:opacity-50"
+                >
+                  Discard
+                </button>
+                <button
+                  onClick={onSave}
+                  disabled={saving}
+                  className="bg-accent text-canvas px-2 py-0.5 rounded font-medium disabled:opacity-50"
+                >
+                  {saving ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <span className="text-text-muted">saved</span>
+          )}
+        </div>
+      )}
+      {saveErr && (
+        <div className="px-2 py-1 bg-error/10 text-error text-[10px] rounded">
+          {saveErr}
+        </div>
+      )}
+      <div className="flex-1 min-h-0 overflow-auto">
+        <JsonEditor
+          value={current}
+          baseline={null}
+          readOnly={!isUser}
+          onChange={(next) => setDraft(next)}
+        />
+      </div>
     </div>
   );
 }
