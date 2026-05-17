@@ -27,6 +27,30 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+// Fire-and-forget poke at the LOCAL viser_headless's /reload endpoint
+// so it picks up the new cell without a stack restart. Viser runs on
+// the laptop (per split-topology) — the server has no path to reach it,
+// so this MUST come from the client. Best-effort: catch + ignore network
+// errors so a missing viser instance (laptop-only dev, no splat stack
+// running) doesn't break the upload UX. The cell will still be on disk;
+// viser picks it up on its next scan / restart.
+async function pokeViserReload(modelName: string): Promise<void> {
+  try {
+    const url = `http://${location.hostname}:8092/reload?cell=${encodeURIComponent(modelName)}`;
+    // Short timeout: viser is local — if it's down, fail fast.
+    const ctl = new AbortController();
+    const tid = setTimeout(() => ctl.abort(), 2000);
+    try {
+      await fetch(url, { method: "POST", signal: ctl.signal });
+    } finally {
+      clearTimeout(tid);
+    }
+  } catch {
+    // viser not running — fine, the cell is on disk and will be picked
+    // up on next scan. No user-visible failure.
+  }
+}
+
 function safeToast(message: string, kind: "info" | "success" | "error") {
   // The toast slice was added in a previous phase; older builds (and
   // tests with a stubbed store) may not have it. Degrade to console
@@ -204,6 +228,10 @@ export function DropZone() {
           if (existing) {
             setActiveModel(existing);
             qc.invalidateQueries({ queryKey: ["models"] });
+            // Server may have just backfilled the viser cell on
+            // check_hash — poke viser so it reloads its cache index
+            // and Splat-mode can find this cell.
+            void pokeViserReload(existing.name);
             safeToast(`Already in library — using ${check.name}`, "info");
             return; // skip upload entirely
           }
@@ -217,6 +245,10 @@ export function DropZone() {
         });
         setActiveModel(m);
         qc.invalidateQueries({ queryKey: ["models"] });
+        // Fresh upload: server just wrote `work/cache/viser/<m.name>.npz`.
+        // Poke local viser so Splat-mode renders THIS model immediately
+        // instead of whatever cell viser had loaded last.
+        void pokeViserReload(m.name);
         safeToast(`Uploaded ${m.name}`, "success");
       } catch (err) {
         setError(
