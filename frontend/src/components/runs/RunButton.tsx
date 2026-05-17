@@ -60,6 +60,33 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
     setBusy(true);
     setError(null);
     try {
+      // Re-fetch the recipe right before dispatching so any server-side
+      // edits since the user picked it (recipe file patched, another
+      // user updated, etc.) override the stale baseline. We then
+      // re-merge with the in-memory overrides so the user's per-run
+      // tweaks survive the refresh.
+      let baseToSend: Record<string, unknown> = effective;
+      try {
+        const fresh = await api.recipes.get(activeRecipeName!);
+        const overrides = useStore.getState().simOverrides;
+        baseToSend = { ...fresh.data, ...overrides };
+        // Update the store's baseline so the Form/JSON view reflects
+        // the fresh recipe too. Doesn't clobber overrides — the user's
+        // tweaks stay in simOverrides.
+        useStore.getState().setSimRecipeBaseline(
+          JSON.parse(JSON.stringify(fresh.data)),
+        );
+        // setSimRecipeBaseline clears overrides per its implementation;
+        // restore them since we want the merged dispatch + UI continuity.
+        for (const [k, v] of Object.entries(overrides)) {
+          useStore.getState().setOverride(k, v);
+        }
+      } catch {
+        // Recipe fetch failed (network blip, recipe deleted) — fall
+        // back to the stale in-memory baseline. The server's own
+        // validation will reject if the recipe truly doesn't exist.
+      }
+
       const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
       const baseName = activeRecipeName!.replace(/^★ /, "");
       const run_name = `${activeModel!.name}_${baseName}_${ts}`;
@@ -68,7 +95,7 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
       await api.runs.start({
         run_name,
         model_path: activeModel!.path,
-        recipe_data: effective,
+        recipe_data: baseToSend,
         recipe_source: activeRecipeName!,
         particles: 200_000,
       });
