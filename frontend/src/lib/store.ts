@@ -11,6 +11,12 @@ export type SpeedX = 0.25 | 0.5 | 1 | 2 | 4;
 export const SPEED_X_VALUES: SpeedX[] = [0.25, 0.5, 1, 2, 4];
 
 type State = {
+  /** Polled from viser's /state endpoint by ViserSplatScene's mount
+   *  effect. Source of truth for cell + frame + n_frames now that the
+   *  websocket positions stream is gone. */
+  viserState: { cell: string | null; frame: number; n_frames: number };
+  setViserState: (s: { cell: string | null; frame: number; n_frames: number }) => void;
+
   // Workspace selection
   activeWorkspace: Workspace;
   setActiveWorkspace: (w: Workspace) => void;
@@ -181,6 +187,8 @@ function loadPanels(): State["panels"] {
 }
 
 export const useStore = create<State>((set) => ({
+  viserState: { cell: null, frame: 0, n_frames: 0 },
+  setViserState: (s) => set({ viserState: s }),
   activeWorkspace: "sim",
   setActiveWorkspace: (w) => set({ activeWorkspace: w }),
   activeModel: null,
