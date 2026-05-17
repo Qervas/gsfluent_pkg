@@ -32,6 +32,12 @@ class StartRunRequest(BaseModel):
     recipe_data: dict
     recipe_source: str
     particles: int = 200_000
+    # When True, the handler runs the same validation a real run would
+    # (model_path existence, sim_area ↔ model bbox overlap, etc.) but
+    # never spawns the sim wrapper or touches the library. Useful for
+    # compatibility-matrix sanity checks across the recipe library
+    # without burning GPU time on actual runs.
+    dry_run: bool = False
 
 
 @router.get("")
@@ -46,6 +52,19 @@ async def start(req: StartRunRequest):
         raise HTTPException(422, f"model_path does not exist: {req.model_path}")
     if not model_dir.is_dir():
         raise HTTPException(422, f"model_path is not a directory: {req.model_path}")
+
+    if req.dry_run:
+        # Run the pure validators (no side effects) and surface any
+        # ValueError as a 422 with the same message a real run would.
+        try:
+            effective_recipe = runner._translate_sim_area_if_local(req.recipe_data, model_dir)
+            runner._validate_sim_area_intersects_model(
+                effective_recipe.get("sim_area", []), model_dir,
+            )
+        except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
+            raise HTTPException(422, f"failed to start run: {e}")
+        return {"dry_run": True, "valid": True, "run_name": req.run_name}
+
     try:
         rid = await runner.start_run(
             run_name=req.run_name,
