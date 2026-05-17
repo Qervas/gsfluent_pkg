@@ -63,6 +63,7 @@ export const api = {
       convertYUp?: boolean,
       opts?: {
         onProgress?: (loaded: number, total: number) => void;
+        onPhase?: (phase: "compressing" | "uploading") => void;
         signal?: AbortSignal;
       },
     ): Promise<ModelItem> => {
@@ -71,6 +72,7 @@ export const api = {
       // HTTP-level Content-Encoding header because FastAPI doesn't
       // auto-decompress request bodies (intercepting raw multipart is
       // much more invasive than just gzipping the field's bytes).
+      opts?.onPhase?.("compressing");
       const gzippedPly = await gzipFile(ply);
 
       const fd = new FormData();
@@ -87,6 +89,7 @@ export const api = {
       return new Promise<ModelItem>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", "/api/models/upload");
+        opts?.onPhase?.("uploading");
         if (opts?.signal) {
           opts.signal.addEventListener("abort", () => xhr.abort());
         }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { Loader2, Check } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 
@@ -62,10 +63,15 @@ export function DropZone() {
   const [dragKind, setDragKind] = useState<DragKind>("unknown");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | "ply" | "npz">(null);
-  // Live transport progress for the .ply upload path (post-dedup).
-  // Stays null while hashing/dedup-checking and during the npz path —
-  // those phases produce no bytes-on-the-wire signal so the overlay
-  // simply shows the spinning "Uploading…" line without a bar.
+  // Multi-phase upload state. The ply path goes through five stages
+  // and the overlay labels each one so the user never sees a static
+  // "Uploading…" while the browser is actually hashing or gzipping.
+  // npz uploads stay on "uploading" since there's no client-side prep.
+  type Phase = "hashing" | "checking" | "compressing" | "uploading" | "dedup-hit";
+  const [phase, setPhase] = useState<Phase | null>(null);
+  // Live transport progress, populated only during the "uploading"
+  // phase via XHR.upload.onprogress events. Null in every other phase
+  // because there are no wire bytes to count yet.
   const [progress, setProgress] = useState<
     { loaded: number; total: number } | null
   >(null);
@@ -158,6 +164,7 @@ export function DropZone() {
       if (kind === "npz") {
         const npz = files.find((f) => f.name.toLowerCase().endsWith(".npz"))!;
         setBusy("npz");
+        setPhase("uploading");
         try {
           await api.sequences.uploadNpz(npz);
           qc.invalidateQueries({ queryKey: ["sequences"] });
@@ -168,6 +175,7 @@ export function DropZone() {
           setTimeout(() => setError(null), 6000);
         } finally {
           setBusy(null);
+          setPhase(null);
         }
         return;
       }
@@ -178,13 +186,16 @@ export function DropZone() {
       setBusy("ply");
       setProgress(null);
       try {
-        // 1) Hash the file client-side and ask the server if it
-        //    already has it. Skips a potentially-multi-GB transport
-        //    on identical re-drops (common when iterating on recipes
-        //    against the same scene).
+        // 1) Hash the file client-side.
+        setPhase("hashing");
         const hash = await sha256OfFile(ply);
+
+        // 2) Ask the server if it already has this exact content. Skips a
+        //    potentially-multi-GB transport on identical re-drops.
+        setPhase("checking");
         const check = await api.models.checkHash(hash, ply.name);
         if (check.exists && check.name) {
+          setPhase("dedup-hit");
           // Cache hit: pull the full ModelItem off the listing so the
           // active-model state has every field downstream code reads.
           // Falls back to a synthesized record if list/find races.
@@ -198,8 +209,10 @@ export function DropZone() {
           }
         }
 
-        // 2) Cache miss: gzip + XHR upload with live progress.
+        // 3) Cache miss: gzip (api.models.upload calls back via onPhase)
+        //    then XHR upload with live progress events.
         const m = await api.models.upload(ply, cam, convertYUpRef.current, {
+          onPhase: (p) => setPhase(p),
           onProgress: (loaded, total) => setProgress({ loaded, total }),
         });
         setActiveModel(m);
@@ -213,6 +226,7 @@ export function DropZone() {
       } finally {
         setBusy(null);
         setProgress(null);
+        setPhase(null);
       }
     };
 
@@ -263,32 +277,8 @@ export function DropZone() {
       )}
       {busy && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="glass-card px-4 py-3 text-text-secondary text-xs min-w-[280px]">
-            <div className="flex items-center gap-2">
-              <span className="text-text-primary">
-                Uploading {busy === "ply" ? "model" : "sequence"}…
-              </span>
-              {progress && progress.total > 0 && (
-                <span className="ml-auto font-mono text-[10px] tabular-nums">
-                  {Math.round((progress.loaded / progress.total) * 100)}%
-                </span>
-              )}
-            </div>
-            {progress && progress.total > 0 && (
-              <>
-                <div className="mt-2 h-1 bg-elevated rounded overflow-hidden">
-                  <div
-                    className="h-full bg-accent transition-[width] duration-fast"
-                    style={{
-                      width: `${(progress.loaded / progress.total) * 100}%`,
-                    }}
-                  />
-                </div>
-                <div className="mt-1 text-[10px] text-text-muted font-mono">
-                  {fmtBytes(progress.loaded)} / {fmtBytes(progress.total)}
-                </div>
-              </>
-            )}
+          <div className="glass-card px-4 py-3 text-text-secondary text-xs min-w-[320px]">
+            <UploadProgressBody busy={busy} phase={phase} progress={progress} />
           </div>
         </div>
       )}
@@ -354,6 +344,73 @@ function DropPreview({
     >
       <div className={"font-medium text-sm " + palette.fg}>{title}</div>
       {sub && <div className={"text-[11px] opacity-80 " + palette.fg}>{sub}</div>}
+    </div>
+  );
+}
+
+type Phase = "hashing" | "checking" | "compressing" | "uploading" | "dedup-hit";
+
+/** Upload progress body — one of:
+ *  - hashing       : spinner + "Hashing file…"  (sha256 in browser, ~1-2s per GB)
+ *  - checking      : spinner + "Checking server cache…"  (~50ms)
+ *  - dedup-hit     : ✓ + "Already in library, loading…"  (transient, ~100ms)
+ *  - compressing   : spinner + "Compressing…"  (gzip via CompressionStream, ~1-2s per 100MB)
+ *  - uploading     : spinner + "Uploading… {%}"  + bar + bytes counter
+ *
+ *  Every phase has a label so the user is never left staring at a
+ *  static "Uploading…" line during the multi-second prep stages. */
+function UploadProgressBody({
+  busy,
+  phase,
+  progress,
+}: {
+  busy: "ply" | "npz";
+  phase: Phase | null;
+  progress: { loaded: number; total: number } | null;
+}) {
+  // Map phase → label. npz uploads only ever pass through "uploading"
+  // because there's no sha/gzip prep on that path.
+  const phaseLabel: Record<Phase, string> =
+    busy === "npz"
+      ? { hashing: "", checking: "", compressing: "", uploading: "Uploading sequence…", "dedup-hit": "" }
+      : {
+          hashing: "Hashing file…",
+          checking: "Checking server cache…",
+          "dedup-hit": "Already in library, loading…",
+          compressing: "Compressing…",
+          uploading: "Uploading model…",
+        };
+  const isDedupHit = phase === "dedup-hit";
+  const showBar = phase === "uploading" && progress && progress.total > 0;
+  const label = (phase && phaseLabel[phase]) || (busy === "ply" ? "Preparing…" : "Uploading sequence…");
+  const pct = showBar ? Math.round((progress!.loaded / progress!.total) * 100) : null;
+
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        {isDedupHit ? (
+          <Check size={11} className="text-success shrink-0" />
+        ) : (
+          <Loader2 size={11} className="animate-spin text-accent shrink-0" />
+        )}
+        <span className="text-text-primary">{label}</span>
+        {pct !== null && (
+          <span className="ml-auto font-mono text-[10px] tabular-nums">{pct}%</span>
+        )}
+      </div>
+      {showBar && progress && (
+        <>
+          <div className="mt-2 h-1 bg-elevated rounded overflow-hidden">
+            <div
+              className="h-full bg-accent transition-[width] duration-fast"
+              style={{ width: `${(progress.loaded / progress.total) * 100}%` }}
+            />
+          </div>
+          <div className="mt-1 text-[10px] text-text-muted font-mono">
+            {fmtBytes(progress.loaded)} / {fmtBytes(progress.total)}
+          </div>
+        </>
+      )}
     </div>
   );
 }
