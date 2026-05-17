@@ -113,6 +113,60 @@ def mmap_cell(npz_path: Path) -> dict:
         }
 
 
+def mmap_model_cell(ply_path: Path) -> dict:
+    """Parse a single-frame model cell from a 3DGS .ply file.
+
+    Mirrors mmap_cell's output shape so the rest of the render loop
+    treats models the same way as 1-frame sequences. Unlike mmap_cell
+    we *don't* mmap — plyfile materializes the arrays. Models are
+    small enough (one frame, ≤200 MB) that the page-on-demand
+    optimization doesn't earn its keep here.
+
+    Drops the higher-order SH coefficients (f_rest_*) — viser's splat
+    primitive only consumes positions + cov + rgb + opacity. The full
+    SH would be wasted bytes.
+
+    Mathematical conversions (3DGS .ply → viser numpy):
+      - scales:  exp(scale_*)
+      - opacity: sigmoid(opacity_raw)
+      - rgb:     clip(0.5 + 0.282 * f_dc_*, 0, 1)  [zero-order SH]
+      - quats:   normalize((rot_0, rot_1, rot_2, rot_3))
+    """
+    from plyfile import PlyData
+    v = PlyData.read(str(ply_path)).elements[0]
+
+    xyz = np.stack([v["x"], v["y"], v["z"]], axis=-1).astype(np.float32)
+    opacity = 1.0 / (1.0 + np.exp(-np.asarray(v["opacity"]).astype(np.float32)))
+    scales = np.exp(np.stack(
+        [v["scale_0"], v["scale_1"], v["scale_2"]], axis=-1,
+    )).astype(np.float32)
+    quats_raw = np.stack(
+        [v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=-1,
+    ).astype(np.float32)
+    quats = quats_raw / (np.linalg.norm(quats_raw, axis=-1, keepdims=True) + 1e-9)
+    SH_C0 = 0.28209479177387814
+    f_dc = np.stack(
+        [v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=-1,
+    ).astype(np.float32)
+    rgb = np.clip(0.5 + SH_C0 * f_dc, 0.0, 1.0)
+
+    f0 = xyz * _VISER_K
+    bbox_lo = f0.min(axis=0).astype(np.float32)
+    bbox_hi = f0.max(axis=0).astype(np.float32)
+    K2 = _VISER_K * _VISER_K
+
+    return {
+        "version": 2,
+        "frames": xyz[None, :, :],
+        "quats": quats[None, :, :],
+        "scales_sq": (scales * scales) * K2,
+        "rgb": rgb,
+        "opacity": opacity,
+        "bbox_lo": bbox_lo,
+        "bbox_hi": bbox_hi,
+    }
+
+
 def _quats_to_R(quats: np.ndarray) -> np.ndarray:
     """Batched quaternion (N,4 with w,x,y,z) → (N,3,3) rotation matrices.
 
