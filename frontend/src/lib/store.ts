@@ -48,6 +48,11 @@ type State = {
   simKind: "sim" | "replay" | "preview" | null;
   setSimKind: (kind: "sim" | "replay" | "preview" | null) => void;
   simRunName: string | null;
+  /** Replaces the simRunName-as-string overload. Encodes both what
+   *  kind of resource is loaded (model vs sequence) and its name,
+   *  with no prefix-shenanigans. Null when nothing is loaded. */
+  activeCell: { kind: "model" | "sequence"; name: string } | null;
+  setActiveCell: (cell: { kind: "model" | "sequence"; name: string } | null) => void;
   simNFrames: number;
   simTotalFrames: number;
   simStage: string;
@@ -208,6 +213,8 @@ export const useStore = create<State>((set) => ({
   simKind: null,
   setSimKind: (kind) => set({ simKind: kind }),
   simRunName: null,
+  activeCell: null,
+  setActiveCell: (cell) => set({ activeCell: cell }),
   simNFrames: 0,
   simTotalFrames: 150,
   simStage: "idle",
