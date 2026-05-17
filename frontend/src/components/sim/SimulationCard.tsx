@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { ChevronDown, Check } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { useOverrides } from "@/lib/use-overrides";
@@ -206,29 +207,11 @@ export function SimulationCard({ subscribe }: Props) {
         <span className="text-text-muted text-[10px] uppercase tracking-wider">
           Recipe
         </span>
-        <select
-          value={activeRecipeName ?? ""}
-          onChange={(e) => onPickRecipe(e.target.value)}
-          className="flex-1 bg-elevated text-text-primary text-[11px] rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
-        >
-          <option value="" disabled>
-            Pick a recipe…
-          </option>
-          <optgroup label="Built-in">
-            {(recipes as RecipeListItem[])
-              .filter((r) => r.source === "builtin")
-              .map((r) => (
-                <option key={r.name} value={r.name}>{r.name}</option>
-              ))}
-          </optgroup>
-          <optgroup label="User saved (★)">
-            {(recipes as RecipeListItem[])
-              .filter((r) => r.source === "user")
-              .map((r) => (
-                <option key={r.name} value={r.name}>★ {r.name}</option>
-              ))}
-          </optgroup>
-        </select>
+        <RecipePicker
+          activeRecipeName={activeRecipeName}
+          recipes={recipes as RecipeListItem[]}
+          onPick={onPickRecipe}
+        />
       </div>
 
       {activeRecipeName && (
@@ -347,5 +330,135 @@ function SimJsonBody() {
       onChange={onChange}
       onError={onError}
     />
+  );
+}
+
+/** Recipe picker — custom dropdown that replaces a native <select>.
+ *  Native <select>s render an OS popup whose styling we can't control;
+ *  on Linux dark themes the options frequently render unreadably or
+ *  fail to receive clicks inside flex-overflow contexts. This is a
+ *  plain click-to-open menu using only Tailwind primitives. */
+function RecipePicker({
+  activeRecipeName,
+  recipes,
+  onPick,
+}: {
+  activeRecipeName: string | null;
+  recipes: RecipeListItem[];
+  onPick: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, [open]);
+
+  const builtin = recipes.filter((r) => r.source === "builtin");
+  const user    = recipes.filter((r) => r.source === "user");
+  const label = activeRecipeName ?? "Pick a recipe…";
+
+  const onSelect = (name: string) => {
+    setOpen(false);
+    onPick(name);
+  };
+
+  return (
+    <div ref={ref} className="flex-1 relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={
+          "w-full flex items-center gap-1 bg-elevated text-[11px] rounded px-2 py-1 " +
+          "focus:outline-none focus:ring-1 focus:ring-accent " +
+          (activeRecipeName ? "text-text-primary" : "text-text-muted italic")
+        }
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="flex-1 text-left truncate font-mono">{label}</span>
+        <ChevronDown size={11} className="text-text-muted shrink-0" />
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          className="absolute z-50 mt-1 left-0 right-0 max-h-72 overflow-auto bg-canvas border border-border rounded shadow-glass"
+        >
+          {builtin.length > 0 && (
+            <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-text-muted bg-elevated/40">
+              Built-in
+            </div>
+          )}
+          {builtin.map((r) => (
+            <RecipeOption
+              key={r.name}
+              name={r.name}
+              active={activeRecipeName === r.name}
+              onSelect={onSelect}
+            />
+          ))}
+          {user.length > 0 && (
+            <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-text-muted bg-elevated/40">
+              User saved
+            </div>
+          )}
+          {user.map((r) => (
+            <RecipeOption
+              key={r.name}
+              name={r.name}
+              prefix="★ "
+              active={activeRecipeName === r.name}
+              onSelect={onSelect}
+            />
+          ))}
+          {recipes.length === 0 && (
+            <div className="px-3 py-2 text-[10px] text-text-muted italic">
+              No recipes available
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecipeOption({
+  name,
+  prefix = "",
+  active,
+  onSelect,
+}: {
+  name: string;
+  prefix?: string;
+  active: boolean;
+  onSelect: (name: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(name)}
+      className={
+        "w-full flex items-center gap-2 px-3 py-1 text-left text-[11px] font-mono " +
+        "hover:bg-elevated " +
+        (active ? "text-accent bg-accent/10" : "text-text-primary")
+      }
+      role="option"
+      aria-selected={active}
+    >
+      <span className="flex-1 truncate">{prefix}{name}</span>
+      {active && <Check size={11} className="text-accent shrink-0" />}
+    </button>
   );
 }
