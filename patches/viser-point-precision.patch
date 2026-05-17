@@ -1,0 +1,20 @@
+--- ThreeAssets.tsx.bak	2026-05-17 17:27:16.843550648 +0200
++++ ThreeAssets.tsx	2026-05-17 17:27:16.845330120 +0200
+@@ -39,7 +39,7 @@
+   varying vec3 vOuterSqCol;
+   uniform float scale;
+   uniform vec3 uniformColor;
+-  uniform float point_shading_enabled;
++  uniform highp float point_shading_enabled;
+ 
+   #include <fog_pars_vertex>
+ 
+@@ -67,7 +67,7 @@
+   varying vec3 vInnerSqCol;
+   varying vec3 vOuterSqCol;
+   uniform float point_ball_norm;
+-  uniform float point_shading_enabled;
++  uniform highp float point_shading_enabled;
+ 
+   #include <fog_pars_fragment>
+ 

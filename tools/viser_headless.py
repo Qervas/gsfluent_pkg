@@ -959,6 +959,23 @@ def main() -> int:
             server.initial_camera.near = _near_for_distance(dist_new, gp["scene_scale"])
             server.initial_camera.far  = _camera_far_for_scene(gp["scene_scale"])
 
+            # Also reframe every already-connected client — initial_camera
+            # only takes effect on NEW connections, but the user's tab is
+            # already open. Without this, switching from a unit-scale cell
+            # to one at world coords (e.g. cluster_6_15 at ~[3460, 29050])
+            # leaves the camera at the old origin and the model renders
+            # 30 km offscreen. Position + look_at writes are safe at any
+            # time; near/far per-client writes are not (viser 1.0.20 bug,
+            # see on_client_connect comment) — stick to initial_camera
+            # for those.
+            try:
+                for client in server.get_clients().values():
+                    client.camera.position = pos
+                    client.camera.look_at = look
+                    client.camera.up_direction = (0.0, 0.0, 1.0)
+            except Exception as e:
+                print(f">>> scene-dirty client camera push failed: {e}")
+
             grid = new_grid
             gizmo = new_gizmo
             with lock:
