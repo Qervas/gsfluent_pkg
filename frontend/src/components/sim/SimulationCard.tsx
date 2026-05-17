@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
@@ -26,10 +26,49 @@ export function SimulationCard({ subscribe }: Props) {
   const simRunName        = useStore((s) => s.simRunName);
   const simState          = useStore((s) => s.simState);
   const loadActiveRecipe  = useStore((s) => s.loadActiveRecipe);
-  const { overrideCount } = useOverrides();
+  const { overrideCount, clearAllOverrides } = useOverrides();
   const [view, setView]   = useState<"form" | "json">(
     () => (localStorage.getItem("gsfluent.sim_view_mode") as "form" | "json") || "form",
   );
+  const [saving, setSaving]     = useState(false);
+  const [strpError, setStrpError] = useState<string | null>(null);
+  const qc = useQueryClient();
+
+  // Confirm before bulk reset only when the user has accumulated enough
+  // overrides that an accidental click would lose real work. 3 is the
+  // threshold where "I might lose a tweak I forgot about" becomes plausible.
+  const CONFIRM_RESET_THRESHOLD = 3;
+
+  const onSaveAsNew = async () => {
+    const name = prompt("Save as new recipe — name:");
+    if (!name?.trim()) return;
+    setSaving(true);
+    setStrpError(null);
+    // Snapshot effective = {...baseline, ...overrides} at call-start so
+    // in-flight slider drags between save→load can't clobber what we're
+    // persisting.
+    const baseline = useStore.getState().simRecipeBaseline;
+    const overrides = useStore.getState().simOverrides;
+    const snapshot = JSON.parse(
+      JSON.stringify({ ...(baseline ?? {}), ...overrides }),
+    );
+    try {
+      await api.recipes.save(name.trim(), snapshot, activeRecipeName ?? undefined);
+      qc.invalidateQueries({ queryKey: ["recipes"] });
+      useStore.getState().loadActiveRecipe(name.trim(), snapshot);
+    } catch (e) {
+      setStrpError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onResetAll = () => {
+    if (overrideCount >= CONFIRM_RESET_THRESHOLD) {
+      if (!confirm(`Reset ${overrideCount} overrides?`)) return;
+    }
+    clearAllOverrides();
+  };
 
   const prevSimState = useRef<string>(simState);
   const [showFinishedToast, setShowFinishedToast] = useState(false);
@@ -132,12 +171,36 @@ export function SimulationCard({ subscribe }: Props) {
         <span className="text-text-muted text-[10px] uppercase tracking-wider">
           ② Simulation
         </span>
-        {overrideCount > 0 && (
-          <span className="text-[10px] text-accent px-1.5 py-0.5 bg-accent/10 rounded">
+      </div>
+
+      {overrideCount > 0 && (
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-accent/5">
+          <span className="text-accent text-[11px] font-medium">
             {overrideCount} override{overrideCount === 1 ? "" : "s"}
           </span>
-        )}
-      </div>
+          <div className="ml-auto flex gap-2">
+            <button
+              onClick={onSaveAsNew}
+              disabled={saving}
+              className="text-[10px] text-text-secondary hover:text-text-primary disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save as new…"}
+            </button>
+            <button
+              onClick={onResetAll}
+              disabled={saving}
+              className="text-[10px] text-warning hover:text-text-primary disabled:opacity-50"
+            >
+              Reset all
+            </button>
+          </div>
+        </div>
+      )}
+      {strpError && (
+        <div className="px-3 py-1 text-error text-[10px] bg-error/10 border-b border-error/30">
+          {strpError}
+        </div>
+      )}
 
       <div className="px-3 py-2 flex items-center gap-2">
         <span className="text-text-muted text-[10px] uppercase tracking-wider">
