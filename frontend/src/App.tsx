@@ -146,7 +146,7 @@ export default function App() {
       <AppShell
         subscribe={subscribe}
         sourceCard={<SourceCard onLoadRun={onLoadRun} onPickModel={onPickModel} />}
-        simCard={<SimulationCard subscribe={subscribe} />}
+        simCard={<SimulationCard />}
         viewport={<Viewport />}
       />
       <RecipesModal />
