@@ -6,12 +6,11 @@ import { useStore } from "@/lib/store";
 import { useOverrides } from "@/lib/use-overrides";
 import { Properties } from "@/components/properties/Properties";
 import { JsonEditor } from "@/components/properties/widgets/JsonEditor";
-import { RunButton } from "@/components/runs/RunButton";
 import type { RecipeListItem, SequenceItem } from "@/lib/types";
 
-type Props = {
-  subscribe: (run_name: string) => void;
-};
+// Run button lives in the TopBar (single source of truth for the
+// primary action) so no need for a footer Run in this card.
+type Props = Record<string, never>;
 
 /** Simulation card — recipe picker + Form/JSON toggle + params + actions.
  *
@@ -21,7 +20,7 @@ type Props = {
  *    - model but no recipe         → recipe picker visible, body hidden
  *    - model + recipe (idle)       → full editor (Form mode for now)
  */
-export function SimulationCard({ subscribe }: Props) {
+export function SimulationCard(_: Props) {
   const activeModel       = useStore((s) => s.activeModel);
   const activeRecipeName  = useStore((s) => s.activeRecipeName);
   const simRunName        = useStore((s) => s.simRunName);
@@ -279,9 +278,6 @@ export function SimulationCard({ subscribe }: Props) {
         </div>
       )}
 
-      <div className="px-3 py-2 border-t border-border flex items-center gap-2">
-        <RunButton subscribe={subscribe} />
-      </div>
     </div>
   );
 }

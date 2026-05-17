@@ -141,21 +141,37 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
 
   // ---- State 5: error ----
   if (simState === "error" || error) {
+    // The error message commonly arrives as `HTTP 422: {"detail":"..."}`.
+    // Parse the detail out so we can show it inline — much more useful
+    // than a generic "Error" button that hides the cause in a tooltip.
+    const detail = extractDetail(error);
     return (
-      <button
-        type="button"
-        onClick={onRun}
-        disabled={busy}
-        title={error ?? "Sim errored — click to retry"}
-        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
-                   bg-error/15 border border-error/40 text-error
-                   text-xs font-medium hover:bg-error/20
-                   focus:outline-none focus-visible:ring-2 focus-visible:ring-error/40
-                   transition-colors duration-fast"
-      >
-        <X size={11} />
-        Error · Retry
-      </button>
+      <div className="inline-flex items-stretch text-xs font-medium">
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={busy}
+          title={error ?? "Sim errored — click to retry"}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-l-md
+                     bg-error/15 border border-error/40 text-error
+                     hover:bg-error/20
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-error/40
+                     transition-colors duration-fast"
+        >
+          <X size={11} />
+          Retry
+        </button>
+        {detail && (
+          <div
+            className="max-w-[420px] truncate px-3 py-1.5 rounded-r-md
+                       bg-error/10 border border-l-0 border-error/40 text-error/90
+                       text-[11px] font-normal"
+            title={detail}
+          >
+            {detail}
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -203,6 +219,31 @@ export function RunButton({ subscribe }: { subscribe: (run_name: string) => void
       Run
     </button>
   );
+}
+
+/** Pull a human-readable cause out of an error message like
+ *  `HTTP 422: {"detail":"..."}`. Falls back to the raw message when the
+ *  shape isn't recognized. Returns null for empty input. */
+function extractDetail(raw: string | null): string | null {
+  if (!raw) return null;
+  // Try to find a JSON body after `HTTP NNN: `
+  const bodyIdx = raw.indexOf(": ");
+  if (bodyIdx >= 0) {
+    const body = raw.slice(bodyIdx + 2).trim();
+    if (body.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(body);
+        if (typeof parsed?.detail === "string") return parsed.detail;
+        if (Array.isArray(parsed?.detail)) {
+          // FastAPI request-validation errors are an array of issues
+          return parsed.detail.map((d: { msg?: string; loc?: unknown[] }) =>
+            d.msg ? `${(d.loc ?? []).join(".")}: ${d.msg}` : JSON.stringify(d),
+          ).join("; ");
+        }
+      } catch { /* not JSON, fall through */ }
+    }
+  }
+  return raw;
 }
 
 /** ETA from observed fps since the first frame landed. Returns null
