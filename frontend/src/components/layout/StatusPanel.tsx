@@ -136,8 +136,6 @@ export function StatusPanel() {
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <span className="tabular-nums">{simNFrames}/{simTotalFrames}</span>
-            <span className="text-text-muted">·</span>
             <span className="tabular-nums">{eta}</span>
           </>
         )}

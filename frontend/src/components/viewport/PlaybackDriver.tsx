@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@/lib/store";
-import { frameDelayMs, nextFrame } from "@/lib/playback";
+import { frameDelayMs } from "@/lib/playback";
 
 /**
  * Single-source-of-truth playback ticker. Runs via requestAnimationFrame
@@ -39,8 +39,13 @@ export function usePlaybackTicker(): void {
         raf = requestAnimationFrame(tick);
         return;
       }
-      const frameCount = st.frameXyz.size;
-      if (frameCount <= 1) {
+      const loadedCount = st.frameXyz.size;
+      // True end-of-sequence is the server-authoritative total when
+      // known; otherwise we fall back to the loaded count for orphan
+      // sequences without metadata.
+      const totalFrames =
+        st.simTotalFrames > 0 ? st.simTotalFrames : loadedCount;
+      if (totalFrames <= 1 || loadedCount <= 1) {
         raf = requestAnimationFrame(tick);
         return;
       }
@@ -53,13 +58,23 @@ export function usePlaybackTicker(): void {
       }
       const delay = frameDelayMs(st.fpsHint, st.speedX);
       if (nowMs - lastAdvanceMs.current >= delay) {
-        const next = nextFrame(st.currentFrameIdx, frameCount, st.loop);
-        if (next === "stop") {
-          st.setPlaying(false);
-        } else {
-          st.setCurrentFrame(next);
+        const lastIdx = totalFrames - 1;
+        const nextIdx = st.currentFrameIdx + 1;
+        if (nextIdx > lastIdx) {
+          // End of the true sequence — loop or stop.
+          if (st.loop) {
+            st.setCurrentFrame(0);
+            lastAdvanceMs.current = nowMs;
+          } else {
+            st.setPlaying(false);
+          }
+        } else if (st.frameXyz.has(nextIdx)) {
+          // Next frame has streamed in — advance.
+          st.setCurrentFrame(nextIdx);
           lastAdvanceMs.current = nowMs;
         }
+        // Else: buffer hasn't caught up yet. Hold position and let the
+        // next tick check again as `frameXyz` grows.
       }
       raf = requestAnimationFrame(tick);
     };
