@@ -60,20 +60,29 @@ export function ViserSplatScene() {
   const [serverCells, setServerCells] = useState<string[] | null>(null);
   const [controlReachable, setControlReachable] = useState<boolean | null>(null);
 
+  const setViserState = useStore((s) => s.setViserState);
   useEffect(() => {
     let cancelled = false;
-    fetch(`${controlUrl}/state`)
-      .then((r) => r.json())
-      .then((data) => {
+    const tick = async () => {
+      try {
+        const r = await fetch(`${controlUrl}/state`);
+        const d = await r.json();
         if (cancelled) return;
-        setServerCells(data.cells ?? []);
         setControlReachable(true);
-      })
-      .catch(() => {
+        setServerCells(d.cells ?? []);
+        setViserState({
+          cell: d.cell ?? null,
+          frame: d.frame ?? 0,
+          n_frames: d.n_frames ?? 0,
+        });
+      } catch {
         if (!cancelled) setControlReachable(false);
-      });
-    return () => { cancelled = true; };
-  }, [controlUrl]);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 500);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [controlUrl, setViserState]);
 
   // Forward state changes. Only POST if (cell, frame) actually changed.
   // `wireName` already carries the `model:` / `sequence:` prefix viser

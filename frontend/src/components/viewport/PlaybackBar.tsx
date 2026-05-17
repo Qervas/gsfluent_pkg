@@ -7,11 +7,13 @@ import {
   SkipForward,
 } from "lucide-react";
 import { useStore, SPEED_X_VALUES, type SpeedX } from "@/lib/store";
+import { useActiveCell } from "@/lib/use-active-cell";
 
 /**
  * Persistent transport bar at the bottom of the viewport. Visible only
- * when a playable sequence is active (simRunName set + at least 2 frames
- * landed) — single-frame model previews skip the bar entirely.
+ * when a playable sequence is active (activeCell.kind === "sequence" +
+ * at least 2 frames landed) — single-frame model previews skip the bar
+ * entirely.
  *
  * Spec layout:
  *   [◀◀] [▶/⏸] [▶▶]   ▰▰▰▰▰▱▱▱▱▱   12 / 30   1×▾   ↻
@@ -21,10 +23,10 @@ import { useStore, SPEED_X_VALUES, type SpeedX } from "@/lib/store";
  * not here.
  */
 export function PlaybackBar() {
-  const simRunName = useStore((s) => s.simRunName);
+  const { isSequence } = useActiveCell();
   const simState = useStore((s) => s.simState);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
-  const frameCount = useStore((s) => s.frameXyz.size);
+  const nFrames = useStore((s) => s.viserState.n_frames);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
   const speedX = useStore((s) => s.speedX);
@@ -59,8 +61,8 @@ export function PlaybackBar() {
   // wiring. Skips when the user is in any editable element (palette
   // input, recipe name prompt, etc.) so we don't fight text entry.
   useEffect(() => {
-    const totalKnown = simTotalFrames > 0 ? simTotalFrames : frameCount;
-    if (!simRunName || (totalKnown < 2 && frameCount < 2)) return;
+    const totalKnown = simTotalFrames > 0 ? simTotalFrames : nFrames;
+    if (!isSequence || (totalKnown < 2 && nFrames < 2)) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       const tag = t?.tagName?.toUpperCase();
@@ -105,9 +107,9 @@ export function PlaybackBar() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
-    simRunName,
+    isSequence,
     simTotalFrames,
-    frameCount,
+    nFrames,
     playing,
     loop,
     speedX,
@@ -118,16 +120,16 @@ export function PlaybackBar() {
   ]);
 
   // Prefer the server-authoritative total so the scrubber spans the
-  // full range from the start of streaming. Fall back to the loaded
-  // count for orphan sequences with no metadata.
-  const totalFrames = simTotalFrames > 0 ? simTotalFrames : frameCount;
-  const loadedFrames = frameCount;          // how many frames have streamed in
+  // full range from the start of streaming. Fall back to viser's
+  // n_frames for orphan sequences with no metadata.
+  const totalFrames = simTotalFrames > 0 ? simTotalFrames : nFrames;
+  const loadedFrames = nFrames;             // how many frames viser has cached
   const lastIdx = Math.max(totalFrames - 1, 0);
 
   // Visibility gate: bar shows once we know the run has more than one
-  // frame — either from the server total or by loaded count. Hides the
-  // single-frame static-model preview (simRunName set + total=1).
-  if (!simRunName || (totalFrames < 2 && frameCount < 2)) return null;
+  // frame — either from the server total or by viser's n_frames. Hides
+  // the single-frame static-model preview entirely (kind !== sequence).
+  if (!isSequence || (totalFrames < 2 && nFrames < 2)) return null;
 
   const isLive = simState === "running";
 
