@@ -74,6 +74,7 @@ export default function App() {
   const onPickModel = useCallback(
     (m: ModelItem) => {
       setActiveModel(m);
+      useStore.getState().setActiveCell({ kind: "model", name: m.name });
       resetForNewRun(`_model:${m.name}`);
       setSimState("idle");
       useStore.getState().setSimKind("preview");
@@ -104,6 +105,7 @@ export default function App() {
   const onLoadRun = useCallback(
     (run_name: string) => {
       resetForNewRun(run_name);
+      useStore.getState().setActiveCell({ kind: "sequence", name: run_name });
       useStore.getState().setSimKind("replay");
       client.subscribe(run_name);
     },
@@ -126,6 +128,7 @@ export default function App() {
     const baseName = st.activeRecipeName.replace(/^★ /, "");
     const run_name = `${st.activeModel.name}_${baseName}_${ts}`;
     st.resetForNewRun(run_name);
+    st.setActiveCell({ kind: "sequence", name: run_name });
     useStore.getState().setSimKind("sim");
     try {
       await api.runs.start({
