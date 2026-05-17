@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Play, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import type { ModelItem, SequenceItem } from "@/lib/types";
@@ -53,6 +53,37 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
     setOpen((s) => ({ ...s, [modelName]: !s[modelName] }));
   }, []);
 
+  const qc = useQueryClient();
+  // Imperative delete handlers. Both confirm before firing.
+  const deleteModel = useCallback(
+    async (name: string, childCount: number) => {
+      const extra = childCount > 0
+        ? ` Its ${childCount} sequence${childCount === 1 ? "" : "s"} will be orphaned, not deleted.`
+        : "";
+      if (!confirm(`Delete model "${name}"?${extra}`)) return;
+      try {
+        await api.models.delete(name);
+        qc.invalidateQueries({ queryKey: ["models"] });
+        qc.invalidateQueries({ queryKey: ["sequences"] });
+      } catch (e) {
+        alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [qc],
+  );
+  const deleteSequence = useCallback(
+    async (name: string) => {
+      if (!confirm(`Delete sequence "${name}"?`)) return;
+      try {
+        await api.sequences.delete(name);
+        qc.invalidateQueries({ queryKey: ["sequences"] });
+      } catch (e) {
+        alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [qc],
+  );
+
   // Group sequences by model_ref. Sequences with null model_ref go to
   // the "orphan" bucket rendered at the bottom.
   const sequencesByModel = useMemo(() => {
@@ -79,26 +110,43 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
         const isActiveModel = activeModel?.name === m.name;
         return (
           <div key={m.name}>
-            <button
-              type="button"
-              onClick={() => onPickModel(m)}
+            <div
               className={
-                "w-full flex items-center gap-1 px-3 py-1 text-left hover:bg-elevated " +
+                "group flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
                 (isActiveModel ? "text-accent" : "text-text-primary")
               }
             >
-              <span
-                onClick={(e) => { e.stopPropagation(); toggle(m.name); }}
-                className="text-text-muted cursor-pointer p-0.5"
+              <button
+                type="button"
+                onClick={() => toggle(m.name)}
+                className="text-text-muted p-0.5 shrink-0"
                 aria-label={isExpanded ? "Collapse" : "Expand"}
               >
                 {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-              </span>
-              <span className="font-mono truncate flex-1">{m.name}</span>
-              <span className="text-text-muted text-[10px]">
-                {childSeqs.length || ""}
-              </span>
-            </button>
+              </button>
+              <button
+                type="button"
+                onClick={() => onPickModel(m)}
+                className="flex-1 flex items-center gap-1 text-left min-w-0"
+              >
+                <span className="font-mono truncate flex-1">{m.name}</span>
+                <span className="text-text-muted text-[10px]">
+                  {childSeqs.length || ""}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void deleteModel(m.name, childSeqs.length);
+                }}
+                title="Delete model"
+                className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-error transition-opacity p-0.5 shrink-0"
+                aria-label={`Delete model ${m.name}`}
+              >
+                <Trash2 size={11} />
+              </button>
+            </div>
             {isExpanded && (
               <div className="pl-6 pr-3">
                 {childSeqs.length === 0 ? (
@@ -114,25 +162,41 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
                     // if/when the backend starts forwarding it.
                     const recipeSource = (s as SequenceItem & { recipe_source?: string }).recipe_source;
                     return (
-                      <button
+                      <div
                         key={s.name}
-                        type="button"
-                        onClick={() => onLoadRun(s.name)}
                         className={
-                          "w-full flex items-center gap-1 py-1 text-left hover:bg-elevated rounded " +
+                          "group flex items-center gap-1 py-1 hover:bg-elevated rounded " +
                           (simRunName === s.name ? "text-accent" : "text-text-secondary")
                         }
                       >
-                        <span className="font-mono text-[11px] truncate flex-1">
-                          {s.name}
-                        </span>
-                        {recipeSource && (
-                          <span className="text-[9px] px-1 rounded bg-accent/10 text-accent">
-                            {recipeSource.replace(/^★ /, "")}
+                        <button
+                          type="button"
+                          onClick={() => onLoadRun(s.name)}
+                          className="flex-1 flex items-center gap-1 text-left min-w-0"
+                        >
+                          <span className="font-mono text-[11px] truncate flex-1">
+                            {s.name}
                           </span>
-                        )}
-                        <Play size={10} className="opacity-50" />
-                      </button>
+                          {recipeSource && (
+                            <span className="text-[9px] px-1 rounded bg-accent/10 text-accent">
+                              {recipeSource.replace(/^★ /, "")}
+                            </span>
+                          )}
+                          <Play size={10} className="opacity-50" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void deleteSequence(s.name);
+                          }}
+                          title="Delete sequence"
+                          className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-error transition-opacity p-0.5 shrink-0"
+                          aria-label={`Delete sequence ${s.name}`}
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
                     );
                   })
                 )}
@@ -156,20 +220,36 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
             Orphan sequences
           </div>
           {sequencesByModel.orphans.map((s) => (
-            <button
+            <div
               key={s.name}
-              type="button"
-              onClick={() => onLoadRun(s.name)}
               className={
-                "w-full flex items-center gap-1 px-3 py-1 text-left hover:bg-elevated " +
+                "group flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
                 (simRunName === s.name ? "text-accent" : "text-text-secondary")
               }
             >
-              <span className="font-mono text-[11px] truncate flex-1">{s.name}</span>
-              <span className="text-[9px] px-1 rounded bg-elevated text-text-muted">
-                imported
-              </span>
-            </button>
+              <button
+                type="button"
+                onClick={() => onLoadRun(s.name)}
+                className="flex-1 flex items-center gap-1 text-left min-w-0"
+              >
+                <span className="font-mono text-[11px] truncate flex-1">{s.name}</span>
+                <span className="text-[9px] px-1 rounded bg-elevated text-text-muted">
+                  imported
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void deleteSequence(s.name);
+                }}
+                title="Delete sequence"
+                className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-error transition-opacity p-0.5 shrink-0"
+                aria-label={`Delete sequence ${s.name}`}
+              >
+                <Trash2 size={11} />
+              </button>
+            </div>
           ))}
         </>
       )}

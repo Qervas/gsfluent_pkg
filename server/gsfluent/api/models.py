@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..core import models as m
+from ..core.library import Model
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -114,3 +115,22 @@ async def get_model_file(path: str, filename: str | None = None):
         media_type="application/octet-stream",
         filename=ply_path.name,
     )
+
+
+@router.delete("/{name}")
+def delete_endpoint(name: str):
+    """Remove a model from the library.
+
+    For internally-stored models (uploaded via /upload), the model
+    directory under MODELS_DIR is recursively deleted. For externally-
+    registered models (registered via /register pointing at an existing
+    on-disk path), only the registry entry is dropped — we never touch
+    user files outside the library root. Sequences referencing this
+    model by `model_ref` are NOT cascaded; they become orphans.
+    """
+    if not Model.exists(name):
+        raise HTTPException(404, f"model not found: {name}")
+    ok = Model.delete(name)
+    if not ok:
+        raise HTTPException(500, f"failed to delete model: {name}")
+    return {"deleted": name}
