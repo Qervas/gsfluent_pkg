@@ -62,6 +62,22 @@ from typing import Optional
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
+def _active_run_present(server_base: str) -> bool:
+    """True iff the server has at least one active sim run.
+
+    Used by the poll loop to switch cadence between idle (slow,
+    bandwidth-friendly) and during-sim (fast, ~1s updates so the
+    workbench sees per-batch frame progress instead of 10s lag).
+    """
+    try:
+        with urllib.request.urlopen(
+            f"{server_base.rstrip('/')}/api/runs", timeout=5,
+        ) as r:
+            return len(json.loads(r.read())) > 0
+    except Exception:
+        return False
+
+
 @dataclass
 class SyncStatus:
     """Snapshot written to --status-file each tick. The React UI reads
@@ -454,9 +470,14 @@ def main() -> int:
         sync_once(server, args.cache_root, library_root, viser_control,
                   status, args.verbose)
         write_status(status, args.status_file)
+        # Cadence: 1s when a sim is running (so users see frames advance
+        # in viser without the 10s lag), interval (default 10s) otherwise.
+        # The /api/runs endpoint is cheap (~5ms); polling it every tick
+        # is fine.
+        next_sleep = 1.0 if _active_run_present(server) else float(args.interval)
         # Sleep in 0.5s slices so SIGINT is responsive.
         slept = 0.0
-        while slept < args.interval and not stop_requested[0]:
+        while slept < next_sleep and not stop_requested[0]:
             time.sleep(0.5)
             slept += 0.5
 
