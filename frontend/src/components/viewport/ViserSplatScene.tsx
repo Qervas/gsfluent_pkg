@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
+import { useActiveCell } from "@/lib/use-active-cell";
 
 /**
  * Splats-mode renderer: viser running headless on the server side, React
@@ -39,10 +40,10 @@ export function ViserSplatScene() {
     location.protocol === "https:" &&
     (viserUrl.startsWith("http:") || controlUrl.startsWith("http:"));
 
-  // Pull what we need to forward to viser. simRunName names the active
-  // sequence ("jelly_cluster_server" etc.); the viser .npz cache uses the
-  // same stem so we send the bare run name as the cell.
-  const simRunName = useStore((s) => s.simRunName);
+  // Pull what we need to forward to viser. activeCell names the active
+  // resource — viser's .npz cache key is the cell's wire-format name
+  // (kind prefix + bare name), so we use that directly.
+  const { wireName } = useActiveCell();
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
 
   // Track what we've already sent so we don't re-POST identical state on
@@ -75,16 +76,11 @@ export function ViserSplatScene() {
   }, [controlUrl]);
 
   // Forward state changes. Only POST if (cell, frame) actually changed.
-  // simRunName === "_model:foo" is a static-model preview, not a sequence.
-  // The viser cell on disk is named `<modelName>.npz` (no prefix) because
-  // the upload path writes `work/cache/viser/<modelName>.npz`, so strip
-  // the `_model:` prefix here before forwarding. Sequence runs pass
-  // through unchanged — their cells are named by run name directly.
+  // `wireName` already carries the `model:` / `sequence:` prefix viser
+  // uses to dispatch between .ply (static models) and .npz (sequences).
   useEffect(() => {
     if (!controlReachable) return;
-    const cell = simRunName
-      ? (simRunName.startsWith("_model:") ? simRunName.slice("_model:".length) : simRunName)
-      : null;
+    const cell = wireName;
     const frame = currentFrameIdx;
     if (lastSent.current.cell === cell && lastSent.current.frame === frame) {
       return;
@@ -99,7 +95,7 @@ export function ViserSplatScene() {
     }).catch(() => {
       /* network blip — next state change will retry; no need to surface */
     });
-  }, [controlReachable, controlUrl, simRunName, currentFrameIdx]);
+  }, [controlReachable, controlUrl, wireName, currentFrameIdx]);
 
   // ---- render ----------------------------------------------------------
   if (mixedContent) {
@@ -139,12 +135,10 @@ export function ViserSplatScene() {
     );
   }
 
-  // cellMissing check uses the same prefix-stripping as the /set forwarder
-  // above, so static-model previews are validated against the actual cell
-  // name on disk (`<modelName>.npz`, not `_model:<modelName>.npz`).
-  const cellName = simRunName
-    ? (simRunName.startsWith("_model:") ? simRunName.slice("_model:".length) : simRunName)
-    : null;
+  // cellMissing check uses the same wire-format name as the /set forwarder
+  // above — viser's `/state.cells` list is in wire format, so this compares
+  // apples-to-apples without any prefix-mangling.
+  const cellName = wireName;
   const cellMissing =
     serverCells !== null && cellName !== null && !serverCells.includes(cellName);
 
