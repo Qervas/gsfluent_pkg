@@ -60,6 +60,40 @@ _ACCENT_RGB    = (34, 211, 238)   # tailwind `accent`     #22d3ee
 _VISER_K = 1.0
 
 
+def fetch_model_ply(server_base: str, model_path_on_server: str) -> Path:
+    """Download a model's .ply from the server, cache it to a local
+    temp dir, and return the local path.
+
+    Cache key is the absolute path on the server (so collisions are
+    impossible across different models). Files persist across viser
+    restarts to avoid re-downloading; the laptop's /tmp churn handles
+    eviction. Returns the cached Path.
+
+    Args:
+      server_base: e.g. "http://localhost:8080" (the SSH tunnel target)
+      model_path_on_server: absolute path the server knows, e.g.
+        "$GSFLUENT_PKG_ROOT_tmp/work/library/models/<name>"
+    """
+    import hashlib
+    import urllib.parse
+    import urllib.request
+
+    cache_dir = Path("/tmp/gsfluent_viser_model_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(model_path_on_server.encode()).hexdigest()[:16]
+    local_path = cache_dir / f"{key}.ply"
+    if local_path.exists():
+        return local_path
+
+    url = f"{server_base.rstrip('/')}/api/models/file?" \
+          f"path={urllib.parse.quote(model_path_on_server)}"
+    tmp = local_path.with_suffix(".ply.partial")
+    with urllib.request.urlopen(url, timeout=120) as r:
+        tmp.write_bytes(r.read())
+    tmp.rename(local_path)
+    return local_path
+
+
 def mmap_cell(npz_path: Path) -> dict:
     """Mmap a sequence .npz and pre-compute its bbox.
 
