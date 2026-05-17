@@ -261,7 +261,12 @@ export function SimulationCard({ subscribe }: Props) {
           Pick a recipe above to configure simulation.
         </div>
       ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto">
+        <div
+          className={
+            "flex-1 min-h-0 flex flex-col " +
+            (view === "form" ? "overflow-y-auto" : "overflow-hidden")
+          }
+        >
           {view === "form" ? <Properties /> : <SimJsonBody />}
         </div>
       )}

@@ -316,7 +316,7 @@ function RecipeDetail({ name }: { name: string }) {
           {saveErr}
         </div>
       )}
-      <div className="flex-1 min-h-0 overflow-auto">
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
         <JsonEditor
           value={current}
           baseline={null}

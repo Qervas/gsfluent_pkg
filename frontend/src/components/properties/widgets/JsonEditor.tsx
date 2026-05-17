@@ -50,6 +50,25 @@ export function JsonEditor({ value, baseline, readOnly, onChange, onError }: Jso
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [errorLine, setErrorLine] = useState<number | null>(null);
   const ta = useRef<HTMLTextAreaElement | null>(null);
+  const preRef = useRef<HTMLPreElement | null>(null);
+  const preInnerRef = useRef<HTMLDivElement | null>(null);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
+
+  // Sync the highlight overlay + gutter to the textarea's scroll. Both
+  // surfaces use overflow:hidden (so they don't add scrollbars) and are
+  // translated via transform — only the textarea is a scroll container.
+  const onScroll = () => {
+    const t = ta.current;
+    if (!t) return;
+    const inner = preInnerRef.current;
+    if (inner) {
+      inner.style.transform = `translate(${-t.scrollLeft}px, ${-t.scrollTop}px)`;
+    }
+    const g = gutterRef.current;
+    if (g) {
+      g.style.transform = `translateY(${-t.scrollTop}px)`;
+    }
+  };
 
   // Re-sync from parent only when their value diverges from ours.
   useEffect(() => {
@@ -155,9 +174,9 @@ export function JsonEditor({ value, baseline, readOnly, onChange, onError }: Jso
   const gutterWidth = Math.max(2, String(lineCount).length) * 8 + 16; // approx px
 
   return (
-    <div className="relative font-mono text-[11px] leading-[1.55]">
+    <div className="relative font-mono text-[11px] leading-[1.55] flex flex-col min-h-0 h-full">
       {errorMsg && (
-        <div className="px-3 py-1 text-warning text-[10px] bg-warning/10 border-b border-warning/30 flex items-center gap-2">
+        <div className="px-3 py-1 text-warning text-[10px] bg-warning/10 border-b border-warning/30 flex items-center gap-2 shrink-0">
           <span className="font-medium">JSON parse error</span>
           {errorLine !== null && (
             <span className="font-mono text-warning/70">line {errorLine}</span>
@@ -169,71 +188,76 @@ export function JsonEditor({ value, baseline, readOnly, onChange, onError }: Jso
       )}
 
       {readOnly && (
-        <div className="px-3 py-1 text-text-muted text-[10px] bg-elevated/40 border-b border-border flex items-center gap-1.5">
+        <div className="px-3 py-1 text-text-muted text-[10px] bg-elevated/40 border-b border-border flex items-center gap-1.5 shrink-0">
           <Lock size={10} />
           <span>Read-only — duplicate this recipe to edit</span>
         </div>
       )}
 
-      <div className="relative">
-        {/* Gutter + highlight overlay. Pointer-events disabled so the
-            textarea beneath receives clicks. */}
+      <div className="relative flex-1 min-h-0">
+        {/* Gutter — line numbers, translates vertically with textarea
+            scroll. Pointer-events disabled so the textarea receives clicks. */}
+        <div
+          aria-hidden
+          className="absolute inset-y-0 left-0 pointer-events-none text-text-muted/50 text-right select-none overflow-hidden"
+          style={{ width: gutterWidth, paddingTop: 12, paddingRight: 8 }}
+        >
+          <div ref={gutterRef} style={{ willChange: "transform" }}>
+            {lines.map((_, i) => (
+              <div
+                key={i}
+                className={
+                  "leading-[1.55] " +
+                  (errorLine === i + 1 ? "text-warning font-semibold" : "")
+                }
+              >
+                {i + 1}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Highlight overlay — translates with textarea scroll. */}
         <pre
+          ref={preRef}
           aria-hidden
           className="absolute inset-0 m-0 whitespace-pre overflow-hidden pointer-events-none"
           style={{ paddingLeft: gutterWidth + 12, paddingTop: 12, paddingRight: 12, paddingBottom: 12 }}
         >
-          {lines.map((line, i) => {
-            const m = lineMeta[i];
-            const overrideClass = m?.isOverride
-              ? "bg-accent/5 border-l-2 border-accent -ml-1 pl-1"
-              : "";
-            return (
-              <div
-                key={i}
-                className={overrideClass + " relative"}
-              >
-                {highlightLine(line)}
-                {m?.isFirstOfOverride && m.baselineRepr !== null && (
-                  <span className="text-warning/80 text-[10px] ml-2">
-                    {" "}// was: {truncateRepr(m.baselineRepr, 36)}
-                  </span>
-                )}
-              </div>
-            );
-          })}
+          <div ref={preInnerRef} style={{ willChange: "transform" }}>
+            {lines.map((line, i) => {
+              const m = lineMeta[i];
+              const overrideClass = m?.isOverride
+                ? "bg-accent/5 border-l-2 border-accent -ml-1 pl-1"
+                : "";
+              return (
+                <div
+                  key={i}
+                  className={overrideClass + " relative"}
+                >
+                  {highlightLine(line)}
+                  {m?.isFirstOfOverride && m.baselineRepr !== null && (
+                    <span className="text-warning/80 text-[10px] ml-2">
+                      {" "}// was: {truncateRepr(m.baselineRepr, 36)}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </pre>
-
-        {/* Gutter — line numbers, sits visually on top of the overlay
-            but doesn't take pointer events. */}
-        <div
-          aria-hidden
-          className="absolute inset-y-0 left-0 pointer-events-none text-text-muted/50 text-right select-none"
-          style={{ width: gutterWidth, paddingTop: 12, paddingRight: 8 }}
-        >
-          {lines.map((_, i) => (
-            <div
-              key={i}
-              className={
-                "leading-[1.55] " +
-                (errorLine === i + 1 ? "text-warning font-semibold" : "")
-              }
-            >
-              {i + 1}
-            </div>
-          ))}
-        </div>
 
         <textarea
           ref={ta}
           value={text}
           readOnly={readOnly}
           onChange={(e) => handleChange(e.target.value)}
+          onScroll={onScroll}
           spellCheck={false}
           wrap="off"
           className={
-            "relative block w-full min-h-[280px] bg-transparent text-transparent " +
-            "caret-text-primary resize-y selection:bg-accent/25 focus:outline-none " +
+            "relative block w-full h-full bg-transparent text-transparent " +
+            "caret-text-primary resize-none selection:bg-accent/25 focus:outline-none " +
             "whitespace-pre overflow-auto " +
             (readOnly ? "cursor-not-allowed" : "")
           }
