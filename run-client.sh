@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Client-side launcher — runs on the machine that views the workbench.
 #
-# Brings up four local services + opens the SPA in a browser, all
+# Brings up three local services + opens the SPA in a browser, all
 # managed by this script so a single Ctrl-C tears the stack down:
 #
 #   1. SPA          — vite preview on :$SPA_PORT, serves frontend/dist/
-#   2. viser        — viser :$VISER_PORT  + control API :$CONTROL_PORT (Splats mode)
+#   2. viser        — viser :$VISER_PORT  + control API :$CONTROL_PORT
+#                     (sole renderer post-Phase-4)
 #   3. sync_daemon  — mirrors the server's .npz cache locally
-#   4. local_stream — ws :$STREAM_PORT (Points mode, mmaps the synced .npz)
 #
 # Optionally + recommended:
 #   0. SSH tunnel   — laptop:$LOCAL_PORT ↔ $SERVER_SSH:$REMOTE_PORT
@@ -35,7 +35,6 @@
 #   SPA_PORT         default 4173      vite preview (SPA) port
 #   VISER_PORT       default 8091
 #   CONTROL_PORT     default 8092
-#   STREAM_PORT      default 8083
 #   POLL_INTERVAL    default 10        sync_daemon poll, seconds
 #   OPEN_BROWSER     default 1         set 0 to skip
 #
@@ -52,7 +51,6 @@ REMOTE_PORT="${REMOTE_PORT:-8080}"
 SPA_PORT="${SPA_PORT:-4173}"
 VISER_PORT="${VISER_PORT:-8091}"
 CONTROL_PORT="${CONTROL_PORT:-8092}"
-STREAM_PORT="${STREAM_PORT:-8083}"
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 CACHE_ROOT="$PKG_ROOT/work/cache"
 OPEN_BROWSER="${OPEN_BROWSER:-1}"
@@ -167,14 +165,6 @@ echo ">>> sync_daemon      polling every ${POLL_INTERVAL}s"
     --viser-control "http://localhost:$CONTROL_PORT" \
     --interval "$POLL_INTERVAL" \
     --verbose &
-PIDS+=($!)
-
-# ---- Stage 4: local_stream (Points WS) ----
-echo ">>> local_stream     ws://localhost:$STREAM_PORT/api/stream"
-"$VENV_PY" "$PKG_ROOT/tools/local_stream.py" \
-    --cache-root "$CACHE_ROOT" \
-    --port "$STREAM_PORT" \
-    --host 127.0.0.1 &
 PIDS+=($!)
 
 # ---- open browser ----

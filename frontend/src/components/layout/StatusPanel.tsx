@@ -50,9 +50,12 @@ export function StatusPanel() {
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simLog = useStore((s) => s.simLog);
   const simFirstFrameAt = useStore((s) => s.simFirstFrameAt);
-  const simRunName = useStore((s) => s.simRunName);
-  const staticAttrs = useStore((s) => s.staticAttrs);
-  const frameCount = useStore((s) => s.frameXyz.size);
+  const nFrames = useStore((s) => s.viserState.n_frames);
+  // The model splat count used to come from a streamed `static-attrs`
+  // message. Viser owns model loading now, so we no longer have a count
+  // surface — the StatusPanel shows the model name + viser handles the
+  // splat count internally. Leaving the slot in place keeps the layout.
+  const activeCellName = activeCell?.name ?? null;
   // Track the unified left rail so the console drawer doesn't collide
   // with it. The right side has no glass card after Phase 3, so only
   // the left-side reactivity is needed.
@@ -66,7 +69,7 @@ export function StatusPanel() {
     }
   }, [simLog, consoleOpen]);
 
-  const mode = deriveMode(simState, simRunName, frameCount);
+  const mode = deriveMode(simState, activeCell, nFrames);
 
   const isPreview = mode.kind === "model_preview";
   const tail = simLog.slice(-80).join("\n");
@@ -118,10 +121,10 @@ export function StatusPanel() {
         >
           <span className="text-accent">●</span>
           <span>Replay</span>
-          {simRunName && (
+          {activeCellName && (
             <>
               <span className="text-text-muted">·</span>
-              <span className="truncate max-w-[200px]">{simRunName}</span>
+              <span className="truncate max-w-[200px]">{activeCellName}</span>
             </>
           )}
           <span className="text-text-muted ml-2 pl-2 border-l border-border/40">⌘K</span>
@@ -192,8 +195,6 @@ export function StatusPanel() {
             <span className="capitalize">{modeLabel(mode)}</span>
             <span className="text-text-muted">·</span>
             <span className="truncate max-w-[180px]">{mode.modelName}</span>
-            <span className="text-text-muted">·</span>
-            <span>{(staticAttrs?.n ?? 0).toLocaleString()} splats</span>
           </>
         ) : (
           <>
