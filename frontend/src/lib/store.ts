@@ -97,6 +97,13 @@ type State = {
   runBlockedByJson: boolean;
   setRunBlockedByJson: (v: boolean) => void;
 
+  // Transient bottom-center toast for ephemeral feedback (e.g., "Loaded
+  // X into Sim" when the recipes modal closes). Auto-dismissed by the
+  // renderer after ~3s.
+  toast: { message: string; kind: "info" | "success" | "error" } | null;
+  showToast: (message: string, kind?: "info" | "success" | "error") => void;
+  clearToast: () => void;
+
   // Active render path. "points" uses the lightweight Three.js Points
   // pipeline that streams over the websocket and supports per-frame
   // position updates (sim playback). "splat" loads the raw .ply via
@@ -219,6 +226,10 @@ export const useStore = create<State>((set) => ({
 
   runBlockedByJson: false,
   setRunBlockedByJson: (v) => set({ runBlockedByJson: v }),
+
+  toast: null,
+  showToast: (message, kind = "info") => set({ toast: { message, kind } }),
+  clearToast: () => set({ toast: null }),
 
   setPanelCollapsed: (panel, collapsed) =>
     set((st) => {
