@@ -7,6 +7,7 @@
     -2,
     2
   ],
+  "sim_area_frame": "model",
   "mpm_space_vertical_upward_axis": [
     0,
     0,
