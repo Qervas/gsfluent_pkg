@@ -76,6 +76,7 @@ export default function App() {
       setActiveModel(m);
       resetForNewRun(`_model:${m.name}`);
       setSimState("idle");
+      useStore.getState().setSimKind("preview");
       client.loadModel(m.path);
     },
     [client, resetForNewRun, setActiveModel, setSimState],
@@ -91,6 +92,7 @@ export default function App() {
     if (simRunName === `_model:${activeModel.name}`) return;
     resetForNewRun(`_model:${activeModel.name}`);
     setSimState("idle");
+    useStore.getState().setSimKind("preview");
     client.loadModel(activeModel.path);
   }, [activeModel, simRunName, client, resetForNewRun, setSimState]);
 
@@ -102,6 +104,7 @@ export default function App() {
   const onLoadRun = useCallback(
     (run_name: string) => {
       resetForNewRun(run_name);
+      useStore.getState().setSimKind("replay");
       client.subscribe(run_name);
     },
     [client, resetForNewRun],
@@ -123,6 +126,7 @@ export default function App() {
     const baseName = st.activeRecipeName.replace(/^★ /, "");
     const run_name = `${st.activeModel.name}_${baseName}_${ts}`;
     st.resetForNewRun(run_name);
+    useStore.getState().setSimKind("sim");
     try {
       await api.runs.start({
         run_name,

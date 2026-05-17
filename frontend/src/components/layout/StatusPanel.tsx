@@ -43,6 +43,7 @@ function computeEta(
 
 export function StatusPanel() {
   const simState = useStore((s) => s.simState);
+  const simKind = useStore((s) => s.simKind);
   const simNFrames = useStore((s) => s.simNFrames);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simLog = useStore((s) => s.simLog);
@@ -76,6 +77,71 @@ export function StatusPanel() {
     : simState === "done"
     ? "0:00 (complete)"
     : "—";
+
+  if (simKind === "replay") {
+    // Replay of a saved sequence — show a quiet playback indicator,
+    // not sim-run progress. PlaybackBar (bottom-center) carries the
+    // frame counter + scrubber; this pill just identifies what's loaded
+    // and keeps the console toggle accessible.
+    return (
+      <>
+        {consoleOpen && (
+          <div
+            className={`fixed bottom-14 h-72 z-30 glass-card overflow-hidden flex flex-col transition-[left] duration-panel ease-motion ${
+              outlinerOpen ? "left-[344px]" : "left-3"
+            } right-3`}
+            role="region"
+            aria-label="Run console"
+          >
+            <div
+              ref={consoleRef}
+              className="flex-1 overflow-auto font-mono text-[11px] p-2 leading-tight whitespace-pre-wrap"
+            >
+              {simLog.length === 0 ? (
+                <span className="text-text-muted">(no output yet)</span>
+              ) : (
+                simLog.map((line, i) => (
+                  <div key={i} className="text-text-primary">
+                    {line}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+        <div
+          className="fixed bottom-3 right-3 z-40 glass-card px-3 h-9 flex items-center gap-2 text-xs text-text-muted font-mono"
+          role="status"
+          aria-label="Playback"
+        >
+          <span className="text-accent">●</span>
+          <span>Replay</span>
+          {simRunName && (
+            <>
+              <span className="text-text-muted">·</span>
+              <span className="truncate max-w-[200px]">{simRunName}</span>
+            </>
+          )}
+          <span className="text-text-muted ml-2 pl-2 border-l border-border/40">⌘K</span>
+          <button
+            onClick={() => setConsoleOpen((o) => !o)}
+            className="flex items-center gap-1 hover:text-text-primary"
+            title={consoleOpen ? "Hide console" : "Show console"}
+            aria-expanded={consoleOpen}
+          >
+            <ChevronUp
+              size={11}
+              className={
+                "transition-transform duration-fast " +
+                (consoleOpen ? "rotate-180" : "")
+              }
+            />
+            console
+          </button>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
