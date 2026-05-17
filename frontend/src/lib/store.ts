@@ -2,7 +2,6 @@ import { create } from "zustand";
 import type { ModelItem, StaticAttrs, Workspace } from "./types";
 
 type SimState = "idle" | "running" | "done" | "error" | "cancelled";
-export type RenderMode = "points" | "splat";
 
 // Phase 3 playback speed: 1× = sequence's fps_hint (24 by default).
 // Multiplier scales the inter-frame DELAY, not the index step — so 4× still
@@ -117,13 +116,6 @@ type State = {
   showToast: (message: string, kind?: "info" | "success" | "error") => void;
   clearToast: () => void;
 
-  // Active render path. "points" uses the lightweight Three.js Points
-  // pipeline that streams over the websocket and supports per-frame
-  // position updates (sim playback). "splat" loads the raw .ply via
-  // GET /api/models/file and renders proper anisotropic gaussian splats
-  // — only available for static model preview, not sim runs.
-  renderMode: RenderMode;
-
   // Last-known Points-mode camera state. Written continuously by
   // SplatScene as the user orbits, read by Viewport.tsx's mode-toggle
   // effect so the Splats iframe gets POSTed the same viewpoint. Null
@@ -157,7 +149,6 @@ type State = {
   setPlaying: (p: boolean) => void;
   setSceneScale: (diag: number, center: [number, number, number]) => void;
   setSceneFloor: (z: number) => void;
-  setRenderMode: (m: RenderMode) => void;
   // Phase 3 setters.
   setSpeedX: (s: SpeedX) => void;
   setLoop: (loop: boolean) => void;
@@ -234,7 +225,6 @@ export const useStore = create<State>((set) => ({
   sceneScale: 10,
   sceneCenter: [0, 0, 0],
   sceneFloor: 0,
-  renderMode: "points",
   pointsCamera: null,
   panels: loadPanels(),
 
@@ -300,7 +290,6 @@ export const useStore = create<State>((set) => ({
   setPlaying: (p) => set({ playing: p }),
   setSceneScale: (diag, center) => set({ sceneScale: diag, sceneCenter: center }),
   setSceneFloor: (z) => set({ sceneFloor: z }),
-  setRenderMode: (mode) => set({ renderMode: mode }),
   setSpeedX: (s) => set({ speedX: s }),
   setLoop: (loop) => set({ loop }),
   setFpsHint: (fps) => set({ fpsHint: fps > 0 ? fps : 24 }),

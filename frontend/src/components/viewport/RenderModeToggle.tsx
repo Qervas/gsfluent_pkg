@@ -1,20 +1,35 @@
-import { useStore } from "@/lib/store";
+import { useState } from "react";
 
-/**
- * Floating viewport pill: switch between the lightweight Three.js Points
- * pipeline and the proper anisotropic Gaussian-splat renderer.
+/** Floating viewport pill: switch between Points and Splat rendering.
  *
- * "Splat" is greyed out + locked to "Points" when there's no static model
- * loaded — for sim runs, per-frame position streaming requires the points
- * path (the splat library can't keep up with per-frame buffer updates).
+ *  Dispatches to viser's /mode endpoint. State is local because viser
+ *  owns the source of truth — we just optimistically reflect the user's
+ *  choice in the toggle while the POST is in flight. If the POST fails
+ *  (viser down), the next /state poll in ViserSplatScene would surface
+ *  the mismatch.
  *
- * Positioning: rides the right edge of the viewport. Phase 3 removed
- * the right-anchored Properties card, so the toggle now parks
- * statically at `right-3`.
+ *  Positioning: rides the right edge of the viewport at `right-3`.
+ *  Phase 3 removed the right-anchored Properties card; the toggle now
+ *  parks statically without panel-aware offsets.
  */
 export function RenderModeToggle({ splatAvailable }: { splatAvailable: boolean }) {
-  const renderMode = useStore((s) => s.renderMode);
-  const setRenderMode = useStore((s) => s.setRenderMode);
+  const [mode, setMode] = useState<"splat" | "points">("splat");
+
+  const controlUrl = (import.meta.env.VITE_VISER_CONTROL_URL as string | undefined)
+    || `http://${location.hostname}:8092`;
+
+  const switchMode = async (next: "splat" | "points") => {
+    setMode(next);
+    try {
+      await fetch(`${controlUrl}/mode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: next }),
+      });
+    } catch {
+      /* viser unreachable; user will retry */
+    }
+  };
 
   const buttonClass = (active: boolean, disabled: boolean) =>
     `px-2 py-1 text-[10px] uppercase tracking-wider font-mono transition-colors ${
@@ -31,21 +46,18 @@ export function RenderModeToggle({ splatAvailable }: { splatAvailable: boolean }
       title={
         splatAvailable
           ? "Render mode"
-          : "Splat rendering is available for static model preview only — sim runs use Points"
+          : "Splat rendering requires an active cell"
       }
     >
       <button
-        className={buttonClass(renderMode === "points", false)}
-        onClick={() => setRenderMode("points")}
+        className={buttonClass(mode === "points", false)}
+        onClick={() => switchMode("points")}
       >
         Points
       </button>
       <button
-        className={buttonClass(
-          renderMode === "splat" && splatAvailable,
-          !splatAvailable,
-        )}
-        onClick={() => splatAvailable && setRenderMode("splat")}
+        className={buttonClass(mode === "splat" && splatAvailable, !splatAvailable)}
+        onClick={() => splatAvailable && switchMode("splat")}
         disabled={!splatAvailable}
       >
         Splat
