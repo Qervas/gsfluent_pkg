@@ -75,12 +75,16 @@ export function ViserSplatScene() {
   }, [controlUrl]);
 
   // Forward state changes. Only POST if (cell, frame) actually changed.
-  // simRunName === "_model:foo" is a static-model preview, not a sequence;
-  // pass it through anyway so the cell-mismatch path in the API reports a
-  // clear "unknown cell" error if it really doesn't exist.
+  // simRunName === "_model:foo" is a static-model preview, not a sequence.
+  // The viser cell on disk is named `<modelName>.npz` (no prefix) because
+  // the upload path writes `work/cache/viser/<modelName>.npz`, so strip
+  // the `_model:` prefix here before forwarding. Sequence runs pass
+  // through unchanged — their cells are named by run name directly.
   useEffect(() => {
     if (!controlReachable) return;
-    const cell = simRunName ?? null;
+    const cell = simRunName
+      ? (simRunName.startsWith("_model:") ? simRunName.slice("_model:".length) : simRunName)
+      : null;
     const frame = currentFrameIdx;
     if (lastSent.current.cell === cell && lastSent.current.frame === frame) {
       return;
@@ -135,9 +139,14 @@ export function ViserSplatScene() {
     );
   }
 
+  // cellMissing check uses the same prefix-stripping as the /set forwarder
+  // above, so static-model previews are validated against the actual cell
+  // name on disk (`<modelName>.npz`, not `_model:<modelName>.npz`).
+  const cellName = simRunName
+    ? (simRunName.startsWith("_model:") ? simRunName.slice("_model:".length) : simRunName)
+    : null;
   const cellMissing =
-    serverCells !== null && simRunName !== null && !simRunName.startsWith("_model:") &&
-    !serverCells.includes(simRunName);
+    serverCells !== null && cellName !== null && !serverCells.includes(cellName);
 
   return (
     <div className="relative h-full w-full bg-canvas">
@@ -158,8 +167,8 @@ export function ViserSplatScene() {
       />
       {cellMissing && (
         <div className="absolute top-2 left-2 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded">
-          Sequence <code>{simRunName}</code> not in viser cache. Run{" "}
-          <code>python tools/batch_convert_to_npz.py {simRunName}</code>.
+          Cell <code>{cellName}</code> not in viser cache. Run{" "}
+          <code>python tools/batch_convert_to_npz.py {cellName}</code>.
         </div>
       )}
     </div>

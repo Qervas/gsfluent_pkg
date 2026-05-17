@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 
 from . import library as lib
+from ..server import PKG_ROOT
 from .library import MODELS_DIR, Model, read_ply_bbox_and_count
 
 _log = logging.getLogger(__name__)
@@ -145,6 +146,25 @@ def wrap_ply_upload(
         )
     except Exception as e:
         _log.warning("model %s wrote ply but _meta.json failed: %s", name, e)
+
+    # Build the viser .npz cell so Splat-mode in the viewport actually
+    # renders THIS model instead of whatever cell viser happened to load
+    # last. Best-effort: a cell-gen failure must not fail the upload
+    # itself — Points mode still works, and the lazy backfill path in
+    # `_ensure_viser_cell` (called from check_hash + upload-dedup short-
+    # circuit) will retry the next time the user re-drops the same file.
+    try:
+        from .static_to_viser import build_viser_cell
+
+        viser_cache = PKG_ROOT / "work" / "cache" / "viser"
+        viser_cache.mkdir(parents=True, exist_ok=True)
+        build_viser_cell(ply_path, viser_cache / f"{name}.npz")
+        _log.info("built viser cell for static model %s", name)
+    except Exception as e:
+        _log.warning(
+            "could not build viser cell for %s: %s; Splat mode won't work for this model",
+            name, e,
+        )
 
     return name, model_dir
 

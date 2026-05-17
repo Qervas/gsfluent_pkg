@@ -1,6 +1,7 @@
 import gzip as _gz
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -10,8 +11,49 @@ from pydantic import BaseModel
 
 from ..core import models as m
 from ..core.library import Model
+from ..server import PKG_ROOT
 
 router = APIRouter(prefix="/api/models", tags=["models"])
+
+_log = logging.getLogger(__name__)
+
+# Viser cells live alongside the sequence cache that
+# `tools/sequence_to_viser_npz.py` writes — viser_headless scans one
+# directory for both static-model and sequence cells.
+_VISER_CACHE = PKG_ROOT / "work" / "cache" / "viser"
+
+
+def _ensure_viser_cell(model: Model) -> None:
+    """Backfill the viser .npz cell for an existing model if it's missing.
+
+    The upload path always builds the cell at import time, but models
+    uploaded before that codepath landed don't have one. This helper is
+    called from any "we found this model already exists" branch so the
+    cell gets lazily filled the next time the user re-drops or re-checks
+    by hash.
+
+    Best-effort: failures are swallowed (logged at warning). The user
+    still gets the model in Points mode; Splat mode just won't have a
+    cell until the next attempt.
+    """
+    cell_path = _VISER_CACHE / f"{model.name}.npz"
+    if cell_path.exists():
+        return
+    try:
+        from ..core.static_to_viser import build_viser_cell
+
+        ply = model.highest_iteration_ply()
+        if ply is None:
+            _log.warning(
+                "cannot backfill viser cell for %s: no point_cloud.ply found",
+                model.name,
+            )
+            return
+        _VISER_CACHE.mkdir(parents=True, exist_ok=True)
+        build_viser_cell(ply, cell_path)
+        _log.info("backfilled viser cell for static model %s", model.name)
+    except Exception as e:
+        _log.warning("could not backfill viser cell for %s: %s", model.name, e)
 
 
 @router.get("")
@@ -37,6 +79,10 @@ def check_hash(req: HashCheckRequest):
     existing = Model.find_by_hash(req.sha256)
     if existing is None:
         return {"exists": False}
+    # Lazy backfill: legacy models uploaded before the auto-cell-gen
+    # codepath need their viser cell built the first time they're seen
+    # again. Cheap if the cell is already on disk (just an exists check).
+    _ensure_viser_cell(existing)
     meta = existing.meta_dict()
     return {
         "exists": True,
@@ -84,6 +130,10 @@ async def upload(
     sha = hashlib.sha256(content).hexdigest()
     existing = Model.find_by_hash(sha)
     if existing is not None:
+        # Same lazy backfill as /check_hash: clients that skip the
+        # hash-check phase still get their legacy model's viser cell
+        # filled in on this defensive dedup short-circuit.
+        _ensure_viser_cell(existing)
         return existing.meta_dict()
 
     cam_bytes: bytes | None = None
@@ -189,4 +239,11 @@ def delete_endpoint(name: str):
     ok = Model.delete(name)
     if not ok:
         raise HTTPException(500, f"failed to delete model: {name}")
+    # Best-effort: drop the derived viser cell too so the cache doesn't
+    # accumulate orphaned .npz files and so a future model uploaded with
+    # the same generated name can't accidentally inherit stale geometry.
+    try:
+        (_VISER_CACHE / f"{name}.npz").unlink()
+    except OSError:
+        pass
     return {"deleted": name}
