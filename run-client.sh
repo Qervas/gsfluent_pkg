@@ -46,8 +46,11 @@ set -euo pipefail
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PY="$PKG_ROOT/server/.venv/bin/python"
 
-LOCAL_PORT="${LOCAL_PORT:-8080}"
-REMOTE_PORT="${REMOTE_PORT:-8080}"
+# Default port matches the canonical server port (start-gsfluent-server.sh
+# / README / firewall instructions all use 18080). Override via env if your
+# server's run-server.sh is bound elsewhere.
+LOCAL_PORT="${LOCAL_PORT:-18080}"
+REMOTE_PORT="${REMOTE_PORT:-18080}"
 SPA_PORT="${SPA_PORT:-4173}"
 VISER_PORT="${VISER_PORT:-8091}"
 CONTROL_PORT="${CONTROL_PORT:-8092}"
@@ -121,7 +124,16 @@ echo ">>> SPA:             http://localhost:$SPA_PORT/"
 # bind via bash's /dev/tcp so the next stages don't race the tunnel.
 if [[ -n "${SERVER_SSH:-}" ]]; then
     echo ">>> ssh tunnel       :$LOCAL_PORT → $SERVER_SSH:$REMOTE_PORT"
-    ssh -N -L "$LOCAL_PORT:localhost:$REMOTE_PORT" "$SERVER_SSH" &
+    # ExitOnForwardFailure: if local port is already bound, abort the
+    # SSH instead of silently producing a false "tunnel up" (the TCP
+    # probe below would otherwise hit whatever was on :$LOCAL_PORT).
+    # ServerAlive*: detect dead tunnels within ~90 s so a hung WAN
+    # connection doesn't leave the client stack pointing at nothing.
+    ssh -N \
+        -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -L "$LOCAL_PORT:localhost:$REMOTE_PORT" "$SERVER_SSH" &
     PIDS+=($!)
     for _ in $(seq 1 20); do
         if (echo > "/dev/tcp/127.0.0.1/$LOCAL_PORT") 2>/dev/null; then

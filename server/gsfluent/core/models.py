@@ -22,8 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from pathlib import Path
+
+# Allowlist regex for any name that becomes part of a filesystem path
+# (model dirs under MODELS_DIR, registered-index entries, etc.).
+_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 from . import library as lib
 from ..server import PKG_ROOT
@@ -188,6 +193,15 @@ def register_local_model(
             f"Are you pointing at a 3DGS training output dir?"
         )
     name = path.name  # use the directory name verbatim — no uuid suffix needed
+    # The model name becomes part of every downstream filesystem path
+    # (registered index, _meta.json under MODELS_DIR/<name>/, etc.).
+    # Reject anything that's not a plain identifier so a user can't
+    # register a model named "../../etc" and poison neighbouring dirs.
+    if not _NAME_RE.match(name):
+        raise ValueError(
+            f"refusing to register model with unsafe directory name: {name!r} "
+            f"(must match {_NAME_RE.pattern})"
+        )
 
     # Convert-on-register branch: copy the entire structure into the
     # library, rewriting every iteration_*/point_cloud.ply Y-up -> Z-up.

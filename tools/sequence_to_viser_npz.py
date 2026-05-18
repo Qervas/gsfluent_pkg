@@ -192,9 +192,13 @@ def main() -> int:
 
     out_path = args.out or (seq_dir / "viser.npz")
     print(f"writing {out_path}…")
+    # Atomic write: stream to `.npz.tmp` then `os.replace` so a SIGINT or
+    # crash mid-write can't leave a corrupt .npz that downstream
+    # batch_convert_to_npz._is_stale would treat as fresh and never rebuild.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
     if schema == 2:
         np.savez(
-            out_path,
+            tmp_path,
             version=np.int32(2),
             frames=frames,
             quats=quats,
@@ -214,12 +218,16 @@ def main() -> int:
         R_S2 = R * S2[:, None, :]
         cov = np.einsum("nij,nkj->nik", R_S2, R).astype(np.float32)
         np.savez(
-            out_path,
+            tmp_path,
             frames=frames,
             cov=cov,
             rgb=rgb,
             opacity=opacity,
         )
+    # numpy writes "<tmp_path>.npz" when given a path without that extension;
+    # be defensive and rename whichever variant actually landed.
+    actual_tmp = tmp_path if tmp_path.exists() else tmp_path.with_suffix(tmp_path.suffix + ".npz")
+    actual_tmp.replace(out_path)
     size_mb = out_path.stat().st_size / 1e6
     print(f"done: {out_path.name} v{schema} = {size_mb:.1f} MB"
           f"  ({n_splats:,} splats × {n_frames} frames)")

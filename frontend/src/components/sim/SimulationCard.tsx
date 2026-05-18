@@ -32,7 +32,7 @@ export function SimulationCard(_: Props) {
     () => (localStorage.getItem("gsfluent.sim_view_mode") as "form" | "json") || "form",
   );
   const [saving, setSaving]     = useState(false);
-  const [strpError, setStrpError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const qc = useQueryClient();
 
   // Confirm before bulk reset only when the user has accumulated enough
@@ -44,21 +44,36 @@ export function SimulationCard(_: Props) {
     const name = prompt("Save as new recipe — name:");
     if (!name?.trim()) return;
     setSaving(true);
-    setStrpError(null);
+    setSaveError(null);
     // Snapshot effective = {...baseline, ...overrides} at call-start so
     // in-flight slider drags between save→load can't clobber what we're
-    // persisting.
-    const baseline = useStore.getState().simRecipeBaseline;
-    const overrides = useStore.getState().simOverrides;
-    const snapshot = JSON.parse(
-      JSON.stringify({ ...(baseline ?? {}), ...overrides }),
-    );
+    // persisting. Wrapped in try/catch because JSON.stringify can throw
+    // on circular refs and JSON.parse on a malformed result (shouldn't
+    // happen with normal slider values, but a bad override from a
+    // third-party tool would otherwise kill the save with a cryptic
+    // SyntaxError instead of a visible "save failed" message).
+    let snapshot: Record<string, unknown>;
+    try {
+      const baseline = useStore.getState().simRecipeBaseline;
+      const overrides = useStore.getState().simOverrides;
+      snapshot = JSON.parse(
+        JSON.stringify({ ...(baseline ?? {}), ...overrides }),
+      );
+    } catch (e) {
+      setSaveError(
+        `recipe contains values that can't be serialized as JSON: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      setSaving(false);
+      return;
+    }
     try {
       await api.recipes.save(name.trim(), snapshot, activeRecipeName ?? undefined);
       qc.invalidateQueries({ queryKey: ["recipes"] });
       useStore.getState().loadActiveRecipe(name.trim(), snapshot);
     } catch (e) {
-      setStrpError(e instanceof Error ? e.message : String(e));
+      setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -197,9 +212,9 @@ export function SimulationCard(_: Props) {
           </div>
         </div>
       )}
-      {strpError && (
+      {saveError && (
         <div className="px-3 py-1 text-error text-[10px] bg-error/10 border-b border-error/30">
-          {strpError}
+          {saveError}
         </div>
       )}
 

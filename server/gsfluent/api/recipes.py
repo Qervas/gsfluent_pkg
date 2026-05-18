@@ -11,6 +11,15 @@ class SaveRecipeRequest(BaseModel):
     based_on: str | None = None
 
 
+def _validate_name(name: str) -> None:
+    """Reject any name that's not a plain identifier. Used on every
+    endpoint that builds a filesystem path from the URL — otherwise a
+    name like '../etc/passwd' lets a caller probe / delete files
+    outside RECIPES_DIR / USER_RECIPES_DIR. Mirrors core/recipes._NAME_RE."""
+    if not rec._NAME_RE.match(name):
+        raise HTTPException(422, f"invalid recipe name: {name!r}")
+
+
 @router.get("")
 def list_endpoint():
     return rec.list_recipes()
@@ -18,6 +27,7 @@ def list_endpoint():
 
 @router.get("/{name}")
 def get_endpoint(name: str):
+    _validate_name(name)
     try:
         loaded = rec.load_recipe(name)
     except rec.RecipeReadError as e:
@@ -30,6 +40,7 @@ def get_endpoint(name: str):
 
 @router.put("/{name}")
 def save_endpoint(name: str, req: SaveRecipeRequest):
+    _validate_name(name)
     try:
         path, payload = rec.save_user_recipe(name, req.data, based_on=req.based_on)
     except ValueError as e:
@@ -40,6 +51,7 @@ def save_endpoint(name: str, req: SaveRecipeRequest):
 @router.delete("/{name}")
 def delete_user_recipe(name: str):
     """Delete a user preset. 403 on built-ins, 404 on unknown."""
+    _validate_name(name)
     p = rec.USER_RECIPES_DIR / f"{name}.json"
     if not p.exists():
         # Built-in or unknown — surface differently.

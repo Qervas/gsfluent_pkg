@@ -24,7 +24,9 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-API_PORT="${API_PORT:-8080}"
+# 18080 matches start-gsfluent-server.sh / README / firewall examples.
+# Override via API_PORT=... or .env.
+API_PORT="${API_PORT:-18080}"
 
 # Source local .env if present (gitignored; per-deploy config).
 if [[ -f "$PKG_ROOT/.env" ]]; then
