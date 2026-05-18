@@ -20,20 +20,34 @@ is submitted.
 | `sand` | Granular collapse into a pile | sand | No cohesion; building slumps |
 | `foam` | Light squishy foam, slow recovery | foam | density=0.3, E=1000 |
 | `plasticine` | Plastic clay flow / permanent deformation | plasticine | Slow drape & squash |
-| `snow` | Cohesive granular — clumps as it deforms | snow | Like sand but with hardening |
 
 ### Scenarios (forces / impactors acting on the building)
 
 | Name | What it does | Material | Notes |
 |---|---|---|---|
-| `demolition` | Sequential particle release — building collapses top-down | plasticine | Dramatic |
+| `demolition` | Sequential particle release — building collapses top-down | plasticine | Dramatic — R10 ported |
 | `earthquake` | Base shaking — 4 cuboid colliders drive the floor laterally | watermelon | Classic seismic test |
-| `meteor` | Fast-moving cuboid impacts the building | watermelon | One-shot impact |
-| `uplift` | Ground rises into the building from below | watermelon | Slow-motion pop-up |
+| `wrecking` | Lateral cuboid impact at mid-height (wrecking ball) | plasticine | R10 ported |
 
 All recipes ship with `frame_num=150` (≈ 5 sec @ 30 fps target) and use
 `bounding_box + surface_collider` for global containment. Production
 runs happen on the A100 server stack.
+
+### Removed: `meteor`, `uplift`
+
+The `meteor` (vertical impactor) and `uplift` (ground rising) scenarios
+were dropped after headless tests on `cluster_6_15`. Both crash the
+upstream MPM solver with `Warp CUDA error 700: illegal memory access`
+when their cuboid BC overlaps existing geometry at `t=0` (instantaneous
+velocity injection → stress concentration). Affected both watermelon and
+R10's plasticine recipe variants. R10's historical run from April 2026
+completed, but the current `gs_simulation_building.py` has drifted (Phase
+A/B/C optimizations) such that these scenarios no longer run.
+
+Re-enabling either would need either:
+  - a real solver-side fix (sub-stepping near high-strain regions), or
+  - rewriting the BC schedule so cuboids enter the scene gradually
+    rather than spawning inside the model.
 
 ## Picking from the workbench
 
