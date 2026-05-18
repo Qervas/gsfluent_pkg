@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fuse 阶段 · 演讲手册</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+                 Arial, sans-serif;
+    background: #f6f8fa;
+    color: #1a2533;
+    line-height: 1.65;
+    font-size: 17px;
+    padding: 0;
+  }
+  .container {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 16px 18px 80px;
+  }
+  header.top {
+    background: linear-gradient(135deg, #1a2533, #2d4263);
+    color: #fff;
+    padding: 28px 18px 22px;
+    border-radius: 0 0 18px 18px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  }
+  header.top h1 {
+    margin: 0 0 6px;
+    font-size: 24px;
+    letter-spacing: 0.5px;
+  }
+  header.top p {
+    margin: 0;
+    font-size: 14px;
+    color: #c7d2e0;
+  }
+  .tags { margin-top: 10px; font-size: 12px; }
+  .tag {
+    display: inline-block;
+    background: rgba(255,255,255,0.12);
+    color: #fff;
+    padding: 3px 9px;
+    border-radius: 999px;
+    margin-right: 6px;
+  }
+  nav.toc {
+    background: #fff;
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin: 18px 0 24px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+  }
+  nav.toc h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    color: #4a90e2;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  nav.toc ol {
+    margin: 0; padding-left: 22px;
+    columns: 1;
+  }
+  @media (min-width: 480px) { nav.toc ol { columns: 2; } }
+  nav.toc li {
+    font-size: 14px;
+    padding: 3px 0;
+    break-inside: avoid;
+  }
+  nav.toc a {
+    color: #1a2533;
+    text-decoration: none;
+  }
+  nav.toc a:hover { color: #4a90e2; }
+
+  section.slide {
+    background: #fff;
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin: 0 0 18px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+  }
+  section.slide h2 {
+    margin: 0 0 4px;
+    font-size: 19px;
+    color: #1a2533;
+  }
+  section.slide .slide-num {
+    display: inline-block;
+    background: #4a90e2;
+    color: #fff;
+    font-weight: 600;
+    border-radius: 6px;
+    padding: 2px 9px;
+    font-size: 13px;
+    margin-right: 8px;
+  }
+  section.slide h3 {
+    font-size: 13px;
+    color: #4a90e2;
+    margin: 14px 0 4px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+  }
+  section.slide p { margin: 4px 0 6px; }
+  section.slide ul { margin: 4px 0 6px; padding-left: 22px; }
+  section.slide li { margin-bottom: 4px; }
+
+  .one-liner {
+    background: #fff7e6;
+    border-left: 3px solid #f0a500;
+    padding: 9px 12px;
+    border-radius: 4px;
+    font-size: 15px;
+    margin-top: 8px;
+  }
+  .analogy {
+    background: #f0f7ff;
+    border-left: 3px solid #4a90e2;
+    padding: 9px 12px;
+    border-radius: 4px;
+    font-size: 14px;
+    margin-top: 8px;
+  }
+  .qa {
+    background: #f4f6fa;
+    padding: 9px 12px;
+    border-radius: 4px;
+    margin-top: 6px;
+    font-size: 14.5px;
+  }
+  .qa .q {
+    font-weight: 600;
+    color: #2d4263;
+  }
+  .qa .a { color: #444; margin-top: 2px; }
+
+  hr.divider {
+    border: 0;
+    border-top: 2px solid #e0e6ee;
+    margin: 36px 0 18px;
+  }
+
+  section.faq {
+    background: #fff;
+    border-radius: 14px;
+    padding: 22px 22px;
+    margin-top: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+  }
+  section.faq h2 {
+    margin: 0 0 14px;
+    font-size: 22px;
+    color: #1a2533;
+  }
+  section.faq details {
+    margin-bottom: 12px;
+    border-bottom: 1px solid #eef0f4;
+    padding-bottom: 12px;
+  }
+  section.faq details:last-child { border-bottom: 0; }
+  section.faq summary {
+    font-weight: 600;
+    cursor: pointer;
+    color: #2d4263;
+    padding: 4px 0;
+    font-size: 15.5px;
+  }
+  section.faq summary::marker { color: #4a90e2; }
+  section.faq details[open] summary { color: #4a90e2; }
+  section.faq details p {
+    margin: 8px 0 0;
+    color: #444;
+    line-height: 1.7;
+  }
+
+  section.extended {
+    background: #fffbf0;
+    border: 1px solid #f5e2b0;
+    border-radius: 14px;
+    padding: 20px 22px;
+    margin: 0 0 18px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+  }
+  section.extended h2 {
+    margin: 0 0 4px;
+    font-size: 19px;
+    color: #8a5a00;
+  }
+  section.extended .extended-tag {
+    display: inline-block;
+    background: #f0a500;
+    color: #fff;
+    font-weight: 600;
+    border-radius: 6px;
+    padding: 2px 9px;
+    font-size: 12px;
+    margin-right: 8px;
+    letter-spacing: 0.3px;
+  }
+  section.extended h3 {
+    font-size: 13px;
+    color: #8a5a00;
+    margin: 14px 0 4px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+  }
+  section.extended table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 14px;
+  }
+  section.extended th, section.extended td {
+    border-bottom: 1px solid #f5e2b0;
+    padding: 6px 8px;
+    text-align: left;
+  }
+  section.extended th { background: #fff5d6; }
+
+  code {
+    background: #eef0f4;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 0.88em;
+  }
+  .badge {
+    display: inline-block;
+    background: #4a90e2;
+    color: #fff;
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    margin-left: 4px;
+    letter-spacing: 0.3px;
+  }
+  footer.bottom {
+    text-align: center;
+    color: #888;
+    font-size: 13px;
+    margin-top: 36px;
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>Fuse 阶段 · 演讲手册</h1>
+  <p>gsfluent · 物理仿真到 3DGS 视觉的桥梁</p>
+  <div class="tags">
+    <span class="tag">每张幻灯片要点</span>
+    <span class="tag">类比</span>
+    <span class="tag">易问问题</span>
+    <span class="tag">FAQ</span>
+  </div>
+</header>
+
+<div class="container">
+
+<nav class="toc">
+<h3>目录</h3>
+<ol>
+  <li><a href="#s1">封面</a></li>
+  <li><a href="#s2">输入与输出</a></li>
+  <li><a href="#s3">流水线位置</a></li>
+  <li><a href="#s4">为什么需要 fuse</a></li>
+  <li><a href="#r10"><b>扩展：R10 为什么不需要 particle_F</b></a></li>
+  <li><a href="#whatisF"><b>扩展：F 是什么（形变梯度）</b></a></li>
+  <li><a href="#s5">步骤总览</a></li>
+  <li><a href="#s6">读参考 ply</a></li>
+  <li><a href="#s7">bbox 归一化</a></li>
+  <li><a href="#s8">排序 + 读首帧</a></li>
+  <li><a href="#s9">核心选择 K-NN vs 1-NN</a></li>
+  <li><a href="#s10">K-NN 路径</a></li>
+  <li><a href="#s11">particle_F 1-NN</a></li>
+  <li><a href="#s12">预生成 rest 模板</a></li>
+  <li><a href="#s13">每帧融合入口</a></li>
+  <li><a href="#s14">K-NN 加权位移</a></li>
+  <li><a href="#s15">particle_F 刚性绑定</a></li>
+  <li><a href="#s16">cov 乘 extent² 数学</a></li>
+  <li><a href="#s17">坐标变换到输出系</a></li>
+  <li><a href="#s18">原子写入</a></li>
+  <li><a href="#s19">npz 缓存</a></li>
+  <li><a href="#s20">为什么汇总表</a></li>
+  <li><a href="#s21">核心取舍</a></li>
+  <li><a href="#s22">F-skinning 下一步</a></li>
+  <li><a href="#s23">总结</a></li>
+  <li><a href="#faq">FAQ</a></li>
+</ol>
+</nav>
+
+<!-- Slide 1 -->
+<section class="slide" id="s1">
+  <h2><span class="slide-num">1</span>封面</h2>
+  <div class="one-liner">物理仿真出来是粗的，渲染要的是细的，fuse 负责把两边对上。</div>
+  <h3>开场 30 秒</h3>
+  <p>今天讲 gsfluent 流水线里中间这一步 —— fuse。MPM 仿真算出来的是粒子位置，浏览器要的是完整可渲染的 3DGS。fuse 就是把这两边对接起来的桥梁。</p>
+  <h3>关键词</h3>
+  <p><code>上采样</code> <code>蒙皮</code> <code>参考 3DGS</code></p>
+</section>
+
+<!-- Slide 2 -->
+<section class="slide" id="s2">
+  <h2><span class="slide-num">2</span>输入与输出</h2>
+  <div class="one-liner">fuse 吃两套数据：静止状态的视觉真值 + 每帧的物理演化。</div>
+  <div class="analogy"><b>类比：</b>参考 ply 是"演员的样貌"，sim ply 是"演员每秒的姿势"。fuse 把样貌套到姿势上，生成完整的"演员表演"。</div>
+  <h3>容易被问</h3>
+  <div class="qa">
+    <div class="q">Q：为什么不让仿真直接输出可渲染的 3DGS？</div>
+    <div class="a">A：仿真不知道颜色 —— MPM 只跟踪位置、速度、形变。颜色跟物理方程无关，硬塞进去只会拖慢仿真。</div>
+  </div>
+</section>
+
+<!-- Slide 3 -->
+<section class="slide" id="s3">
+  <h2><span class="slide-num">3</span>流水线位置</h2>
+  <div class="one-liner">fuse 是数据流的"翻译器"，让物理模块和渲染模块各自独立演化。</div>
+  <h3>讲解要点</h3>
+  <ul>
+    <li>仿真 → fuse → npz → 浏览器，四个独立阶段</li>
+    <li>每个阶段只做自己擅长的事</li>
+    <li>换成别的物理引擎（PBD、SPH），fuse 不用改</li>
+  </ul>
+  <div class="analogy"><b>类比：</b>像菜谱与厨师 —— 仿真给食材清单，渲染负责摆盘，fuse 是中间的中央厨房。</div>
+</section>
+
+<!-- Slide 4 -->
+<section class="slide" id="s4">
+  <h2><span class="slide-num">4</span>为什么需要 fuse</h2>
+  <div class="one-liner">200k 物理粒子 vs 683k 渲染 splat，数量对不上要桥接。</div>
+  <h3>讲解要点</h3>
+  <ul>
+    <li>仿真 200k 是因为 O(N²) 邻居搜索；跑 1M 要 25 倍时间</li>
+    <li>渲染 683k 是因为原模型训练时的精细密度</li>
+    <li>直接拿 200k 渲染：丢 70% 视觉细节</li>
+  </ul>
+  <div class="analogy"><b>类比：</b>Pixar 用 10k 引导曲线驱动 1M 渲染细丝，游戏角色用 100 骨骼驱动 50k 顶点 —— 都是粗物理 + 精渲染的套路。</div>
+</section>
+
+<!-- Extended: R10 vs particle_F -->
+<section class="extended" id="r10">
+  <h2><span class="extended-tag">扩展</span>R10 为什么不需要 particle_F</h2>
+  <div class="one-liner">R10 没有上采样问题 —— 它是<b>视频管线</b>，跟我们这套<b>交互管线</b>架构上根本不同。</div>
+
+  <h3>R10 的工作方式</h3>
+  <p>R10 的渲染分支（<code>--render_img --compile_video</code>）在<b>仿真进程内部</b>直接渲染成 PNG：</p>
+  <ul>
+    <li>不下采样：仿真跑全部 ~1M 粒子（683k gaussian-bound + ~290k filler）</li>
+    <li>没有 fuse 步骤：cov 和 rotation 从 GPU 直接拿，零中间文件</li>
+    <li>1:1 对应：gaussian-bound 粒子<b>就是</b> reference splat；每个粒子的 cov 就是它对应那个 splat 的当前 cov</li>
+  </ul>
+
+  <h3>关键：R10 隐式用了 F</h3>
+  <p>光栅化器拿到的 cov 已经是 <code>Σ_t = F · Σ_rest · Fᵀ</code> 的结果 —— MPM 在内部就用 F 演化 cov。R10 不需要"提取 F"，因为渲染发生在仿真内部，cov 直接可用。<b>从效果上看 R10 就是 F-skinning，只是 MPM 默默做了。</b></p>
+
+  <h3>对比表</h3>
+  <table>
+    <tr><th></th><th>R10（官方）</th><th>workbench（我们）</th></tr>
+    <tr><td>仿真粒子数</td><td>~1M（全部）</td><td>200k（下采样）</td></tr>
+    <tr><td>Splat 与粒子关系</td><td>1:1</td><td>~3.4 splat / 粒子</td></tr>
+    <tr><td>输出</td><td>PNG → MP4（视频）</td><td>per-frame .ply（可交互序列）</td></tr>
+    <tr><td>Cov 来源</td><td>直接读粒子 cov</td><td>fuse 重建</td></tr>
+    <tr><td>耗时</td><td>~25 分钟</td><td>~4 分钟</td></tr>
+    <tr><td>能交互浏览吗</td><td>不能（视频）</td><td>能（scrub / 转相机）</td></tr>
+  </table>
+
+  <h3>为什么我们偏离了 R10</h3>
+  <p>工作台需要<b>交互式回放</b> —— scrub 时间轴、转相机、对比序列。这跟 PNG → MP4 是两个世界：</p>
+  <ol>
+    <li>要可交互 → 必须持久化每帧 3DGS 数据（.ply / .npz）</li>
+    <li>要快 → 用户不能等 25 分钟一次仿真 → 下采样到 200k</li>
+    <li>下采样 → 粒子数 ≠ splat 数 → 需要上采样</li>
+    <li>上采样 → K-NN ghost → particle_F → 形状粗 → F-skinning（下一步）</li>
+  </ol>
+  <p><b>每一步都是"为了交互"付的代价。</b>R10 用紧耦合的内部渲染省掉了所有中间问题，但代价是每次重跑才能换角度。这跟"交互"是反的。</p>
+</section>
+
+<!-- Extended: What is F -->
+<section class="extended" id="whatisF">
+  <h2><span class="extended-tag">扩展</span>F 是什么 —— 形变梯度</h2>
+  <div class="one-liner">F 是 3×3 矩阵，描述材料从静止到当前的所有形变（拉伸 + 旋转 + 剪切）。</div>
+
+  <h3>数学定义</h3>
+  <p>F = ∂x / ∂X，其中 <code>x</code> 是当前位置，<code>X</code> 是 rest 位置。把"无穷小材料块"从 rest 映射到 current。</p>
+
+  <h3>在 MPM 求解器里</h3>
+  <ul>
+    <li>每个粒子都跟踪自己的 F（MPM 的核心物理量）</li>
+    <li>F 决定本构方程里的应力：<code>σ = f(F)</code></li>
+    <li>极分解 <code>F = R · U</code>：R 是纯旋转，U 是对称拉伸</li>
+    <li>协方差演化：<code>Σ_t = F · Σ_rest · Fᵀ</code></li>
+  </ul>
+
+  <h3>"particle_F" 这个命名其实有点误导</h3>
+  <table>
+    <tr><th>阶段</th><th>实际用的</th></tr>
+    <tr><td>设计意图</td><td>仿真的形变梯度 F</td></tr>
+    <tr><td>当前实现</td><td>仿真的当前 cov（已经是 F 作用过的结果）</td></tr>
+    <tr><td>F-skinning（下一步）</td><td>真正提取 F，作用到 splat 自己的 rest cov</td></tr>
+  </table>
+  <p>所以严格说，<b>当前 particle_F 路径用的是粒子 cov，不是粒子 F</b>。名字是 codename，沿用至今 —— 真正名副其实是 F-skinning 那一步。</p>
+
+  <h3>讲解技巧</h3>
+  <p>如果听众没学过连续介质力学，可以这样讲："F 就是一个粒子从静止状态到现在被怎么揉过的记录 —— 转了多少、拉了多少、剪了多少，全在这个 3×3 矩阵里。"</p>
+</section>
+
+<!-- Slide 5 -->
+<section class="slide" id="s5">
+  <h2><span class="slide-num">5</span>步骤总览</h2>
+  <div class="one-liner">fuse 分 10 步，第 5 步（rest 对应映射）是整个 fuse 最关键的设计决策。</div>
+  <h3>讲解技巧</h3>
+  <p>把第 5 步明确标出来作为"核心"。听众心里有了"主角"，后面看到 K-NN / particle_F 就不会困惑。</p>
+</section>
+
+<!-- Slide 6 -->
+<section class="slide" id="s6">
+  <h2><span class="slide-num">6</span>步骤 1：读参考 ply</h2>
+  <div class="one-liner">从参考 ply 把所有视觉属性取下来，仿真不带这些。</div>
+  <h3>容易被问</h3>
+  <div class="qa">
+    <div class="q">Q：什么是 SH？</div>
+    <div class="a">A：球谐函数，存的是跟视角有关的颜色，能渲染镜面反射、半透明这些效果。0 阶就是基础 RGB。</div>
+  </div>
+  <div class="qa">
+    <div class="q">Q：为什么尺度存成 log？</div>
+    <div class="a">A：3DGS 是神经网络训练出来的，参数要无界实数才好优化。渲染前用 exp 映回正数。</div>
+  </div>
+</section>
+
+<!-- Slide 7 -->
+<section class="slide" id="s7">
+  <h2><span class="slide-num">7</span>步骤 2：bbox 归一化</h2>
+  <div class="one-liner">把世界坐标统一映射到 [0, 2]³ 立方体，仿真才能用统一的网格参数。</div>
+  <h3>讲解要点</h3>
+  <ul>
+    <li>MPM 内部有 N×N×N 背景网格，dx 决定稳定性</li>
+    <li>不归一化的话，50m 的建筑要 3800 格 → 显存爆炸</li>
+    <li>归一化后，任何大小的模型都用同一套 grid_lim=2, n_grid=150</li>
+  </ul>
+  <div class="analogy"><b>类比：</b>像训练神经网络要把图片缩到 256×256 —— 网络结构不用每张图都重新设计。</div>
+</section>
+
+<!-- Slide 8 -->
+<section class="slide" id="s8">
+  <h2><span class="slide-num">8</span>步骤 3-4：排序 + 读首帧</h2>
+  <div class="one-liner">读取仿真静止状态，作为整个动画的"零参考点"。</div>
+  <h3>关键术语</h3>
+  <p><code>rest pose</code>：所有蒙皮算法都需要一个静止姿态作基线，所有形变都相对它计算。</p>
+</section>
+
+<!-- Slide 9 -->
+<section class="slide" id="s9">
+  <h2><span class="slide-num">9</span>步骤 5：核心选择 <span class="badge">关键</span></h2>
+  <div class="one-liner">K-NN 平均还是 1-NN 刚性绑定 —— 整个 fuse 最重要的设计决策。</div>
+  <h3>讲解技巧</h3>
+  <p>这页要慢一点讲。听众如果没理解这两条路线的取舍，后面所有内容都会是模糊的。</p>
+  <h3>关键短语（背下来）</h3>
+  <ul>
+    <li><b>K-NN 偏过度平滑</b> → 裂缝被涂抹</li>
+    <li><b>1-NN 偏过度刚性</b> → splat 共享粗形状</li>
+    <li>对应物理仿真的<b>连续介质 vs 离散单元</b></li>
+  </ul>
+</section>
+
+<!-- Slide 10 -->
+<section class="slide" id="s10">
+  <h2><span class="slide-num">10</span>K-NN 路径</h2>
+  <div class="one-liner">每个 ref splat 跟踪 8 个邻居粒子位移的加权平均。</div>
+  <div class="analogy"><b>类比：</b>就是角色动画的<b>线性混合蒙皮 (LBS)</b>。一个顶点跟着多个骨骼按权重移动。</div>
+  <h3>容易被问</h3>
+  <div class="qa">
+    <div class="q">Q：K=8 真的是最优吗？</div>
+    <div class="a">A：是经验最佳点。K=4 邻居不够，加权场会断；K=16 邻居跨太远，一个 splat 会"听到"远处的运动 → 鬼影更严重。</div>
+  </div>
+</section>
+
+<!-- Slide 11 -->
+<section class="slide" id="s11">
+  <h2><span class="slide-num">11</span>particle_F 1-NN</h2>
+  <div class="one-liner">每个 ref splat 刚性绑到 1 个仿真粒子，带 rest 偏移。</div>
+  <div class="analogy"><b>类比：</b>有限元法的标准做法。每个 splat 像一个"挂件"，挂在仿真粒子上跟着移动。</div>
+  <h3>容易被问</h3>
+  <div class="qa">
+    <div class="q">Q：为什么要记 rest 偏移？直接吸到粒子位置不行吗？</div>
+    <div class="a">A：那样 ~3 个共享同粒子的 splat 会塌缩成一个点，细节全丢。带偏移就是让它们刚性地飘在原来的相对位置。</div>
+  </div>
+</section>
+
+<!-- Slide 12 -->
+<section class="slide" id="s12">
+  <h2><span class="slide-num">12</span>预生成 rest 模板</h2>
+  <div class="one-liner">用内存换 I/O，每帧只 copy + 覆盖位置/旋转。</div>
+  <h3>数字</h3>
+  <ul>
+    <li>参考 ply 161 MB，解析一次约 800ms</li>
+    <li>151 帧重读 = 121s 纯 I/O</li>
+    <li>numpy memcpy ~20 GB/s，比磁盘 I/O 快 100×</li>
+  </ul>
+  <div class="analogy"><b>类比：</b>游戏引擎的 vertex buffer —— 顶点上传 GPU 一次，每帧只改 transform，不重新上传。</div>
+</section>
+
+<!-- Slide 13 -->
+<section class="slide" id="s13">
+  <h2><span class="slide-num">13</span>每帧融合入口</h2>
+  <div class="one-liner">瓶颈是 eigendecomp（683k × 3×3 矩阵，每帧 150ms）。</div>
+  <h3>容易被问</h3>
+  <div class="qa">
+    <div class="q">Q：fuse 一共要多久？</div>
+    <div class="a">A：约 50 秒（每帧 330ms × 151 帧）。MPM 仿真本身只用 30-40 秒，fuse 反而成了流水线最重的一段。</div>
+  </div>
+  <div class="qa">
+    <div class="q">Q：能不能加速？</div>
+    <div class="a">A：用 cupy 做批量 SVD 能压到 ~20ms/帧（7× 加速）。暂没做因为整体不是瓶颈。</div>
+  </div>
+</section>
+
+<!-- Slide 14 -->
+<section class="slide" id="s14">
+  <h2><span class="slide-num">14</span>K-NN 加权位移</h2>
+  <div class="one-liner">平均"位移"不是"位置" —— LBS 的灵魂。</div>
+  <h3>例子（背下来）</h3>
+  <ul>
+    <li>8 邻居静止聚在 (0,0,0)，splat 在 (0.1, 0, 0)</li>
+    <li>平均<b>位置</b> → splat 被拉到 (0,0,0)，细节丢</li>
+    <li>平均<b>位移</b> → splat 仍在 (0.1, 0, 0)，细节保</li>
+  </ul>
+  <p style="font-size:14px;color:#666;">数学上：位移对常数项不敏感，叠加不破坏 splat 相对粒子的位置。</p>
+</section>
+
+<!-- Slide 15 -->
+<section class="slide" id="s15">
+  <h2><span class="slide-num">15</span>particle_F 刚性绑定（代码）</h2>
+  <div class="one-liner">位置 = 粒子当前 xyz + rest 偏移；旋转/尺度从粒子当前 cov 提取。</div>
+  <h3>关键三步</h3>
+  <ol>
+    <li>位置覆盖（带 rest 偏移）</li>
+    <li>cov 乘 extent²（坐标系转换）</li>
+    <li>eigh 分解出 quaternion 和 log_scale</li>
+  </ol>
+</section>
+
+<!-- Slide 16 -->
+<section class="slide" id="s16">
+  <h2><span class="slide-num">16</span>cov 乘 extent²（数学细节）</h2>
+  <div class="one-liner">cov 是二阶量，比位置多乘一次 extent。</div>
+  <h3>原理</h3>
+  <p>线性变换 <code>x' = A·x</code> 作用在协方差上是 <code>Σ' = A·Σ·Aᵀ</code>。各向同性放缩 A = extent·I，所以位置一阶，cov 二阶。</p>
+  <h3>关键术语</h3>
+  <p><code>eigendecomposition</code>（特征分解）= PCA 的核心运算。给协方差矩阵，分解出旋转和尺度。3DGS 用 (rot, scale)，分解就是逆向把 cov 拆回这两个。</p>
+</section>
+
+<!-- Slide 17 -->
+<section class="slide" id="s17">
+  <h2><span class="slide-num">17</span>坐标变换到输出系</h2>
+  <div class="one-liner">仿真在归一化空间，输出回世界系；可选把 Y-up 转 Z-up。</div>
+  <h3>容易被问</h3>
+  <div class="qa">
+    <div class="q">Q：Y-up 和 Z-up 是什么？</div>
+    <div class="a">A：哪个轴朝上。OpenGL / Blender 默认 Y-up，3D 扫描 / 建筑 / 地理信息默认 Z-up。我们的工作台统一用 Z-up（建筑站立感更自然）。</div>
+  </div>
+</section>
+
+<!-- Slide 18 -->
+<section class="slide" id="s18">
+  <h2><span class="slide-num">18</span>原子写入</h2>
+  <div class="one-liner">tmp + rename = POSIX 原子操作，避免 watcher 读半截文件。</div>
+  <h3>常见 bug 故事</h3>
+  <p>直接写 frame_0042.ply，写到一半 watcher 读 → 解析半个 ply → 崩溃。用 <code>os.replace()</code> 一行解决：读者要么看旧文件，要么看完整新文件，不存在中间态。</p>
+</section>
+
+<!-- Slide 19 -->
+<section class="slide" id="s19">
+  <h2><span class="slide-num">19</span>npz 缓存</h2>
+  <div class="one-liner">把 151 个 ply 打包成 1 个 npz，浏览器 mmap 切帧零解析。</div>
+  <h3>数字</h3>
+  <ul>
+    <li>151 个 ply：23 GB，每次切帧解析 200ms+</li>
+    <li>1 个 npz：2.8 GB，mmap 切片，零解析</li>
+  </ul>
+  <p>NeRF Studio、Inria 3DGS viewer 都用同样模式。</p>
+</section>
+
+<!-- Slide 20 -->
+<section class="slide" id="s20">
+  <h2><span class="slide-num">20</span>各步骤"为什么"汇总</h2>
+  <div class="one-liner">复盘页，过一遍 10 个步骤的存在理由 + 不做会怎样。</div>
+  <h3>讲解技巧</h3>
+  <p>这页不用每行都念。挑 2-3 个最戏剧化的："不归一化 → 网格爆炸"、"不预生成模板 → 总时间 ×3"、"不原子写入 → 间歇性崩溃"。</p>
+</section>
+
+<!-- Slide 21 -->
+<section class="slide" id="s21">
+  <h2><span class="slide-num">21</span>核心取舍 K-NN vs particle_F</h2>
+  <div class="one-liner">两种路线都不完美 —— K-NN 在裂缝处出鬼影，particle_F 让 splat 形状变粗。</div>
+  <h3>讲解要点</h3>
+  <ul>
+    <li>这是<b>平滑 vs 不连续</b>的本质矛盾</li>
+    <li>K-NN 等价于低通滤波 → 噪声和裂缝都被磨平</li>
+    <li>particle_F 不做平均 → 裂缝正确但失去过度采样优势</li>
+  </ul>
+  <div class="analogy"><b>类比：</b>用模糊滤镜去噪 → 文字也模糊了。锐化保边 → 噪声放大了。两种取向都不完美。</div>
+</section>
+
+<!-- Slide 22 -->
+<section class="slide" id="s22">
+  <h2><span class="slide-num">22</span>F-skinning 下一步</h2>
+  <div class="one-liner">从粒子的形变中提取张量 F，作用到 splat 自己的 rest cov 上 —— 兼顾细节和形变。</div>
+  <h3>核心思路</h3>
+  <p>不直接继承粒子的 cov，而是<b>继承形变</b>。每个 splat 保留自己的 rest 形状，跟着粒子的形变张量走。</p>
+  <p style="font-size:14px;color:#666;">F = sqrt(Σ_particle_t · Σ_particle_rest⁻¹)，然后 Σ_splat_t = F · Σ_splat_rest · Fᵀ</p>
+</section>
+
+<!-- Slide 23 -->
+<section class="slide" id="s23">
+  <h2><span class="slide-num">23</span>总结</h2>
+  <div class="one-liner">fuse = 坐标桥 + 上采样规则 + 每帧属性覆盖。</div>
+  <p>视觉效果好坏 ≈ <b>上采样规则的选择</b>。其余步骤都是工程支撑。</p>
+</section>
+
+<hr class="divider">
+
+<!-- FAQ -->
+<section class="faq" id="faq">
+<h2>FAQ — 听众可能问的问题</h2>
+
+<details>
+  <summary>1. 为什么不让 MPM 直接输出可渲染的 3DGS？</summary>
+  <p>三个原因：(1) MPM 不知道颜色，只跟踪位置、速度、形变；硬塞颜色字段会拖慢仿真。(2) MPM 为速度跑 200k，渲染要 683k 的细节密度，本身就不匹配。(3) 模块化：fuse 是纯几何映射，换成 PBD、SPH 也能用同一套。</p>
+</details>
+
+<details>
+  <summary>2. 200k 这个数是怎么定的？</summary>
+  <p>经验值。MPM 的邻居搜索是 O(N²)，跑 1M 粒子约 25 分钟一帧，用户体验崩。200k 是"足够细节 + 用户能等"的拐点。可以通过 <code>--target_particles</code> 调，但不建议低于 100k（视觉损失明显）。</p>
+</details>
+
+<details>
+  <summary>3. 为什么用 KD-tree 不用别的最近邻算法？</summary>
+  <p>scipy 的 cKDTree 是 cython 实现的，构建 + 查询都很快。3D 空间下 KD-tree 是 O(N log N) 构建、O(log N) 单点查询。换成 ANN（近似最近邻）能更快但不必要 —— 我们的 200k × 683k 查询用 KD-tree 1-2 秒搞定。</p>
+</details>
+
+<details>
+  <summary>4. K=8 真的是最优吗？</summary>
+  <p>是经验最佳点。K=4 邻居覆盖不够，加权场会断；K=16 邻居跨远距离，远处的运动也会影响近处的 splat，鬼影更严重。8 在 3D 空间下是 LBS 的常用值（cube 的 8 个顶点直觉）。</p>
+</details>
+
+<details>
+  <summary>5. 为什么反距离权重不用高斯权重？</summary>
+  <p>高斯权重要选带宽 σ，σ 难调，对粒子密度敏感。反距离 1/d 自动按局部密度伸缩，无超参。本质上是 Shepard 插值，GIS 领域常用。</p>
+</details>
+
+<details>
+  <summary>6. particle_F 的 1-NN 会不会也有边界问题？</summary>
+  <p>会，但表现不同。1-NN 在裂缝处<b>不出鬼影</b>，因为没有平均。但它会让 ~3 个 splat 共享同一粒子的形状 → 细节变粗。两种 bug 在视觉上感受很不一样：K-NN 的鬼影是"消失"，particle_F 的形状粗糙是"模糊"。</p>
+</details>
+
+<details>
+  <summary>7. eigendecomp 这么慢，能不能用 SVD？</summary>
+  <p>对对称矩阵，eigh 比 svd 快约 2× —— 因为它利用了对称性。SVD 是通用算法，对任意矩阵都行。我们的 cov 永远对称正定，所以用 eigh。要更快，可以用 cupy 在 GPU 上批量做 —— 暂没做因为整体瓶颈不在这。</p>
+</details>
+
+<details>
+  <summary>8. 为什么 cov 要乘 extent²，但位置只乘 extent？</summary>
+  <p>因为协方差是二阶量。线性变换 A 作用在位置上是一阶 (x' = A·x)，作用在协方差上是二阶 (Σ' = A·Σ·Aᵀ)。对各向同性放缩 A = extent·I，就分别得到 extent 和 extent²。这是仿射变换的标准结果，统计学课都讲。</p>
+</details>
+
+<details>
+  <summary>9. 为什么不直接缓存所有帧到内存？</summary>
+  <p>太大。一个 .npz 2.8 GB；如果同时打开多个 sequence，浏览器内存会爆。npz 用 mmap 让操作系统按需分页 —— 看哪一帧就只加载哪一帧，比手动缓存安全得多。</p>
+</details>
+
+<details>
+  <summary>10. fuse 这一步能不能省掉？</summary>
+  <p>不能，除非接受丢掉视觉细节或者每次仿真等 25 分钟。fuse 解决的是物理采样数和渲染采样数不匹配的问题，这个矛盾是固有的 —— 仿真为速度而粗采样，渲染为质量而精采样。</p>
+</details>
+
+<details>
+  <summary>11. 别人也这么做吗？</summary>
+  <p>是的。Pixar 的毛发系统、Blender 的物理蒙皮、UE5 的 Chaos Physics、Houdini 的 Vellum —— 全都是"粗物理 + 精渲染 + 上采样桥梁"的套路。差别在桥梁的具体算法（LBS、DQS、F-skinning、Wrap 等）。</p>
+</details>
+
+<details>
+  <summary>12. F-skinning 什么时候做？</summary>
+  <p>它是 particle_F 的下一步迭代。当前 particle_F 让 splat 继承粒子的 cov，结果 splat 形状变粗。F-skinning 改成继承粒子的<b>形变</b>，让 splat 保留自己的 rest 形状 + 跟着粒子的形变张量走。预计 1-2 小时实现。</p>
+</details>
+
+<details>
+  <summary>13. 整体流水线一次完整运行要多久？</summary>
+  <p>cluster_6_15（683k splat、200k 仿真粒子、151 帧、earthquake recipe）大约：MPM 仿真 ~140s + fuse 70s + npz 构建 ~20s = 总共约 4 分钟。GPU 用一张 A100。</p>
+</details>
+
+<details>
+  <summary>14. 失败的 sim 怎么排查？</summary>
+  <p>看 /api/runs/&lt;name&gt;/log。常见两类：(1) tensor 形状不匹配 —— 仿真脚本里的 mask 同步没做对。(2) CUDA error 700 —— 数值不稳定，多半是配方参数太激进（cuboid 速度太大、边界跟几何重叠）。</p>
+</details>
+
+<details>
+  <summary>15. F 到底是什么？粒子 cov 又是什么？两个不一样吗？</summary>
+  <p>F 是<b>形变梯度</b>（3×3 矩阵），记录材料点从静止到当前怎么被揉过：旋转 + 拉伸 + 剪切。MPM 求解器内部一直跟踪每个粒子的 F。</p>
+  <p>cov（协方差）是 <b>F 作用在 rest cov 上的结果</b>：<code>Σ_t = F · Σ_rest · Fᵀ</code>。所以 cov 是 F 的"作用效果"，F 是"原因"。</p>
+  <p>我们当前 particle_F 路径用的是 cov（直接拿粒子的 cov 给 splat 用）。F-skinning 那一步才会真正从 cov 反推出 F，再作用到 splat 自己的 rest cov 上。</p>
+</details>
+
+<details>
+  <summary>16. R10 那条路怎么不用做 fuse 也不用做 K-NN？</summary>
+  <p>因为 R10 是<b>视频管线</b>，不是交互管线。它在仿真进程内部直接渲染成 PNG，跑全部 ~1M 粒子（不下采样）。每个 gaussian-bound 粒子就是一个 ref splat（1:1 对应），cov 从 GPU 直接拿，渲染完就扔。</p>
+  <p>我们工作台为了交互回放，把渲染和仿真<b>解耦</b>了：每帧得写 .ply 文件、得在浏览器里渲染、得让用户能切换不同序列 —— 这些都要求数据形态标准化、要求下采样以保速、要求上采样补细节。一连串决定让我们必须做 fuse + K-NN/particle_F。</p>
+  <p>简而言之：<b>R10 用紧耦合省掉了所有问题，代价是每次重跑才能换角度。我们解耦换来了交互性，代价是引出了一整套上采样问题。</b></p>
+</details>
+
+<details>
+  <summary>17. 现在的 npz schema (v2) 有哪些字段？以后会变吗？</summary>
+  <p>v2 包含：每帧位置、每帧四元数、静态尺度、静态颜色、静态不透明度。如果要 F-skinning 完整生效，需要 v3 增加"每帧尺度"字段（现在的尺度是静态的）。v3 会让 .npz 增大约 50%。</p>
+</details>
+
+</section>
+
+<footer class="bottom">
+  生成于 2026-05-18 · gsfluent fuse 阶段演讲手册
+</footer>
+
+</div>
+</body>
+</html>

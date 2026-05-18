@@ -97,6 +97,14 @@ cd frontend && npm ci && npm run build && cd ..
 # 3. 配置 GaussianFluent 仿真环境
 #    （torch + warp 0.10 + taichi 1.5，需要 CUDA 编译）
 #    详见 GaussianFluent 自身的 README
+
+# 4. 应用 GaussianFluent 的上游补丁（重要）
+#    我们对 gs_simulation/watermelon/gs_simulation_building.py 做了
+#    5 处修补（particle_F 路径 + 多个稳定性修复），
+#    详见 tools/patches/UPSTREAM_PATCHES.md
+#    一键应用：
+cp tools/patches/gs_simulation_building.patched.py \
+   <GaussianFluent路径>/gs_simulation/watermelon/gs_simulation_building.py
 ```
 
 ### 1.3 启动服务

@@ -105,6 +105,13 @@ cd frontend && npm ci && npm run build && cd ..
 # 3. Set up the GaussianFluent sim env separately
 #    (torch + warp 0.10 + taichi 1.5; needs CUDA build chain)
 #    See the GaussianFluent README for that.
+
+# 4. Apply our GaussianFluent upstream patches (REQUIRED)
+#    We've made 5 patches to gs_simulation/watermelon/gs_simulation_building.py
+#    (particle_F path + stability fixes). See tools/patches/UPSTREAM_PATCHES.md
+#    for the full list. One-shot drop-in:
+cp tools/patches/gs_simulation_building.patched.py \
+   <GaussianFluent-path>/gs_simulation/watermelon/gs_simulation_building.py
 ```
 
 ### 1.3 Start the server
