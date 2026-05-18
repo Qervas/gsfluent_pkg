@@ -2,53 +2,91 @@
 # Server-side gsfluent launcher.
 #
 # Starts `gsfluent serve` in the background with the right environment
-# for the MPM sim subprocess. Without this, POST /api/runs preflights
-# fail with:
-#   ERROR: sim interpreter not on PATH: $GSFLUENT_SIM_PYTHON=python
-# (because `tools/run_sim.sh` defaults to bare `python`, which the
-# gsfluent-api conda env doesn't carry torch/warp/taichi for — only the
-# GaussianFluent env does).
+# for the MPM sim subprocess (POST /api/runs preflights fail otherwise).
 #
-# Usage:
-#   ./start-gsfluent-server.sh          # use built-in defaults (your-server layout)
-#
-# Or override anything via env vars:
-#   PORT=18080 ./start-gsfluent-server.sh
-#
-#   GSFLUENT_SIM_HOME=/opt/GaussianFluent \
-#   GSFLUENT_SIM_PYTHON=/opt/conda/envs/sim/bin/python \
-#   GSFLUENT_BIN=/opt/conda/envs/api/bin/gsfluent \
-#   PKG_ROOT=/opt/gsfluent_pkg \
-#   PORT=18080 \
+# Quick start:
+#   cp .env.example .env
+#   $EDITOR .env                   # fill in YOUR paths
 #   ./start-gsfluent-server.sh
 #
+# Required env vars (set in .env or inline):
+#   GSFLUENT_SIM_HOME    — path to your GaussianFluent source tree
+#   GSFLUENT_SIM_PYTHON  — Python with torch+warp+taichi (the sim env)
+#
+# Optional env vars (have sensible defaults):
+#   GSFLUENT_BIN         — path to gsfluent CLI (auto-detected via PATH)
+#   PORT                 — listener port (default 18080)
+#   HOST                 — bind address (default 0.0.0.0)
+#   LOG_FILE             — stdout/stderr destination (default /tmp/gsfluent_server.log)
+#   PKG_ROOT             — repo root (auto-detected from script location)
+#
 # To stop the server:    pkill -f "gsfluent serve"
-# To tail the log:       tail -f $LOG_FILE  (default /tmp/gsfluent_server.log)
+# To tail the log:       tail -f $LOG_FILE
 set -euo pipefail
 
-# ---- defaults (match the current your-server deployment) --------------
-: "${GSFLUENT_SIM_HOME:=$GSFLUENT_SIM_HOME}"
-: "${GSFLUENT_SIM_PYTHON:=$CONDA_ROOT/envs/GaussianFluent/bin/python}"
-: "${GSFLUENT_BIN:=$CONDA_ROOT/envs/gsfluent-api/bin/gsfluent}"
-: "${PKG_ROOT:=$GSFLUENT_PKG_ROOT_tmp}"
+# ---- self-locate -----------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- source local .env if present -----------------------------------
+# Lets the team keep their paths in one place per machine, gitignored.
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    # shellcheck disable=SC1091
+    set -a; source "$SCRIPT_DIR/.env"; set +a
+fi
+
+# ---- defaults for the things that have universal defaults -----------
+: "${PKG_ROOT:=$SCRIPT_DIR}"
 : "${PORT:=18080}"
 : "${HOST:=0.0.0.0}"
 : "${LOG_FILE:=/tmp/gsfluent_server.log}"
 
+# Auto-detect gsfluent CLI via PATH unless overridden.
+if [[ -z "${GSFLUENT_BIN:-}" ]]; then
+    if command -v gsfluent >/dev/null 2>&1; then
+        GSFLUENT_BIN="$(command -v gsfluent)"
+    fi
+fi
+
+# ---- required vars (no fake defaults) -------------------------------
+missing=()
+[[ -z "${GSFLUENT_SIM_HOME:-}" ]]   && missing+=("GSFLUENT_SIM_HOME")
+[[ -z "${GSFLUENT_SIM_PYTHON:-}" ]] && missing+=("GSFLUENT_SIM_PYTHON")
+[[ -z "${GSFLUENT_BIN:-}" ]]        && missing+=("GSFLUENT_BIN (or have gsfluent on PATH)")
+
+if (( ${#missing[@]} > 0 )); then
+    cat >&2 <<EOF
+ERROR: required environment variables not set:
+
+  $(printf '  - %s\n' "${missing[@]}")
+
+Easiest fix: copy .env.example to .env and fill in your paths.
+
+  cd $SCRIPT_DIR
+  cp .env.example .env
+  \$EDITOR .env
+  ./start-gsfluent-server.sh
+EOF
+    exit 1
+fi
+
 # ---- sanity checks --------------------------------------------------
 if [[ ! -d "$GSFLUENT_SIM_HOME" ]]; then
     echo "ERROR: GSFLUENT_SIM_HOME does not exist: $GSFLUENT_SIM_HOME" >&2
-    echo "       Override with: GSFLUENT_SIM_HOME=/path/to/GaussianFluent ./start-gsfluent-server.sh" >&2
+    exit 1
+fi
+if [[ ! -f "$GSFLUENT_SIM_HOME/gs_simulation/watermelon/gs_simulation_building.py" ]]; then
+    echo "ERROR: GSFLUENT_SIM_HOME doesn't look like a GaussianFluent checkout:" >&2
+    echo "       missing gs_simulation/watermelon/gs_simulation_building.py" >&2
+    echo "       (this should be a clone of github.com/whc1992/GaussianFluent)" >&2
     exit 1
 fi
 if [[ ! -x "$GSFLUENT_SIM_PYTHON" ]]; then
     echo "ERROR: GSFLUENT_SIM_PYTHON is not an executable: $GSFLUENT_SIM_PYTHON" >&2
-    echo "       This Python must have torch + warp + taichi (the sim env)." >&2
+    echo "       Must be a Python with torch + warp + taichi installed." >&2
     exit 1
 fi
 if [[ ! -x "$GSFLUENT_BIN" ]]; then
-    echo "ERROR: gsfluent CLI not found at: $GSFLUENT_BIN" >&2
-    echo "       Override with: GSFLUENT_BIN=/path/to/gsfluent ./start-gsfluent-server.sh" >&2
+    echo "ERROR: gsfluent CLI not found / not executable: $GSFLUENT_BIN" >&2
     exit 1
 fi
 if [[ ! -d "$PKG_ROOT" ]]; then

@@ -72,7 +72,7 @@ def fetch_model_ply(server_base: str, model_path_on_server: str) -> Path:
     Args:
       server_base: e.g. "http://localhost:8080" (the SSH tunnel target)
       model_path_on_server: absolute path the server knows, e.g.
-        "$GSFLUENT_PKG_ROOT_tmp/work/library/models/<name>"
+        "<pkg-root>/work/library/models/<name>"
     """
     import hashlib
     import urllib.parse

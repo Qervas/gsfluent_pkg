@@ -19,7 +19,7 @@ native via the vkgs fork).
             ▼                                  ▼
 ┌────────────────────────────────────────────────────────────┐
 │  SIM     server / your-server                               │
-│  $GSFLUENT_SIM_HOME/  (Warp 0.10 + A100)     │
+│  /path/to/GaussianFluent/      (Warp 0.10 + A100)     │
 │  MPM solver → sim_*.ply (200k particles, Z-up)             │
 └─────────────────────────┬──────────────────────────────────┘
                           ▼  (rsync sim_*.ply down to laptop)
@@ -145,7 +145,7 @@ work/library/sequences/<name>/
 {
   "sim": {
     "host": "your-server",
-    "path": "$USER_HOME/.../simulation_ply",
+    "path": "<sim-output>/simulation_ply",
     "git_sha": "<commit>",
     "recipe_json": "<inline copy of config>"
   },

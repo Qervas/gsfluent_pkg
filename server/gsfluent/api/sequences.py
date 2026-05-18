@@ -49,7 +49,7 @@ def _sequence_dict(seq: Sequence) -> dict:
     # the warning indicator.
     d["is_broken"] = bool(seq.is_broken)
     # `meta_dict()` injects the absolute server filesystem path
-    # (e.g. $USER_HOME/.../sequences/foo/) into every payload.
+    # (e.g. <sequences-root>/foo/) into every payload.
     # The React workbench doesn't consume it; under split-topology the
     # laptop has no use for the server's local path either. Stripping
     # it keeps the API surface from leaking server directory layout.

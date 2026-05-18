@@ -85,10 +85,7 @@ viser stays loopback throughout.
 
 ### 1.2 Install
 
-The repo is already deployed at `$GSFLUENT_PKG_ROOT_tmp/`
-(includes built frontend `frontend/dist/` and Python venv `server/.venv/`).
-
-For a fresh deploy:
+Fresh deploy:
 
 ```bash
 git clone <repo> /opt/gsfluent_pkg
@@ -111,20 +108,32 @@ cd frontend && npm ci && npm run build && cd ..
 #    (particle_F path + stability fixes). See tools/patches/UPSTREAM_PATCHES.md
 #    for the full list. One-shot drop-in:
 cp tools/patches/gs_simulation_building.patched.py \
-   <GaussianFluent-path>/gs_simulation/watermelon/gs_simulation_building.py
+   "$GSFLUENT_SIM_HOME/gs_simulation/watermelon/gs_simulation_building.py"
+
+# 5. Configure environment variables
+cp .env.example .env
+$EDITOR .env       # fill in YOUR machine's paths
 ```
+
+`.env` must set at minimum:
+
+- `GSFLUENT_SIM_HOME` — your GaussianFluent source dir
+- `GSFLUENT_SIM_PYTHON` — Python with torch+warp+taichi
+
+`.env.example` has the full template. `.env` is gitignored — your
+local paths never leave your machine.
 
 ### 1.3 Start the server
 
-The repo root ships `start-gsfluent-server.sh`:
+The repo root ships `start-gsfluent-server.sh`. It auto-sources `.env`:
 
 ```bash
-cd $GSFLUENT_PKG_ROOT_tmp
+cd <your-repo-checkout>
 ./start-gsfluent-server.sh
 ```
 
 What it does:
-1. Exports `GSFLUENT_SIM_HOME` and `GSFLUENT_SIM_PYTHON`
+1. Sources `.env` for `GSFLUENT_SIM_HOME` and `GSFLUENT_SIM_PYTHON`
 2. Backgrounds `gsfluent serve --host 0.0.0.0 --port 18080 --no-browser`
 3. Logs to `/tmp/gsfluent_server.log`
 
@@ -151,7 +160,7 @@ on each team member's own machine.
 
 ```bash
 curl http://<server-ip>:18080/api/health
-# Expected: {"status":"ok","pkg_root":"$GSFLUENT_PKG_ROOT_tmp"}
+# Expected: {"status":"ok","pkg_root":"<your-repo-path-on-server>"}
 ```
 
 ---
@@ -251,7 +260,7 @@ import json
 recipe = json.load(open("/tmp/recipe.json"))
 print(json.dumps({
     "run_name": "my_test_run_001",
-    "model_path": "$GSFLUENT_SIM_HOME/model/cluster_6_15",
+    "model_path": "<server-path-to-model>/cluster_6_15",
     "recipe_data": recipe["data"],
     "recipe_source": "jelly",
     "particles": 200000
@@ -306,7 +315,7 @@ recipe = requests.get(f"{API}/api/recipes/jelly").json()
 # 2. Submit a run
 resp = requests.post(f"{API}/api/runs", json={
     "run_name": "py_demo_001",
-    "model_path": "$GSFLUENT_SIM_HOME/model/cluster_6_15",
+    "model_path": "<server-path-to-model>/cluster_6_15",
     "recipe_data": recipe["data"],
     "recipe_source": "jelly",
     "particles": 200000,
@@ -431,8 +440,8 @@ The server started without the sim-env Python set. `start-gsfluent-server.sh`
 handles this; if you launched manually, export both:
 
 ```bash
-export GSFLUENT_SIM_PYTHON=$CONDA_ROOT/envs/GaussianFluent/bin/python
-export GSFLUENT_SIM_HOME=$GSFLUENT_SIM_HOME
+export GSFLUENT_SIM_PYTHON=/path/to/sim-env/bin/python
+export GSFLUENT_SIM_HOME=/path/to/GaussianFluent
 ```
 
 ### "no sim environment installed at $GSFLUENT_SIM_HOME"

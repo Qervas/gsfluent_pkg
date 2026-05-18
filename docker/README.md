@@ -88,7 +88,7 @@ Example — sim-capable deploy with the GaussianFluent install mounted:
 
 ```bash
 BACKEND_PORT=18080 \
-SIM_HOST_DIR=$GSFLUENT_SIM_HOME \
+SIM_HOST_DIR=/path/to/GaussianFluent \
 GSFLUENT_SIM_PYTHON=/opt/gsfluent-sim/.venv/bin/python \
 docker compose -f docker/compose.yml up -d
 # then edit docker/compose.yml to UNCOMMENT the SIM_HOST_DIR volume line
