@@ -154,7 +154,7 @@ fi
     --output_path    "$SIM_OUTPUT_DIR" \
     --config         "$CONFIG" \
     --target_particles "$PARTICLES" \
-    --output_ply --async_io \
+    --output_ply --async_io --output_cov \
     "${EXTRA_FLAGS[@]}"
 
 # ---------- step 2: fuse to per-frame splat plys -----------------------------

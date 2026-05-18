@@ -133,6 +133,55 @@ def _batched_kabsch_rotation(p_rel_0, q_rel_t, weights):
     return np.einsum("nij,njk,nkl->nil", U, D, Vt)
 
 
+def _cov6_to_quat_logscale(cov6: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Decompose per-particle covariance into per-frame quaternion + log-scale.
+
+    Input:
+      cov6 : (N, 6) — upper-triangular cov entries in order
+                       (c00, c01, c02, c11, c12, c22)
+
+    Output:
+      quat   : (N, 4)  — rotation as (w, x, y, z), columns of the
+                          symmetric-eigvec basis sorted by descending eigval,
+                          right-handed (det(R)=+1)
+      log_s  : (N, 3)  — per-axis log-scales: log(sqrt(eigval)), descending
+
+    For a 3DGS-style covariance Σ = R · diag(s²) · Rᵀ, eigh on Σ gives:
+        eigvals = s² (ascending), eigvecs = R columns (ascending).
+    We flip both to descending so the largest principal axis lands first.
+
+    Eigvecs from np.linalg.eigh are orthonormal but the orientation
+    (right- vs left-handed) is sign-arbitrary. We flip the last column
+    when det < 0 to enforce a proper rotation — the quat extraction
+    needs that.
+    """
+    n = cov6.shape[0]
+    C = np.empty((n, 3, 3), dtype=cov6.dtype)
+    C[:, 0, 0] = cov6[:, 0]
+    C[:, 0, 1] = cov6[:, 1]; C[:, 1, 0] = cov6[:, 1]
+    C[:, 0, 2] = cov6[:, 2]; C[:, 2, 0] = cov6[:, 2]
+    C[:, 1, 1] = cov6[:, 3]
+    C[:, 1, 2] = cov6[:, 4]; C[:, 2, 1] = cov6[:, 4]
+    C[:, 2, 2] = cov6[:, 5]
+    eigvals, eigvecs = np.linalg.eigh(C)
+    # eigh returns ascending; reverse so [:, 0] is largest principal axis.
+    eigvals = eigvals[:, ::-1]
+    eigvecs = eigvecs[:, :, ::-1]
+    # Make sure the basis is right-handed (det = +1). When det < 0, flip
+    # the sign of the last (smallest) eigvec column — preserves orthonormality
+    # and lands in SO(3).
+    dets = np.linalg.det(eigvecs)
+    flip = (dets < 0).astype(eigvecs.dtype)
+    # Multiply last column by (1 - 2*flip) → +1 when det>0, -1 when det<0.
+    eigvecs[..., 2] *= (1.0 - 2.0 * flip)[:, None]
+    quat = _rotmat_to_quat(eigvecs.astype(np.float32, copy=False))
+    # Clamp eigvals to a small positive floor before log+sqrt — covariance
+    # diagonals from MPM can dip to ~0 for axes the solver has crushed flat,
+    # and log(0) propagates -inf into the 3DGS shader.
+    log_s = 0.5 * np.log(np.maximum(eigvals, 1e-12)).astype(np.float32)
+    return quat, log_s
+
+
 def _rotmat_to_quat(R):
     """Batched (N, 3, 3) rotation matrices -> (N, 4) quaternions in (w,x,y,z) order.
 
@@ -385,6 +434,24 @@ def main():
     sim_xyz_t0 = np.stack([first_data["x"], first_data["y"], first_data["z"]], axis=1).astype(np.float32)
     n_sim = len(sim_xyz_t0)
 
+    # Particle_F path detect: sim wrapper writes cov_00..cov_22 per particle
+    # alongside xyz when --output_cov is set. When present, the fuse step
+    # switches to 1-NN binding (each ref splat rigidly skinned to one sim
+    # particle) and inherits the sim's per-frame cov via eigendecomposition.
+    # Eliminates the K-NN ghost (weighted-average splats placed in empty
+    # space across crack lines) because there's no averaging — each ref
+    # splat goes with its single bound sim particle.
+    _COV_FIELDS = ("cov_00", "cov_01", "cov_02", "cov_11", "cov_12", "cov_22")
+    has_cov = all(f in first_data.dtype.names for f in _COV_FIELDS)
+    if has_cov:
+        print("  particle_F path: cov fields detected; 1-NN binding will replace K-NN averaging")
+        if args.zup:
+            raise SystemExit("particle_F (cov-fields in sim ply) currently requires "
+                             "--no_zup (the sim's cov is in sim coords; rotating it "
+                             "into Z-up space needs a basis transform we haven't "
+                             "wired yet). Pass --no_zup or drop --output_cov on the "
+                             "sim side.")
+
     if args.subsample is not None and n_sim > args.subsample:
         rng = np.random.default_rng(0)
         kept_sim_idx = rng.choice(n_sim, size=args.subsample, replace=False)
@@ -398,14 +465,29 @@ def main():
     _, nn_idx = tree.query(sim_xyz_t0[kept_sim_idx], k=1, workers=-1)
     print(f"  NN map ready ({len(nn_idx)} matches)")
 
+    # Particle_F path: build the rest-time 1-NN map ref→sim and pre-compute
+    # the per-splat translation offset (so each ref splat translates rigidly
+    # with its bound sim particle, preserving its rest-time position relative
+    # to that particle). Skip K-NN entirely — it's the source of the ghost.
+    pf_1nn_idx = None
+    pf_ref_rest_offset = None
+    sim_xyz_t0_kept = sim_xyz_t0[kept_sim_idx]
+    if has_cov:
+        print(f"Building 1-NN rest map (each ref splat -> nearest sim particle at rest)...")
+        sim_tree_pf = cKDTree(sim_xyz_t0_kept)
+        pf_dists, pf_1nn_idx = sim_tree_pf.query(ref_xyz_norm, k=1, workers=-1)
+        pf_ref_rest_offset = (ref_xyz_norm - sim_xyz_t0_kept[pf_1nn_idx]).astype(np.float32)
+        print(f"  1-NN bindings: {len(pf_1nn_idx):,} ref splats, "
+              f"median rest distance to bound sim particle: "
+              f"{float(np.median(pf_dists)):.4f} (normalized sim units)")
+
     # K-NN skinning map: for each REF splat, find K nearest SIM particles
     # at frame 0 in normalized sim space. Used per-frame to compute a
     # weighted displacement field over ALL ref splats — eliminates the
     # 1-NN ghost where unclaimed ref splats stay static.
     knn_idx = None
     knn_weights = None
-    sim_xyz_t0_kept = sim_xyz_t0[kept_sim_idx]
-    if args.knn > 0:
+    if not has_cov and args.knn > 0:
         K = int(args.knn)
         print(f"Building K-NN map (K={K}) from each ref splat -> {len(kept_sim_idx)} sim particles...")
         sim_tree = cKDTree(sim_xyz_t0_kept)
@@ -540,6 +622,81 @@ def main():
         v = PlyData.read(str(sp))["vertex"].data
         sim_xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float32)
         out_path = out_dir / f"frame_{idx:04d}.ply"
+
+        if has_cov:
+            # Particle_F path. Each ref splat is rigidly bound to its
+            # nearest sim particle at rest (pf_1nn_idx); per frame, its
+            # position is the bound particle's current xyz plus the rest
+            # offset, and its rotation comes from the bound particle's
+            # current covariance via eigendecomposition. The 3DGS log-
+            # scales are kept at frame-0 source values (the npz schema is
+            # v2: per-frame quat + static scales). Eigvals beyond the
+            # initial scales² aren't preserved — for true scale stretch
+            # we'd need a v3 npz with per-frame scales; revisit if the
+            # visuals show truncation.
+            sim_kept = sim_xyz[kept_sim_idx]
+            sim_cov6 = np.stack(
+                [v[f] for f in _COV_FIELDS], axis=1,
+            ).astype(np.float32)
+            sim_cov6_kept = sim_cov6[kept_sim_idx]
+
+            # Position: bound sim particle's current xyz + rest offset.
+            ref_pos_norm = sim_kept[pf_1nn_idx] + pf_ref_rest_offset      # (n_ref, 3)
+            out_xyz_world = _transform_sim_xyz(ref_pos_norm, args)
+
+            # Rotation: bound sim particle's current cov → quat via eigh.
+            # Sim cov is in normalized [0, 2]³ space. Positions get
+            # un-normalized to source-scale in _transform_sim_xyz (when
+            # --output_source_scale, default ON), so cov must scale by
+            # extent² to stay in the same world frame. Without this, the
+            # cov-derived log-scales come out log(extent) ≈ -4 too small
+            # and ~100% of splats land below fp16 subnormal → workbench
+            # culls them silently.
+            cov_world_factor = (
+                float(args.extent) ** 2 if args.output_source_scale else 1.0
+            )
+            ref_cov_t = sim_cov6_kept[pf_1nn_idx] * cov_world_factor       # (n_ref, 6)
+            new_quat, _log_s = _cov6_to_quat_logscale(ref_cov_t)
+
+            # Frame-0 only: also write the cov-derived log-scales so the
+            # npz cache picks them up as the static scales for the whole
+            # cell. Avoids the "splat-shape ghost" where ref splats keep
+            # their reference-ply scales while the cov rotates around
+            # them — visually a fan of rotating sticks.
+            if idx == 0:
+                full_attrs["scale_0"] = _log_s[:, 0]
+                full_attrs["scale_1"] = _log_s[:, 1]
+                full_attrs["scale_2"] = _log_s[:, 2]
+
+            if idx == 0 or not args.xyz_only_after_first:
+                out = full_attrs.copy()
+                out["x"] = out_xyz_world[:, 0]
+                out["y"] = out_xyz_world[:, 1]
+                out["z"] = out_xyz_world[:, 2]
+                out["rot_0"] = new_quat[:, 0]
+                out["rot_1"] = new_quat[:, 1]
+                out["rot_2"] = new_quat[:, 2]
+                out["rot_3"] = new_quat[:, 3]
+                tmp_path = Path(str(out_path) + ".tmp")
+                PlyData([PlyElement.describe(out, "vertex")], text=text_mode).write(tmp_path)
+                os.replace(tmp_path, out_path)
+            else:
+                # Compact frame: xyz + per-frame quat. ~24 MB vs ~161 MB.
+                fields = [("x", np.float32), ("y", np.float32), ("z", np.float32),
+                          ("rot_0", np.float32), ("rot_1", np.float32),
+                          ("rot_2", np.float32), ("rot_3", np.float32)]
+                out = np.empty(len(full_attrs), dtype=fields)
+                out["x"] = out_xyz_world[:, 0]
+                out["y"] = out_xyz_world[:, 1]
+                out["z"] = out_xyz_world[:, 2]
+                out["rot_0"] = new_quat[:, 0]
+                out["rot_1"] = new_quat[:, 1]
+                out["rot_2"] = new_quat[:, 2]
+                out["rot_3"] = new_quat[:, 3]
+                tmp_path = Path(str(out_path) + ".tmp")
+                PlyData([PlyElement.describe(out, "vertex")], text=text_mode).write(tmp_path)
+                os.replace(tmp_path, out_path)
+            return out_path
 
         if knn_idx is not None:
             # K-NN skinning path. Every ref splat displaces by a weighted
