@@ -152,6 +152,10 @@ export const api = {
       fetch(`/api/runs/history/${encodeURIComponent(run_name)}`, {
         method: "DELETE",
       }).then(j<{ deleted: string }>),
+    log: (run_name: string, offset: number) =>
+      fetch(
+        `/api/runs/${encodeURIComponent(run_name)}/log?offset=${offset}`,
+      ).then(j<{ content: string; offset: number; size: number }>),
   },
   schemas: {
     boundaries: () => fetch("/api/schemas/boundaries").then(j<BCSchemas>),

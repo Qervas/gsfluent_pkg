@@ -148,6 +148,69 @@ def delete_history(run_name: str):
 
 
 _RUN_FRAME_RE = re.compile(r"^frame_(\d+)\.ply$")
+_SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
+def _resolve_run_log(run_name: str) -> Path:
+    """Locate run.log for an active OR archived run.
+
+    Active runs write into `runner.FUSED_DIR/<name>/run.log`; once the
+    sequence is archived, the log gets copied into
+    `lib.SEQUENCES_DIR/<name>/run.log`. We check both. Raises 400 on a
+    bad name, 404 when neither path is a file.
+    """
+    if not _SAFE_RUN_NAME.match(run_name):
+        raise HTTPException(400, f"invalid run name: {run_name!r}")
+    # Active first (most recently written), then archived.
+    candidates = [
+        runner.FUSED_DIR / run_name / "run.log",
+        lib.SEQUENCES_DIR / run_name / "run.log",
+    ]
+    seq_root = lib.SEQUENCES_DIR.resolve()
+    fused_root = runner.FUSED_DIR.resolve()
+    for p in candidates:
+        rp = p.resolve()
+        # Path-traversal defense: refuse anything that escapes the two
+        # allowed roots, regardless of how `run_name` slipped past the regex.
+        try:
+            rp.relative_to(fused_root)
+        except ValueError:
+            try:
+                rp.relative_to(seq_root)
+            except ValueError:
+                continue
+        if rp.is_file():
+            return rp
+    raise HTTPException(404, f"no log for run: {run_name}")
+
+
+@router.get("/{run_name}/log")
+def get_run_log(run_name: str, offset: int = 0) -> dict:
+    """Incremental tail of a run's stdout/stderr log.
+
+    The frontend polls this every ~500 ms while a sim is active. We
+    return only the bytes since `offset`, so the client can append
+    chunks without re-rendering the whole log every tick.
+
+    If `offset` is beyond the current file size (log was truncated /
+    rotated), we reset to 0 and return everything. Returns
+    `{content: str, offset: int, size: int}` where the next poll
+    should pass `offset = response.size`.
+    """
+    log_path = _resolve_run_log(run_name)
+    size = log_path.stat().st_size
+    if offset < 0 or offset > size:
+        offset = 0
+    if offset == size:
+        return {"content": "", "offset": size, "size": size}
+    with log_path.open("rb") as fh:
+        fh.seek(offset)
+        chunk = fh.read()
+    return {
+        "content": chunk.decode("utf-8", errors="replace"),
+        "offset": size,
+        "size": size,
+    }
 
 
 @router.get("/{run_name}/frame/{frame_idx}.ply")

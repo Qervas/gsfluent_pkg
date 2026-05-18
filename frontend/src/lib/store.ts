@@ -143,6 +143,10 @@ type State = {
   // viser is the truth-source for frame availability.
   stepFrame: (delta: number) => void;
   resetForNewRun: (name: string) => void;
+  // Frame-progress setter driven by the run-log parser (tqdm `n/total`
+  // lines). Bumps simFirstFrameAt on the 0→positive transition so the
+  // ETA computation has a wall-clock anchor.
+  setSimProgress: (nFrames: number, totalFrames: number) => void;
 };
 
 /** Read the persisted panel-collapse state from localStorage, defaulting
@@ -280,4 +284,14 @@ export const useStore = create<State>((set) => ({
       // by the SequenceTree onPick handler / live-sim pump and overwritten
       // when a new sequence is loaded.
     }),
+  setSimProgress: (nFrames, totalFrames) =>
+    set((st) => ({
+      simNFrames: nFrames,
+      simTotalFrames: totalFrames > 0 ? totalFrames : st.simTotalFrames,
+      // Anchor the ETA clock when the first frame lands. After that we
+      // leave it alone so the running average stays meaningful even if
+      // a few mid-run tqdm lines arrive out of order.
+      simFirstFrameAt:
+        st.simFirstFrameAt ?? (nFrames > 0 ? Date.now() : null),
+    })),
 }));
