@@ -20,7 +20,7 @@ behavior immediately. Or apply the five edits below by hand.
 
 ```bash
 # On the sim host:
-SIM_BUILD=/data/yinshaoxuan/GaussianFluent/gs_simulation/watermelon/gs_simulation_building.py
+SIM_BUILD="$GSFLUENT_SIM_HOME"/gs_simulation/watermelon/gs_simulation_building.py
 grep -c "particle_F\|substep_dt clamp" $SIM_BUILD
 # Expected: 5 or more. If 0, none of the patches are applied.
 ```

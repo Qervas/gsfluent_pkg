@@ -1,3 +1,6 @@
+# Deployment-local env (copy .env.example to .env and fill in your paths)
+.env
+
 # Generated runtime state
 work/
 core_runtime/

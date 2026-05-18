@@ -11,12 +11,10 @@
 #   bash run_sim.sh <model_dir> --config <recipe.json> \
 #                   --particles N --output <run_name>
 #
-# Environment overrides — set these in run-server.sh or the server's env:
-#   GSFLUENT_SIM_HOME    canonical install root
-#                        default: /data/yinshaoxuan/GaussianFluent
-#   GSFLUENT_SIM_PYTHON  python interpreter for the sim
-#                        default: the python on PATH that satisfies
-#                                 torch/warp/taichi (the server's conda env)
+# Environment overrides — REQUIRED, set them in .env or your shell:
+#   GSFLUENT_SIM_HOME    canonical GaussianFluent install root (no default)
+#   GSFLUENT_SIM_PYTHON  python interpreter with torch/warp/taichi
+#                        (default: `python` from PATH — usually wrong)
 #   GSFLUENT_SIM_ENV     conda env name for `conda activate` (optional)
 #                        default: empty (assumes the calling env is correct)
 #
@@ -56,8 +54,28 @@ done
 
 # ---------- resolve paths ----------------------------------------------------
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SIM_HOME="${GSFLUENT_SIM_HOME:-/data/yinshaoxuan/GaussianFluent}"
+SIM_HOME="${GSFLUENT_SIM_HOME:-}"
 SIM_PY="${GSFLUENT_SIM_PYTHON:-python}"
+
+if [[ -z "$SIM_HOME" ]]; then
+    cat >&2 <<EOF
+ERROR: GSFLUENT_SIM_HOME is not set.
+
+This wrapper needs to know where the GaussianFluent source tree lives
+on this host. Set it in the environment that spawned gsfluent serve,
+e.g. via the repo's .env file:
+
+  cp .env.example .env
+  \$EDITOR .env                  # fill in GSFLUENT_SIM_HOME + SIM_PYTHON
+  ./start-gsfluent-server.sh
+
+Or inline:
+  GSFLUENT_SIM_HOME=/path/to/GaussianFluent \\
+  GSFLUENT_SIM_PYTHON=/path/to/sim-env/bin/python \\
+  ./start-gsfluent-server.sh
+EOF
+    exit 1
+fi
 
 # Pre-flight: bail fast with a clear, deploy-aware error if the sim env
 # isn't mounted/installed. Without this the script would barrel into

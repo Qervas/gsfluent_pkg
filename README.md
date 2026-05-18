@@ -77,10 +77,7 @@ viser_headless 读本地 .npz → 浏览器 WebSocket 接 viser → WebGL 渲染
 
 ### 1.2 安装
 
-仓库已经放置在服务器：`/data/yinshaoxuan/gsfluent_pkg_tmp/`
-（包含已构建的前端 `frontend/dist/`、Python 虚拟环境 `server/.venv/`）。
-
-如果从零部署：
+从零部署：
 
 ```bash
 git clone <repo> /opt/gsfluent_pkg
@@ -104,15 +101,26 @@ cd frontend && npm ci && npm run build && cd ..
 #    详见 tools/patches/UPSTREAM_PATCHES.md
 #    一键应用：
 cp tools/patches/gs_simulation_building.patched.py \
-   <GaussianFluent路径>/gs_simulation/watermelon/gs_simulation_building.py
+   "$GSFLUENT_SIM_HOME/gs_simulation/watermelon/gs_simulation_building.py"
+
+# 5. 配置环境变量
+cp .env.example .env
+$EDITOR .env       # 填入你这台机器的实际路径
 ```
+
+`.env` 里至少要设两项：
+
+- `GSFLUENT_SIM_HOME` —— 你这台机器上 GaussianFluent 源码目录
+- `GSFLUENT_SIM_PYTHON` —— 装了 torch+warp+taichi 的 Python 解释器路径
+
+`.env.example` 里有完整模板和说明。`.env` 已在 `.gitignore` 里，本地路径不会进 git。
 
 ### 1.3 启动服务
 
-仓库根目录已提供启动脚本 `start-gsfluent-server.sh`：
+仓库根目录的 `start-gsfluent-server.sh` 会自动读 `.env`：
 
 ```bash
-cd /data/yinshaoxuan/gsfluent_pkg_tmp
+cd <你 clone 的仓库路径>
 ./start-gsfluent-server.sh
 ```
 
@@ -143,7 +151,7 @@ viser 的 8091 / 8092 **不暴露**——它们绑在团队成员各自电脑的
 
 ```bash
 curl http://<服务器IP>:18080/api/health
-# 期望返回：{"status":"ok","pkg_root":"/data/yinshaoxuan/gsfluent_pkg_tmp"}
+# 期望返回：{"status":"ok","pkg_root":"<服务器上的仓库路径>"}
 ```
 
 ---
@@ -243,7 +251,7 @@ import json
 recipe = json.load(open("/tmp/recipe.json"))
 print(json.dumps({
     "run_name": "my_test_run_001",
-    "model_path": "/data/yinshaoxuan/GaussianFluent/model/cluster_6_15",
+    "model_path": "<server-path-to-model>/cluster_6_15",
     "recipe_data": recipe["data"],
     "recipe_source": "jelly",
     "particles": 200000
@@ -297,7 +305,7 @@ recipe = requests.get(f"{API}/api/recipes/jelly").json()
 # 2. 提交仿真
 resp = requests.post(f"{API}/api/runs", json={
     "run_name": "py_demo_001",
-    "model_path": "/data/yinshaoxuan/GaussianFluent/model/cluster_6_15",
+    "model_path": "<server-path-to-model>/cluster_6_15",
     "recipe_data": recipe["data"],
     "recipe_source": "jelly",
     "particles": 200000,
@@ -409,8 +417,8 @@ vim tools/recipes/my_recipe.json
 启动会自动设好。手动启动时确保：
 
 ```bash
-export GSFLUENT_SIM_PYTHON=/data/yinshaoxuan/miniconda3/envs/GaussianFluent/bin/python
-export GSFLUENT_SIM_HOME=/data/yinshaoxuan/GaussianFluent
+export GSFLUENT_SIM_PYTHON=/path/to/sim-env/bin/python
+export GSFLUENT_SIM_HOME=/path/to/GaussianFluent
 ```
 
 ### "no sim environment installed at $GSFLUENT_SIM_HOME"
