@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useStore } from "@/lib/store";
 
 /** Drives currentFrameIdx advancement for sequence playback. The
@@ -12,13 +12,26 @@ import { useStore } from "@/lib/store";
 export function PlaybackDriver(): null {
   const playing = useStore((s) => s.playing);
   const scrubbing = useStore((s) => s.scrubbing);
-  const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const setCurrentFrame = useStore((s) => s.setCurrentFrame);
   const setPlaying = useStore((s) => s.setPlaying);
   const loop = useStore((s) => s.loop);
   const speedX = useStore((s) => s.speedX);
   const fpsHint = useStore((s) => s.fpsHint);
   const nFrames = useStore((s) => s.viserState.n_frames);
+
+  // The RAF loop reads `currentFrameIdx` every tick. If we put it in
+  // the effect's dep array, each setCurrentFrame would tear down and
+  // rebuild the entire loop (and reset `last = performance.now()`),
+  // so the `delay` gate never fires — frames advance on every rAF tick
+  // (~60 fps) instead of at the requested fpsHint × speedX cadence.
+  // Reading through a ref decouples the closure from re-renders.
+  const frameRef = useRef(0);
+  useEffect(() => {
+    const unsub = useStore.subscribe((s) => {
+      frameRef.current = s.currentFrameIdx;
+    });
+    return unsub;
+  }, []);
 
   useEffect(() => {
     if (!playing || scrubbing) return;
@@ -35,7 +48,7 @@ export function PlaybackDriver(): null {
       if (now - last < delay) return;
       last = now;
       const lastIdx = nFrames - 1;
-      const next = currentFrameIdx + 1;
+      const next = frameRef.current + 1;
       if (next > lastIdx) {
         if (loop) setCurrentFrame(0);
         else setPlaying(false);
@@ -45,7 +58,7 @@ export function PlaybackDriver(): null {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, scrubbing, nFrames, currentFrameIdx, setCurrentFrame, setPlaying, loop, speedX, fpsHint]);
+  }, [playing, scrubbing, nFrames, setCurrentFrame, setPlaying, loop, speedX, fpsHint]);
 
   return null;
 }

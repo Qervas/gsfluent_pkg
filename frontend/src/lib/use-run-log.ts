@@ -69,18 +69,21 @@ export function useRunLogPoller(pollMs: number = 500): void {
   const shouldDrain = !active && runName !== null && runName === runNameRef.current;
 
   useEffect(() => {
-    // Run name swap (new sim, or user clicked a different sequence) —
-    // reset the cursor. No need to clear simLog here; the store's
-    // resetForNewRun already did that when the run was started.
+    // Skip-or-fire decision: nothing to do if we're not active and
+    // there's no final-drain to perform.
+    if (!active && !shouldDrain) return;
+
+    // Reset cursor synchronously WITHIN this effect when the run name
+    // has changed. A separate effect on [runName] would race with this
+    // one — React's commit order isn't guaranteed across effects, and
+    // an earlier version of this code could send the previous run's
+    // partial line as the first tick of a new run. Doing it here means
+    // "reset and start polling" are one transactional step.
     if (runName !== runNameRef.current) {
       runNameRef.current = runName;
       offsetRef.current = 0;
       partialRef.current = "";
     }
-  }, [runName]);
-
-  useEffect(() => {
-    if (!active && !shouldDrain) return;
 
     let cancelled = false;
 

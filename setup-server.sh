@@ -39,11 +39,12 @@ fi
 note "uv: $(uv --version)"
 
 # ---- 2/2: sync ----
-# `uv sync` reads server/pyproject.toml + server/uv.lock and produces
-# server/.venv with exactly the locked versions. Idempotent: re-running
-# is a no-op when the lockfile hasn't changed.
+# `uv sync --frozen` reads server/uv.lock and produces server/.venv
+# with exactly the locked versions. --frozen refuses to re-resolve
+# (and thus refuses to rewrite uv.lock) so byte-identical installs
+# are guaranteed across machines. Idempotent: no-op when nothing changed.
 note "syncing server dependencies into server/.venv/ (from uv.lock)"
-(cd "$PKG_ROOT/server" && uv sync)
+(cd "$PKG_ROOT/server" && uv sync --frozen)
 
 # Sanity probe the console script.
 if ! "$PKG_ROOT/server/.venv/bin/gsfluent" --help >/dev/null 2>&1; then

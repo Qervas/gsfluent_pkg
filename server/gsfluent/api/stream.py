@@ -68,7 +68,24 @@ async def stream(ws: WebSocket):
                 if sub_task is not None:
                     sub_task.cancel()
                 sub_task = None
-                await _send_model_snapshot(ws, Path(msg["path"]))
+                # Allowlist the path against the registry. Without this
+                # the WS lets the client read any 3DGS directory on the
+                # server (same hole as GET /api/models/file).
+                from ..core import models as _models
+                requested = Path(msg["path"]).resolve()
+                known = {
+                    Path(e["path"]).resolve()
+                    for e in _models.list_models() if e.get("path")
+                }
+                if requested not in known:
+                    await ws.send_json({
+                        "type": "error",
+                        "code": "model_not_found",
+                        "path": str(requested),
+                        "message": "model path is not registered",
+                    })
+                    continue
+                await _send_model_snapshot(ws, requested)
     except WebSocketDisconnect:
         pass
     finally:
@@ -76,10 +93,21 @@ async def stream(ws: WebSocket):
             sub_task.cancel()
 
 
+_SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
 def _resolve_run_dir(run_name: str) -> Path | None:
     """Locate the on-disk dir for `run_name`. Library wins; legacy
     fused dir only used as a fallback (tests + pre-migration data).
-    Returns None if the run isn't found anywhere."""
+    Returns None if the run isn't found anywhere.
+
+    `run_name` is WebSocket-supplied. Reject anything but plain
+    identifiers — otherwise `run_name="../../etc"` walks outside
+    SEQUENCES_DIR / FUSED_DIR and lets the client read arbitrary dirs
+    via _pump's frame-tail loop.
+    """
+    if not _SAFE_RUN_NAME.match(run_name):
+        return None
     seq_dir = lib.SEQUENCES_DIR / run_name
     if seq_dir.is_dir():
         return seq_dir

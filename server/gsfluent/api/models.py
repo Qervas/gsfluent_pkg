@@ -61,16 +61,41 @@ async def upload(
 ):
     if not (ply.filename or "").lower().endswith(".ply"):
         raise HTTPException(422, "ply field must be a .ply file")
+    # Cap upload size in line with /upload-npz (8 GiB). Without a cap
+    # `await ply.read()` will happily slurp a 100 GB body and OOM the
+    # server before we can reject it.
+    MAX_UPLOAD = 8 * 1024 ** 3
     content = await ply.read()  # TODO Phase 4: stream to disk for production-sized plys (>1GB)
+    if len(content) > MAX_UPLOAD:
+        raise HTTPException(413, f"ply too large: {len(content)} > {MAX_UPLOAD}")
 
     # Decompress before validation. We signal via a Form field rather
     # than HTTP Content-Encoding because FastAPI / Starlette doesn't
     # auto-decompress request bodies, and intercepting the raw multipart
     # body to do so is a much bigger change than just gzipping the .ply
     # bytes in the browser before they go into FormData.
+    #
+    # Decompress via GzipFile with an output cap so a malicious gzip
+    # bomb (a few-MB body that expands to many GB) can't OOM the server.
     if ply_encoding == "gzip":
         try:
-            content = _gz.decompress(content)
+            import io
+            with _gz.GzipFile(fileobj=io.BytesIO(content)) as gz:
+                buf = bytearray()
+                while True:
+                    chunk = gz.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    if len(buf) > MAX_UPLOAD:
+                        raise HTTPException(
+                            413,
+                            f"gunzipped ply exceeds {MAX_UPLOAD} bytes — "
+                            "looks like a gzip bomb",
+                        )
+                content = bytes(buf)
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(422, f"failed to gunzip uploaded ply: {e}")
     elif ply_encoding != "identity":
@@ -150,9 +175,26 @@ async def get_model_file(path: str, filename: str | None = None):
 
     The optional `{filename}` path segment is ignored — present only so
     the URL ends with .ply, which @mkkellogg/gaussian-splats-3d's
-    sceneFormatFromPath helper expects for its parser dispatch."""
+    sceneFormatFromPath helper expects for its parser dispatch.
+
+    Security: the `path` query parameter is user-supplied. To prevent
+    arbitrary-filesystem-read, we verify the path is a known registered
+    model — either inside MODELS_DIR or an externally-registered entry
+    in _registered.json. An unrecognized path returns 404 without ever
+    touching the filesystem.
+    """
     del filename  # cosmetic only; format is always resolved from disk
-    model_path = Path(path)
+    model_path = Path(path).resolve()
+    # Allowlist check: enumerate known models and require an exact match.
+    # Cheaper than walking the FS and tighter than a MODELS_DIR.relative_to
+    # check (which would refuse externally-registered paths).
+    known_paths = {
+        Path(entry["path"]).resolve()
+        for entry in m.list_models()
+        if entry.get("path")
+    }
+    if model_path not in known_paths:
+        raise HTTPException(404, f"model path not registered: {path}")
     if not model_path.is_dir():
         raise HTTPException(404, f"model dir not found: {path}")
     pc_root = model_path / "point_cloud"

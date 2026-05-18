@@ -39,8 +39,15 @@ err()  { echo "ERROR: patch-viser: $*" >&2; exit 1; }
 # probe so users with a system-pip install also work.
 VISER_CLIENT=""
 if [[ -d "$PKG_ROOT/server/.venv" ]]; then
-    candidate="$PKG_ROOT/server/.venv/lib/python3.12/site-packages/viser/client"
-    [[ -d "$candidate" ]] && VISER_CLIENT="$candidate"
+    # Glob the python3.x dir so we don't break when uv resolves to a
+    # different Python version on a fresh machine (pyproject pins
+    # >=3.10, not 3.12 specifically).
+    for candidate in "$PKG_ROOT/server/.venv"/lib/python3.*/site-packages/viser/client; do
+        if [[ -d "$candidate" ]]; then
+            VISER_CLIENT="$candidate"
+            break
+        fi
+    done
 fi
 if [[ -z "$VISER_CLIENT" ]]; then
     # Probe whichever python is on PATH (or in VIRTUAL_ENV).

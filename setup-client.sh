@@ -47,7 +47,7 @@ note "uv: $(uv --version)"
 # that pulls viser + numpy. uv.lock is the same file the server uses;
 # we just install a superset of its rows here.
 note "syncing client dependencies into server/.venv/ (from uv.lock, with [client] extras)"
-(cd "$PKG_ROOT/server" && uv sync --extra client)
+(cd "$PKG_ROOT/server" && uv sync --frozen --extra client)
 
 VENV_PY="$PKG_ROOT/server/.venv/bin/python"
 "$VENV_PY" - <<'PYEOF'
@@ -62,7 +62,10 @@ command -v npm >/dev/null 2>&1 || err "npm not on PATH (install Node 18+)"
 note "node: $(node --version)   npm: $(npm --version)"
 
 note "installing frontend npm deps"
-(cd "$PKG_ROOT/frontend" && npm install --no-fund --no-audit)
+# `npm ci` instead of `npm install` so package-lock.json is honored
+# exactly (no within-semver-range upgrades) — host build stays in
+# lockstep with the Docker build at docker/Dockerfile.backend:55.
+(cd "$PKG_ROOT/frontend" && npm ci --no-fund --no-audit)
 
 note "building React SPA into frontend/dist/"
 (cd "$PKG_ROOT/frontend" && npm run build)

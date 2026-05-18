@@ -42,7 +42,13 @@ class StartRunRequest(BaseModel):
 
 @router.get("")
 def list_active():
-    return [{"id": r.id, "name": r.name, "state": r.state} for r in runner.list_runs()]
+    """Active runs only (state == 'running'). Past runs live in
+    /api/runs/history (which walks the on-disk library)."""
+    return [
+        {"id": r.id, "name": r.name, "state": r.state}
+        for r in runner.list_runs()
+        if r.state == "running"
+    ]
 
 
 @router.post("")

@@ -225,6 +225,15 @@ def get_run(run_id: str) -> Run | None:
 
 
 def list_runs() -> list[Run]:
+    """Return all runs currently in the process registry.
+
+    Note: `_RUNS` includes runs in any state (running / done / error /
+    cancelled) — the registry is GC'd only when the process restarts.
+    For "what's still actively running", callers should filter to
+    `state == "running"` themselves; for the canonical history of all
+    runs ever, walk `lib.SEQUENCES_DIR` instead (that's what
+    `/api/runs/history` does).
+    """
     return list(_RUNS.values())
 
 
@@ -237,11 +246,11 @@ async def start_run(
     particles: int,
 ) -> str:
     run_id = uuid.uuid4().hex[:12]
-    run_dir = FUSED_DIR / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    manifest_mod.write_initial(run_dir, run_name, model_dir, recipe_source_name, particles)
-    manifest_mod.write_recipe(run_dir, recipe_data)
 
+    # Validate the recipe BEFORE writing anything to disk. The old order
+    # (write manifest → validate) left a "running"-state zombie on disk
+    # when validation raised, polluting History forever.
+    #
     # Translate recipe.sim_area from MODEL-LOCAL to WORLD coords if the
     # recipe ships small numbers (workbench-style portable recipe). The
     # sim core expects world coords (matches the canonical R7.M_jelly_cluster
@@ -258,6 +267,12 @@ async def start_run(
     _validate_sim_area_intersects_model(
         effective_recipe.get("sim_area", []), model_dir,
     )
+
+    # Only now do we touch disk.
+    run_dir = FUSED_DIR / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest_mod.write_initial(run_dir, run_name, model_dir, recipe_source_name, particles)
+    manifest_mod.write_recipe(run_dir, recipe_data)
 
     # Write the merged effective recipe to a temp file the wrapper consumes.
     recipe_path = run_dir / "_effective_recipe.json"
