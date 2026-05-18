@@ -1,13 +1,14 @@
 # Deploying the gsfluent backend in Docker
 
-Slim, reproducible deploy of the entire workbench in **one container**:
-FastAPI gateway + the React workbench SPA + run-script tools. Bundled
-so the leader's-laptop deploy is literally:
+Reproducible deploy of the entire workbench in **one container**:
+FastAPI gateway + the React workbench SPA + the sim wrapper scripts.
+A single host runs the API and serves the bundled SPA; team members
+access it directly by IP.
 
 ```bash
 git clone <repo> && cd gsfluent_pkg
 docker compose -f docker/compose.yml up -d
-open http://localhost:8080/
+# open http://<server-ip>:8080/  (or 18080 if BACKEND_PORT is overridden)
 ```
 
 No Node, no npm, no Python on the host. Docker is the only requirement.
@@ -15,6 +16,11 @@ Works on any Linux box, Mac, or Windows-with-WSL.
 
 **Image size**: ~316 MB (slim Python + uv-managed venv + Vite-built SPA,
 no CUDA runtime). **Dependencies**: Docker 24+ with BuildKit. Compose v2.
+
+For the full deployment story (split server/client, recipes, API
+surface, troubleshooting), see the top-level [README.md](../README.md)
+(中文) or [README.en.md](../README.en.md) (English). This file is
+Docker-specifics only.
 
 ## Quick start
 
@@ -33,13 +39,12 @@ git clone <repo> && cd gsfluent_pkg
 docker compose -f docker/compose.yml up -d
 ```
 
-Then in both cases:
+Then:
 
 ```bash
 # wait ~10s for the healthcheck grace window
-open http://localhost:8080/                        # the workbench
-curl http://localhost:8080/api/health              # ok
-docker compose -f docker/compose.yml ps            # check Healthy column (B only)
+curl http://<server-ip>:8080/api/health             # ok
+docker compose -f docker/compose.yml ps             # check Healthy column (B only)
 ```
 
 To stop:
@@ -51,22 +56,27 @@ docker stop gsfluent
 docker compose -f docker/compose.yml down
 ```
 
+Open firewall for the published port (default `:8080`, or
+`BACKEND_PORT` if overridden). That's the only port the team needs
+to reach.
+
 ## Configuration
 
 Every knob is an env var; compose reads `.env` at the repo root
-automatically, or set them inline. All defaults work without any
-overrides — listed here for the cases you'll want to tune.
+automatically, or set them inline. Sensible defaults — listed for the
+cases you'll want to tune.
 
 | Env var               | Default                     | What it does |
 |-----------------------|-----------------------------|--------------|
-| `BACKEND_PORT`        | `8080`                      | Host port the API is published on. Change if 8080 is taken. |
+| `BACKEND_PORT`        | `8080`                      | Host port the API is published on. Match the top-level README's `:18080` story by setting `BACKEND_PORT=18080`. |
 | `CONTAINER_NAME`      | `gsfluent-backend`          | Container name (shows in `docker ps`). |
 | `WORK_HOST_DIR`       | `./work`                    | Host dir for library + cache + uploads. Persistent across container restarts. |
 | `SIM_HOST_DIR`        | `/opt/gsfluent-sim`         | Host path to the canonical sim install. Only needed if this host should RUN sims. Mount is commented out in compose.yml by default — uncomment for sim hosts. |
-| `GSFLUENT_SIM_PYTHON` | `python`                    | Python interpreter the sim subprocess will use. Override to e.g. `/opt/gsfluent-sim/.venv/bin/python` when the sim env is mounted. |
+| `GSFLUENT_SIM_PYTHON` | `python`                    | Python interpreter the sim subprocess uses. Override to e.g. `/opt/gsfluent-sim/.venv/bin/python` when the sim env is mounted. The container will preflight-fail with a clear error if this isn't on PATH. |
 | `IMAGE_TAG`           | `latest`                    | Tag of the image to run. |
 
-Example — API-only deploy on `:18080`, persistent volumes in `/var/lib/gsfluent/`:
+Example — API-only deploy on `:18080` (matches the top-level
+deployment guide), persistent volumes in `/var/lib/gsfluent/`:
 
 ```bash
 BACKEND_PORT=18080 \
@@ -94,76 +104,95 @@ block in `compose.yml` uncommented. Coming up in the sim-layer image.)
   → Docker marks the container unhealthy.
 - **Auto-restart**: `restart: unless-stopped` brings the container back
   on crash, OOM, or host reboot. Combined with healthcheck this catches
-  hangs (the prior backend used to hang silently — now it gets killed
-  and restarted automatically).
+  hangs.
 - **Log rotation**: capped at 50 MB across 5 files. Won't fill a
-  laptop disk.
+  host disk.
 - **Stateless container**: all persistent data is on the host via the
   `WORK_HOST_DIR` mount. Restarting / re-pulling the image doesn't
   lose sequences.
 
-## Two deployment modes
+## How it fits the local-rendering deployment
 
-**Mode A — leader-friendly one-machine deploy.** The container hosts
-both the API and the SPA. Open `http://localhost:8080/` and the
-workbench renders against its own backend. **Points** render mode works
-out of the box (uses /api/stream). **Splats** mode and auto-sync of
-sequences from a remote sim host require the optional client tools
-(`./run-client.sh`) running alongside.
+The recommended deployment model (see the top-level README): server
+exposes **one HTTP port** (the API + bundled SPA, here in the
+container). Team members each run a local client stack
+(`run-client.sh` — viser_headless + sync_daemon on their own machines,
+bound to 127.0.0.1) for interactive splat playback.
 
-**Mode B — split: laptop client + remote backend.** Backend container
-runs on the GPU server; the laptop forwards `:8080` via SSH and uses
-`./run-client.sh` for viser + sync_daemon:
+The Docker image is the **server side** of that story. It does not
+ship viser_headless or sync_daemon — those run on the team members'
+own machines, against `pip install`-ed deps. The image:
 
-```bash
-# laptop ~/.ssh/config:
-#   Host mygpu
-#     HostName <ip>
-#     User <you>
+- Serves the bundled SPA at `/`
+- Exposes `/api/*` for control, model upload, run submission,
+  log streaming, frame download
+- Spawns the sim subprocess via `tools/run_sim.sh` when
+  `POST /api/runs` arrives
+- Persists results to `work/` (mounted host volume) so sync_daemon
+  on team laptops can mirror them
 
-SERVER_SSH=mygpu ./run-client.sh
-# opens tunnel + viser + sync_daemon + browser to localhost:4173
-```
-
-The same container image serves both modes — only the env vars and
-mounts differ.
+Team members who only need API access (curl / Python scripting) don't
+need the local client stack at all — just hit `http://<server>:8080/api/*`.
 
 ## Architecture
 
 ```
-  client (laptop)                       server (anywhere with Docker)
-                                        ┌──────────────────────────┐
-                                        │ Docker container         │
-                                        │  gsfluent-backend:latest │
-  ssh -L 8080:localhost:8080 ──────────►│   - FastAPI on :8080     │
-                                        │   - subprocess to sim    │
-  browser → http://localhost:4173/      │     (mounted from host)  │
-   (vite preview)                       │   - HEALTHCHECK every 15s│
-   /api/* → tunnel → container          │   - restart=unless-stopped│
-                                        └──────────────────────────┘
-                                                 │
-                                                 ▼
-                                        host-mounted volumes:
-                                          ./work        ← library + cache
-                                          ./gsfluent-sim ← sim env (opt)
+  team member's machine             server (Docker host)
+  ┌────────────────────┐            ┌──────────────────────────┐
+  │ browser            │            │ Docker container         │
+  │  http://server:8080│ ──────────►│  gsfluent-backend:latest │
+  │  (SPA + API proxy) │            │   - FastAPI on :8080     │
+  │                    │            │   - bundled SPA at /     │
+  │ viser_headless     │            │   - subprocess to sim    │
+  │  127.0.0.1:8091    │            │     (mounted from host)  │
+  │  (optional, local) │            │   - HEALTHCHECK every 15s│
+  │                    │            │   - restart=unless-stopped│
+  │ sync_daemon        │            └──────────┬───────────────┘
+  │  pulls .npz from   │                       │
+  │  server            │                       ▼
+  └────────────────────┘            host-mounted volumes:
+                                      ./work         ← library + cache
+                                      ./gsfluent-sim ← sim env (optional)
 ```
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| `curl http://localhost:8080/api/health` connection refused | Container hasn't bound the port yet. `docker compose ps` → check Health column. Wait 10s after `up -d` for the start-period grace window. |
+| `curl http://<server>:8080/api/health` connection refused | Container hasn't bound the port yet. `docker compose ps` → check Health column. Wait 10s after `up -d` for the start-period grace window. |
 | Container is `unhealthy` and constantly restarting | App-level error. `docker compose logs backend --tail=50` to see the stack trace. |
 | `POST /api/runs` returns 500 / "sim_script not found" | Either `$SIM_HOST_DIR` isn't mounted in compose.yml, or `$GSFLUENT_SIM_PYTHON` doesn't resolve inside the container. |
+| `POST /api/runs` log starts with `ERROR: sim interpreter not on PATH` | `$GSFLUENT_SIM_PYTHON=python` (the default) doesn't resolve inside the slim container. Set it to the actual path inside your mounted sim env, e.g. `/opt/gsfluent-sim/.venv/bin/python`. |
+| Browser at `http://<server>:8080/` shows nothing | Firewall blocking the published port. Open it (`sudo ufw allow 8080/tcp`). |
 | Build fails on `uv sync --frozen` | `server/uv.lock` is out of sync with `pyproject.toml`. Run `cd server && uv lock` locally and rebuild. |
 | Image is huge (>1 GB) | You're still on the old CUDA-runtime base. Rebuild from the current Dockerfile.backend. |
+| Splat mode shows nothing in the workbench | Splat rendering requires viser_headless running on the team member's machine (loopback). See the top-level README §2.2. The container doesn't ship viser. |
+
+## Rebuilding after pulling new code
+
+After `git pull` brings in code/recipe/SPA changes:
+
+```bash
+# A:
+docker pull ghcr.io/qervas/gsfluent-backend:latest
+docker stop gsfluent && docker rm gsfluent
+docker run --rm -d -p 8080:8080 -v "$PWD/work:/app/work" \
+    --name gsfluent ghcr.io/qervas/gsfluent-backend:latest
+
+# B:
+docker compose -f docker/compose.yml up -d --build
+```
+
+To push a new image to GHCR after building:
+
+```bash
+docker build -f docker/Dockerfile.backend -t ghcr.io/qervas/gsfluent-backend:latest .
+docker push ghcr.io/qervas/gsfluent-backend:latest
+```
 
 ## Where this is going
 
 1. **Sim-layer image** (`Dockerfile.backend-sim`): same base + CUDA
    runtime + bind-mounted GaussianFluent install. For sim hosts.
-2. **Bundled SPA** as a separate compose service: serve the React
-   workbench from an nginx container so the leader's deploy is "one
-   command and open a URL".
-3. **Pre-built image** pushed to a public registry — `docker compose
-   up` without a build step.
+2. **Pre-built image** kept current in GHCR — `docker compose up`
+   without a build step.
