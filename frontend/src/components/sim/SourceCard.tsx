@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
-import { useStore } from "@/lib/store";
 import { useActiveCell } from "@/lib/use-active-cell";
 import type { ModelItem, SequenceItem } from "@/lib/types";
 
@@ -44,7 +43,6 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
     refetchInterval: 5_000,
   });
 
-  const activeModel = useStore((s) => s.activeModel);
   const { activeCell } = useActiveCell();
 
   const [open, setOpen] = useState<Record<string, boolean>>(() => loadTreeState());
@@ -53,6 +51,16 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
   const toggle = useCallback((modelName: string) => {
     setOpen((s) => ({ ...s, [modelName]: !s[modelName] }));
   }, []);
+
+  // Auto-expand the parent model when one of its sequences becomes the
+  // active cell — keeps the highlighted row in view without forcing the
+  // user to manually click the chevron.
+  useEffect(() => {
+    if (activeCell?.kind !== "sequence") return;
+    const seq = (sequences as SequenceItem[]).find((s) => s.name === activeCell.name);
+    if (!seq?.model_ref) return;
+    setOpen((s) => (s[seq.model_ref!] ? s : { ...s, [seq.model_ref!]: true }));
+  }, [activeCell, sequences]);
 
   const qc = useQueryClient();
   // Imperative delete handlers. Both confirm before firing.
@@ -108,13 +116,27 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
       {(models as ModelItem[]).map((m) => {
         const isExpanded = open[m.name] ?? false;
         const childSeqs = sequencesByModel.byModel[m.name] ?? [];
-        const isActiveModel = activeModel?.name === m.name;
+        // "Active" here means "this is what the viewport is showing right
+        // now" — keyed on activeCell, not activeModel. activeModel can
+        // still be the model while a child sequence is the active cell;
+        // in that case the model gets a faint "owns the active sequence"
+        // hint (text-accent only), while the active row itself gets the
+        // full bg + left-stripe treatment.
+        const isActiveCell =
+          activeCell?.kind === "model" && activeCell.name === m.name;
+        const ownsActiveSequence =
+          activeCell?.kind === "sequence" &&
+          childSeqs.some((s) => s.name === activeCell.name);
         return (
           <div key={m.name}>
             <div
               className={
-                "group flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
-                (isActiveModel ? "text-accent" : "text-text-primary")
+                "group relative flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
+                (isActiveCell
+                  ? "bg-accent/15 text-accent before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-accent"
+                  : ownsActiveSequence
+                  ? "text-accent"
+                  : "text-text-primary")
               }
             >
               <button
@@ -162,12 +184,16 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
                     // sequences. Pulled defensively so the badge lights up
                     // if/when the backend starts forwarding it.
                     const recipeSource = (s as SequenceItem & { recipe_source?: string }).recipe_source;
+                    const isActive =
+                      activeCell?.kind === "sequence" && activeCell.name === s.name;
                     return (
                       <div
                         key={s.name}
                         className={
-                          "group flex items-center gap-1 py-1 hover:bg-elevated rounded " +
-                          (activeCell?.kind === "sequence" && activeCell.name === s.name ? "text-accent" : "text-text-secondary")
+                          "group relative flex items-center gap-1 py-1 px-1 hover:bg-elevated rounded " +
+                          (isActive
+                            ? "bg-accent/15 text-accent before:absolute before:inset-y-0.5 before:left-[-12px] before:w-0.5 before:bg-accent"
+                            : "text-text-secondary")
                         }
                       >
                         <button
@@ -220,12 +246,17 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
           <div className="px-3 py-2 mt-2 text-text-muted text-[10px] uppercase tracking-wider">
             Orphan sequences
           </div>
-          {sequencesByModel.orphans.map((s) => (
+          {sequencesByModel.orphans.map((s) => {
+            const isActive =
+              activeCell?.kind === "sequence" && activeCell.name === s.name;
+            return (
             <div
               key={s.name}
               className={
-                "group flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
-                (activeCell?.kind === "sequence" && activeCell.name === s.name ? "text-accent" : "text-text-secondary")
+                "group relative flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
+                (isActive
+                  ? "bg-accent/15 text-accent before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-accent"
+                  : "text-text-secondary")
               }
             >
               <button
@@ -251,7 +282,8 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
                 <Trash2 size={11} />
               </button>
             </div>
-          ))}
+            );
+          })}
         </>
       )}
 
