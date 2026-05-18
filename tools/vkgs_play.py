@@ -29,7 +29,14 @@ from plyfile import PlyData, PlyElement
 
 REPO = Path(__file__).resolve().parents[1]
 LIB = REPO / "work" / "library" / "sequences"
-VKGS_BIN = Path("/home/frankyin/Desktop/work/vk_gaussian_splatting/_bin/Release/vk_gaussian_splatting")
+# Path to the vkgs binary. Configure with VKGS_BIN env var, e.g.
+#   export VKGS_BIN=/opt/vk_gaussian_splatting/_bin/Release/vk_gaussian_splatting
+# Defaults to a sibling checkout next to this repo, but you'll almost
+# certainly want to override.
+VKGS_BIN = Path(os.environ.get(
+    "VKGS_BIN",
+    str(REPO.parent / "vk_gaussian_splatting/_bin/Release/vk_gaussian_splatting"),
+))
 
 
 def read_source_up(seq_dir: Path) -> str | None:

@@ -1,7 +1,7 @@
 # Sim Recipes
 
 Curated config JSONs consumed by the server-side simulation
-(`gs_simulation_building.py` on `your-server`). Drop a new `<name>.json`
+(`gs_simulation_building.py` on the GPU server). Drop a new `<name>.json`
 here and the workbench's recipe dropdown picks it up at next launch.
 
 Recipes are pure configuration — they describe materials, boundary

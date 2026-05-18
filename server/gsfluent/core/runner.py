@@ -1,6 +1,6 @@
 """Subprocess wrapper for server-side simulation.
 
-Under the split-topology deployment, this runs on the server (your-server)
+Under the split-topology deployment, this runs on the GPU server
 next to the canonical sim core. One Run = one subprocess spawn of a shell
 wrapper (`tools/run_sim.sh` by default) that orchestrates:
     1. The canonical MPM sim (`gs_simulation_building.py`)
@@ -382,7 +382,7 @@ def _write_sequence_meta(run_name: str, run_dir: Path) -> None:
     Pulls `model_dir` back out of `manifest.json` (saved at start_run)
     and reads frame_0000.ply for n_splats + bbox_initial. Frame count is
     a directory walk of `frames/`. Source path is hostname-qualified so
-    the laptop can later distinguish "produced on your-server" from a
+    the laptop can later distinguish "produced on the sim server" from a
     locally-imported sequence with the same name."""
     import socket
     frames_dir = run_dir / "frames"

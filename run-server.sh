@@ -32,7 +32,7 @@ if [[ -f "$PKG_ROOT/.env" ]]; then
     set -a; source "$PKG_ROOT/.env"; set +a
 fi
 
-# Required vars — fail loud rather than silently using a your-server-specific default.
+# Required vars — fail loud rather than silently using a machine-specific default.
 if [[ -z "${GSFLUENT_SIM_HOME:-}" ]] || [[ -z "${GSFLUENT_SIM_PYTHON:-}" ]]; then
     cat >&2 <<EOF
 ERROR: GSFLUENT_SIM_HOME and/or GSFLUENT_SIM_PYTHON not set.

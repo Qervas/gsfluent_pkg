@@ -32,7 +32,7 @@ Failure modes:
 
 Usage:
     python tools/sync_daemon.py \\
-        --server http://your-server:8080 \\
+        --server http://<server-host>:8080 \\
         --cache-root work/cache \\
         --viser-control http://localhost:8092 \\
         --interval 10

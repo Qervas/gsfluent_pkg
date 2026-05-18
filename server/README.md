@@ -6,7 +6,7 @@ REST API, and pumps per-frame xyz over `/api/stream` for the Points
 render mode.
 
 Pure-Python deps (fastapi, uvicorn, plyfile, pydantic, watchfiles,
-numpy). Simulation itself runs on the server (`your-server`), not here
+numpy). Simulation itself runs on the GPU server, not here
 — see `../docs/ARCHITECTURE.md`.
 
 ## Install
