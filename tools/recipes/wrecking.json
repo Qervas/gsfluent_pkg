@@ -1,11 +1,11 @@
 {
   "sim_area": [
-    3440,
-    3480,
-    29030,
-    29060,
-    -25,
-    35
+    -30,
+    30,
+    -10,
+    10,
+    -2,
+    45
   ],
   "mpm_space_vertical_upward_axis": [
     0,
@@ -19,13 +19,13 @@
   ],
   "default_camera_index": -1,
   "show_hint": false,
-  "init_azimuthm": 140,
-  "init_elevation": 18,
-  "init_radius": 130,
+  "init_azimuthm": 95,
+  "init_elevation": 8,
+  "init_radius": 12,
   "move_camera": true,
-  "delta_a": 1.0,
-  "delta_e": -0.03,
-  "delta_r": -0.35,
+  "delta_a": 1.2,
+  "delta_e": 0.0,
+  "delta_r": 0.0,
   "opacity_threshold": 0.0,
   "rotation_degree": [
     0.0
@@ -36,26 +36,23 @@
   "n_grid": 150,
   "grid_lim": 2,
   "frame_num": 150,
-  "substep_dt": 0.0001,
+  "substep_dt": 5e-05,
   "frame_dt": 0.03,
-  "material": "jelly",
-  "E": 50.0,
-  "nu": 0.38,
-  "density": 0.5,
+  "material": "plasticine",
+  "E": 50000.0,
+  "nu": 0.2,
+  "density": 3,
   "g": [
     0.0,
     0.0,
-    -15.0
+    -9.8
   ],
-  "friction_angle": 45.0,
-  "beta": 1.0,
-  "xi": 3.0,
-  "hardening": 1.0,
-  "alpha_0": -0.04,
   "flip_pic_ratio": 0.7,
   "plastic_viscosity": 0.0,
   "rpic_damping": 0.0,
   "grid_v_damping_scale": 1.1,
+  "yield_stress": 500.0,
+  "softening": 20.0,
   "boundary_conditions": [
     {
       "type": "bounding_box"
@@ -65,7 +62,7 @@
       "point": [
         0,
         0,
-        0.637
+        0.5
       ],
       "normal": [
         0.0,
@@ -76,8 +73,30 @@
       "friction": 0.0,
       "start_time": 0,
       "end_time": 1000.0
+    },
+    {
+      "type": "cuboid",
+      "point": [
+        1.75,
+        1.0,
+        1.0
+      ],
+      "size": [
+        0.08,
+        0.15,
+        0.15
+      ],
+      "velocity": [
+        -1.8,
+        0.0,
+        0.0
+      ],
+      "start_time": 0.3,
+      "end_time": 1.0,
+      "reset": 0
     }
   ],
+  "sim_area_frame": "model",
   "particle_filling": {
     "n_grid": 200,
     "max_particles_num": 500000,
@@ -97,5 +116,5 @@
     "smooth": true,
     "visualize": false
   },
-  "_note": "cluster_6_15-soft: E reduced 100x for visible compression under gravity"
+  "_note": "R10.WR_wrecking: lateral cuboid hit at z=1.0 \u2014 wrecking-ball pattern."
 }
