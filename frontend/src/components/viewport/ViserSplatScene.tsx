@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { useActiveCell } from "@/lib/use-active-cell";
 
@@ -150,6 +151,15 @@ export function ViserSplatScene() {
   const cellName = wireName;
   const cellMissing =
     serverCells !== null && cellName !== null && !serverCells.includes(cellName);
+  // A sim that's mid-flight has the cell selected in the SPA but no
+  // .npz has landed yet — the original "run batch_convert_to_npz" copy
+  // is wrong here; the user just needs to wait. Distinguish so we can
+  // show a friendlier waiting state.
+  const simState = useStore((s) => s.simState);
+  const simIsRunning =
+    simState === "running" &&
+    cellName !== null &&
+    cellName.startsWith("sequence:");
 
   return (
     <div className="relative h-full w-full bg-canvas">
@@ -169,10 +179,20 @@ export function ViserSplatScene() {
         sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-fullscreen"
       />
       {cellMissing && (
-        <div className="absolute top-2 left-2 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded">
-          Cell <code>{cellName}</code> not in viser cache. Run{" "}
-          <code>python tools/batch_convert_to_npz.py {cellName}</code>.
-        </div>
+        // top-[68px] parks the banner below the TopBar so the breadcrumb
+        // doesn't sit on top of it. The running-sim variant is muted
+        // (text-text-muted, no warning border) because waiting is expected.
+        simIsRunning ? (
+          <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/85 border border-border text-text-muted text-xs rounded flex items-center gap-2 backdrop-blur">
+            <Loader2 size={12} className="animate-spin text-accent" />
+            <span>Waiting for first frame from sim…</span>
+          </div>
+        ) : (
+          <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur">
+            Cell <code>{cellName}</code> not in viser cache. Run{" "}
+            <code>python tools/batch_convert_to_npz.py {cellName?.replace(/^sequence:/, "")}</code>.
+          </div>
+        )
       )}
     </div>
   );
