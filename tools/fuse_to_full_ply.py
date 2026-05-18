@@ -314,6 +314,17 @@ def main():
                         "each splat aligned with the deforming local surface. "
                         "Requires --no_zup (sim output coord == fuse output "
                         "coord); for --zup we'd need a basis-transform on R.")
+    p.add_argument("--ghost_cull_factor", type=float, default=4.0,
+                   help="Detect 'ghost' splats whose K-NN partners spread "
+                        "more than `factor × median frame-0 neighborhood "
+                        "radius` at any frame, and zero their opacity in "
+                        "frame 0 (which propagates to all frames via the "
+                        "npz cache). Fixes the 'invisible cracked parts' "
+                        "artifact where K-NN weighted-average places a "
+                        "ref splat halfway between two diverging chunks "
+                        "in empty space. 0 disables. Default 4 is "
+                        "conservative — only flags genuinely cracked "
+                        "regions, not normal deformation. Requires --knn.")
     args = p.parse_args()
 
     print(f"Loading reference: {args.reference_ply}")
