@@ -3,6 +3,8 @@ import { TopBar } from "./TopBar";
 import { StatusPanel } from "./StatusPanel";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { useStore } from "@/lib/store";
+import { useRunLogPoller } from "@/lib/use-run-log";
+import { useSyncProgressPoller } from "@/lib/use-sync-progress";
 
 /** Stage AppShell — fullscreen viewport with a single left-anchored
  *  glass card layered above. Phase 3 of the sim-workspace-redesign
@@ -35,6 +37,16 @@ export function AppShell({ sourceCard, simCard, viewport }: Props) {
   const simNFrames = useStore((s) => s.simNFrames);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simLog = useStore((s) => s.simLog);
+
+  // Stream the server's run.log into the workbench console while a sim
+  // is active. Drives the StatusPanel's console drawer; without this
+  // hook the drawer sits permanently at "(no output yet)".
+  useRunLogPoller();
+  // Surface laptop-side sync_daemon download progress into the same
+  // console — interleaved [sync] lines next to the [sim] ones. Without
+  // this the user can't tell whether a 2.9 GB .npz download is making
+  // progress or stalled.
+  useSyncProgressPoller();
 
   // Cmd/Ctrl-B — collapse toggle for the unified Sim panel.
   // Cmd/Ctrl-/ jumps focus into the Sim panel (skip-link, replaces the
