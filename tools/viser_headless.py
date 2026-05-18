@@ -60,25 +60,38 @@ _ACCENT_RGB    = (34, 211, 238)   # tailwind `accent`     #22d3ee
 _VISER_K = 1.0
 
 
+# Default cache location for downloaded model plys. Defaults to a
+# repo-relative path so a single deployment owns its cache; override
+# with GSFLUENT_MODEL_CACHE_DIR if the repo lives on a small disk and
+# you'd rather use /tmp or an XDG cache dir.
+_DEFAULT_MODEL_CACHE = (
+    Path(__file__).resolve().parents[1] / "work" / "cache" / "model_files"
+)
+
+
 def fetch_model_ply(server_base: str, model_path_on_server: str) -> Path:
-    """Download a model's .ply from the server, cache it to a local
-    temp dir, and return the local path.
+    """Download a model's .ply from the server, cache it locally,
+    and return the local path.
 
     Cache key is the absolute path on the server (so collisions are
     impossible across different models). Files persist across viser
-    restarts to avoid re-downloading; the laptop's /tmp churn handles
-    eviction. Returns the cached Path.
+    restarts to avoid re-downloading. Configure the cache location
+    with GSFLUENT_MODEL_CACHE_DIR; default is work/cache/model_files/
+    relative to the repo root.
 
     Args:
-      server_base: e.g. "http://localhost:8080" (the SSH tunnel target)
+      server_base: e.g. "http://<server>:18080"
       model_path_on_server: absolute path the server knows, e.g.
         "<pkg-root>/work/library/models/<name>"
     """
     import hashlib
+    import os
     import urllib.parse
     import urllib.request
 
-    cache_dir = Path("/tmp/gsfluent_viser_model_cache")
+    cache_dir = Path(
+        os.environ.get("GSFLUENT_MODEL_CACHE_DIR", str(_DEFAULT_MODEL_CACHE))
+    )
     cache_dir.mkdir(parents=True, exist_ok=True)
     key = hashlib.sha1(model_path_on_server.encode()).hexdigest()[:16]
     local_path = cache_dir / f"{key}.ply"
