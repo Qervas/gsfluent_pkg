@@ -892,37 +892,54 @@ def main() -> int:
             is_v2 = data["version"] == 2
             with lock:
                 cur_mode = state["mode"]
-            if cur_mode == "splat":
-                if need_full_swap:
-                    # rgb + opacity are static per cell; cov is static in v1
-                    # but gets re-pushed per frame in v2 (see below). For v1
-                    # we push cov here as the static attr; v2 will push it
-                    # again per frame, so the one-time push is just to get
-                    # the cell into a consistent state before the frame loop
-                    # kicks in. Cov is already K²-scaled by mmap_cell so it
-                    # lands inside float16's normal range for WS transport.
-                    splat.covariances = _cov_for_frame(data, frame)
-                    splat.rgbs = np.ascontiguousarray(data["rgb"])
-                    splat.opacities = np.ascontiguousarray(data["opacity"])
-                elif is_v2:
-                    # Per-frame Σᵢ reconstruction. Recomputed every push so
-                    # ellipsoids rotate with the deformation; otherwise
-                    # splats smear during motion. ~1 ms for 683k splats.
-                    splat.covariances = _cov_for_frame(data, frame)
-                # Centers: K-scaled to stay in lockstep with the cov scaling
-                # (geometry self-consistent). Allocates ~8 MB per frame;
-                # trivial at 30 fps.
-                splat.centers = np.ascontiguousarray(
-                    np.asarray(data["frames"][frame]) * _VISER_K
-                )
+            # Race guard: _rebuild_scene_node() briefly sets `splat = None`
+            # between `splat.remove()` and the new `add_*` call. If the
+            # render loop reads `splat` during that window, the attribute
+            # writes below crash with NoneType. Skip the push this tick;
+            # the next tick will retry once the rebuild completes.
+            # Same applies to a mode mismatch — the handle type may have
+            # changed mid-tick from splat to point_cloud or vice versa.
+            local_splat = splat
+            if local_splat is None:
+                pass  # next tick
+            elif cur_mode == "splat":
+                # PointCloudHandle doesn't expose .covariances; if the mode
+                # toggled away from splat between the cur_mode read and
+                # here, hasattr keeps us safe.
+                if not hasattr(local_splat, "covariances"):
+                    pass  # mode race, retry next tick
+                else:
+                    if need_full_swap:
+                        # rgb + opacity are static per cell; cov is static in v1
+                        # but gets re-pushed per frame in v2 (see below). For v1
+                        # we push cov here as the static attr; v2 will push it
+                        # again per frame, so the one-time push is just to get
+                        # the cell into a consistent state before the frame loop
+                        # kicks in. Cov is already K²-scaled by mmap_cell so it
+                        # lands inside float16's normal range for WS transport.
+                        local_splat.covariances = _cov_for_frame(data, frame)
+                        local_splat.rgbs = np.ascontiguousarray(data["rgb"])
+                        local_splat.opacities = np.ascontiguousarray(data["opacity"])
+                    elif is_v2:
+                        # Per-frame Σᵢ reconstruction. Recomputed every push so
+                        # ellipsoids rotate with the deformation; otherwise
+                        # splats smear during motion. ~1 ms for 683k splats.
+                        local_splat.covariances = _cov_for_frame(data, frame)
+                    # Centers: K-scaled to stay in lockstep with the cov scaling
+                    # (geometry self-consistent). Allocates ~8 MB per frame;
+                    # trivial at 30 fps.
+                    local_splat.centers = np.ascontiguousarray(
+                        np.asarray(data["frames"][frame]) * _VISER_K
+                    )
             else:
                 # Points mode: point cloud handle has .points/.colors, not
-                # .centers/.covariances. Cell-swap is handled by
-                # _rebuild_scene_node — here we only need per-frame point
-                # position updates for multi-frame sequences in points mode.
-                splat.points = np.ascontiguousarray(
-                    np.asarray(data["frames"][frame]) * _VISER_K
-                )
+                # .centers/.covariances. Same hasattr guard for symmetry.
+                if not hasattr(local_splat, "points"):
+                    pass  # mode race, retry next tick
+                else:
+                    local_splat.points = np.ascontiguousarray(
+                        np.asarray(data["frames"][frame]) * _VISER_K
+                    )
             with lock:
                 state["pushed_cell"] = cell
                 state["pushed_frame"] = frame
