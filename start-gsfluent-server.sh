@@ -69,6 +69,24 @@ EOF
     exit 1
 fi
 
+# Catch the common "copied .env.example without editing" case so the
+# user gets a directive error instead of a confusing "no such directory".
+if [[ "$GSFLUENT_SIM_HOME" == *__FILL_ME_IN__* ]] \
+|| [[ "$GSFLUENT_SIM_PYTHON" == *__FILL_ME_IN__* ]]; then
+    cat >&2 <<EOF
+ERROR: $SCRIPT_DIR/.env still contains the placeholder __FILL_ME_IN__.
+
+You copied .env.example to .env but didn't edit it yet. Open .env and
+replace the __FILL_ME_IN__ markers with your actual paths:
+
+  GSFLUENT_SIM_HOME    your local GaussianFluent source tree
+  GSFLUENT_SIM_PYTHON  Python interpreter with torch+warp+taichi
+
+  \$EDITOR $SCRIPT_DIR/.env
+EOF
+    exit 1
+fi
+
 # ---- sanity checks --------------------------------------------------
 if [[ ! -d "$GSFLUENT_SIM_HOME" ]]; then
     echo "ERROR: GSFLUENT_SIM_HOME does not exist: $GSFLUENT_SIM_HOME" >&2

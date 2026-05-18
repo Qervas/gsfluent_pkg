@@ -24,15 +24,17 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 18080 matches start-gsfluent-server.sh / README / firewall examples.
-# Override via API_PORT=... or .env.
-API_PORT="${API_PORT:-18080}"
 
 # Source local .env if present (gitignored; per-deploy config).
 if [[ -f "$PKG_ROOT/.env" ]]; then
     # shellcheck disable=SC1091
     set -a; source "$PKG_ROOT/.env"; set +a
 fi
+
+# Accept either PORT (the canonical name in .env.example) or API_PORT
+# (legacy name this script used to expose). 18080 matches the README,
+# firewall examples, and start-gsfluent-server.sh.
+API_PORT="${PORT:-${API_PORT:-18080}}"
 
 # Required vars — fail loud rather than silently using a machine-specific default.
 if [[ -z "${GSFLUENT_SIM_HOME:-}" ]] || [[ -z "${GSFLUENT_SIM_PYTHON:-}" ]]; then
@@ -44,6 +46,17 @@ Fix: copy .env.example to .env and fill in your paths.
   cp .env.example .env
   \$EDITOR .env
   ./run-server.sh
+EOF
+    exit 1
+fi
+
+# Catch the common "copied .env.example without editing" case.
+if [[ "$GSFLUENT_SIM_HOME" == *__FILL_ME_IN__* ]] \
+|| [[ "$GSFLUENT_SIM_PYTHON" == *__FILL_ME_IN__* ]]; then
+    cat >&2 <<EOF
+ERROR: $PKG_ROOT/.env still contains the placeholder __FILL_ME_IN__.
+Open .env and fill in your actual paths.
+  \$EDITOR $PKG_ROOT/.env
 EOF
     exit 1
 fi
