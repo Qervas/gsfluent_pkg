@@ -247,12 +247,10 @@ export function DropZone() {
       {/* Persistent Y-up toggle, top-right of the viewport. Only
        *  relevant for .ply (model) uploads; hidden while a .npz drag
        *  is in progress to avoid suggesting it does anything.
-       *  Parked below the TopBar (top-[104px] = 68 TopBar bottom +
-       *  ~36 RenderModeToggle height) so it sits in a column with
-       *  the render-mode toggle. */}
+       *  Parked just below the TopBar (top-[68px]). */}
       {dragKind !== "npz" && (
         <div
-          className="absolute top-[104px] right-3 z-10"
+          className="absolute top-[68px] right-3 z-10"
         >
           <label
             className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-text-muted hover:text-text-primary cursor-pointer select-none bg-elevated/70 border border-border rounded px-1.5 py-0.5 backdrop-blur-sm"

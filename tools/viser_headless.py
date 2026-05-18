@@ -198,14 +198,26 @@ def mmap_model_cell(ply_path: Path) -> dict:
     ).astype(np.float32)
     rgb = np.clip(0.5 + SH_C0 * f_dc, 0.0, 1.0)
 
-    f0 = xyz * _VISER_K
+    # Recenter to origin. 3DGS models often live at large world coords
+    # (e.g. UTM-derived [3460, 29045]); rendered without recentering, the
+    # view-matrix subtraction in WebGL drops fp32 precision from ~3 mm
+    # absolute → ~0.5 m in eye-space (catastrophic cancellation at
+    # magnitude 30k). Splats jitter, Z-fight, or get culled — the viewer
+    # ends up empty. Sequences are already authored in a local frame, so
+    # this is a model-only correction. We don't return the offset because
+    # everything downstream (camera framing, grid, gizmo) reads from the
+    # cell's bbox, which is now also centered.
+    bbox_center = ((xyz.min(axis=0) + xyz.max(axis=0)) * 0.5).astype(np.float32)
+    xyz_local = (xyz - bbox_center).astype(np.float32)
+
+    f0 = xyz_local * _VISER_K
     bbox_lo = f0.min(axis=0).astype(np.float32)
     bbox_hi = f0.max(axis=0).astype(np.float32)
     K2 = _VISER_K * _VISER_K
 
     return {
         "version": 2,
-        "frames": xyz[None, :, :],
+        "frames": xyz_local[None, :, :],
         "quats": quats[None, :, :],
         "scales_sq": (scales * scales) * K2,
         "rgb": rgb,
@@ -335,10 +347,6 @@ class CameraBody(BaseModel):
     wxyz:     tuple[float, float, float, float] | None = None
 
 
-class ModeBody(BaseModel):
-    mode: str
-
-
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     p.add_argument("--npz_dir", required=True,
@@ -356,6 +364,17 @@ def main() -> int:
                         "$XDG_RUNTIME_DIR/gsfluent_sync_status.json (matches the "
                         "daemon's own default). Surfaced verbatim through "
                         "GET /sync-status for the workbench's diagnostics pill.")
+    p.add_argument("--bind", default="127.0.0.1",
+                   help="Bind address for both viser WS (--viser_port) and "
+                        "the control API (--control_port). Default: 127.0.0.1 "
+                        "(loopback only, correct for the local-rendering "
+                        "deployment where viser and the browser run on the "
+                        "same machine). Use 0.0.0.0 only if you intentionally "
+                        "want other hosts on the network to reach this viser "
+                        "process — e.g. server-side deployment where the "
+                        "browser is remote. Be aware of the security "
+                        "implication: viser has no auth; anyone reachable on "
+                        "the bound port can read/manipulate the scene.")
     args = p.parse_args()
 
     # Resolve sync-daemon status path the same way the daemon does, so
@@ -450,7 +469,7 @@ def main() -> int:
         return _try_sequence(name) or _try_model(name)
 
     # --- viser scene -----------------------------------------------------
-    server = viser.ViserServer(port=args.viser_port)
+    server = viser.ViserServer(host=args.bind, port=args.viser_port)
 
     # Theme: match the workbench dark scheme so the iframe doesn't read as
     # a foreign element. Hiding logo + share button is what removes most
@@ -535,10 +554,9 @@ def main() -> int:
         "frame": 0,
         "pushed_cell": cur_name,
         "pushed_frame": -1,
-        "mode": "splat",     # "splat" | "points"; toggled via POST /mode
         # Cached last-known camera so the React side can read it via
-        # GET /camera at mode-toggle time without having to subscribe to
-        # viser's own WS. Updated by the on-update callback below.
+        # GET /camera without having to subscribe to viser's own WS.
+        # Updated by the on-update callback below.
         "camera": {
             "position": list(pos0),
             "target":   list(look0),
@@ -551,16 +569,8 @@ def main() -> int:
     lock = threading.Lock()
 
     def _rebuild_scene_node():
-        """Remove + re-add the active scene node ('splat' name) for the
-        current cell, switching primitive based on state['mode'].
-
-        Called on cell-swap and on mode-toggle. Cheap for either
-        primitive (~10ms on cluster_6_15-class data).
-
-        Note: the render loop's per-frame center push targets `splat`,
-        so we must keep that variable bound to whichever handle is
-        currently in the scene.
-        """
+        """Remove + re-add the splat node for the current cell.
+        Called on cell-swap. ~10ms on cluster_6_15-class data."""
         nonlocal splat
         cur_c = cells[state["cell"]]
         centers = np.ascontiguousarray(
@@ -572,29 +582,15 @@ def main() -> int:
             except Exception:
                 pass
             splat = None
-        if state["mode"] == "splat":
-            splat = server.scene.add_gaussian_splats(
-                "splat",
-                centers=centers,
-                covariances=_cov_for_frame(cur_c, state["frame"]),
-                rgbs=np.ascontiguousarray(cur_c["rgb"]),
-                opacities=np.ascontiguousarray(cur_c["opacity"]),
-            )
-        else:
-            extent = np.maximum(cur_c["bbox_hi"] - cur_c["bbox_lo"], 1e-6)
-            scene_scale = float(extent.max())
-            point_size = max(scene_scale * 0.002, 0.001)
-            splat = server.scene.add_point_cloud(
-                "splat",
-                points=centers,
-                colors=(np.ascontiguousarray(cur_c["rgb"]) * 255).astype(np.uint8),
-                point_size=point_size,
-            )
-        # Mark the active cell/frame as already pushed — the rebuild just
-        # populated the node with the current frame's data, so the render
-        # loop doesn't need to push again. This also prevents the loop
-        # from blindly assigning `.covariances`/`.rgbs`/`.opacities` to a
-        # point-cloud handle in points mode (those attrs don't exist).
+        splat = server.scene.add_gaussian_splats(
+            "splat",
+            centers=centers,
+            covariances=_cov_for_frame(cur_c, state["frame"]),
+            rgbs=np.ascontiguousarray(cur_c["rgb"]),
+            opacities=np.ascontiguousarray(cur_c["opacity"]),
+        )
+        # The rebuild just populated the node with the current frame's
+        # data, so the render loop doesn't need to push again this tick.
         state["pushed_cell"] = state["cell"]
         state["pushed_frame"] = state["frame"]
 
@@ -672,19 +668,6 @@ def main() -> int:
                 n = cells[state["cell"]]["frames"].shape[0]
                 state["frame"] = max(0, min(int(body.frame), n - 1))
             return {"ok": True, "cell": state["cell"], "frame": state["frame"]}
-
-    @api.post("/mode")
-    def set_mode(body: ModeBody) -> dict:
-        """Switch the active cell's render primitive between splat and
-        points. Rebuilds the scene node — cheap for either primitive
-        (~10ms on cluster_6_15-class data)."""
-        if body.mode not in ("splat", "points"):
-            raise HTTPException(422, f"mode must be 'splat' or 'points', got {body.mode!r}")
-        with lock:
-            if state["mode"] != body.mode:
-                state["mode"] = body.mode
-                _rebuild_scene_node()
-        return {"ok": True, "mode": state["mode"]}
 
     @api.get("/state")
     def get_state() -> dict:
@@ -856,7 +839,7 @@ def main() -> int:
     def run_api():
         uvicorn.run(
             api,
-            host="0.0.0.0",
+            host=args.bind,
             port=args.control_port,
             log_level="warning",
         )
@@ -890,59 +873,40 @@ def main() -> int:
         if need_frame_push:
             data = cells[cell]
             is_v2 = data["version"] == 2
+            # Hold the lock for the push so /set's _rebuild_scene_node
+            # (called from a worker thread) can't race in mid-attribute
+            # write. The try/except RuntimeError is a belt-and-braces
+            # guard: viser marks the handle internally on .remove() and
+            # attr writes to a stale reference raise even under the lock
+            # if the C-side removal isn't fully atomic.
+            wrote = False
             with lock:
-                cur_mode = state["mode"]
-            # Race guard: _rebuild_scene_node() briefly sets `splat = None`
-            # between `splat.remove()` and the new `add_*` call. If the
-            # render loop reads `splat` during that window, the attribute
-            # writes below crash with NoneType. Skip the push this tick;
-            # the next tick will retry once the rebuild completes.
-            # Same applies to a mode mismatch — the handle type may have
-            # changed mid-tick from splat to point_cloud or vice versa.
-            local_splat = splat
-            if local_splat is None:
-                pass  # next tick
-            elif cur_mode == "splat":
-                # PointCloudHandle doesn't expose .covariances; if the mode
-                # toggled away from splat between the cur_mode read and
-                # here, hasattr keeps us safe.
-                if not hasattr(local_splat, "covariances"):
-                    pass  # mode race, retry next tick
-                else:
-                    if need_full_swap:
-                        # rgb + opacity are static per cell; cov is static in v1
-                        # but gets re-pushed per frame in v2 (see below). For v1
-                        # we push cov here as the static attr; v2 will push it
-                        # again per frame, so the one-time push is just to get
-                        # the cell into a consistent state before the frame loop
-                        # kicks in. Cov is already K²-scaled by mmap_cell so it
-                        # lands inside float16's normal range for WS transport.
-                        local_splat.covariances = _cov_for_frame(data, frame)
-                        local_splat.rgbs = np.ascontiguousarray(data["rgb"])
-                        local_splat.opacities = np.ascontiguousarray(data["opacity"])
-                    elif is_v2:
-                        # Per-frame Σᵢ reconstruction. Recomputed every push so
-                        # ellipsoids rotate with the deformation; otherwise
-                        # splats smear during motion. ~1 ms for 683k splats.
-                        local_splat.covariances = _cov_for_frame(data, frame)
-                    # Centers: K-scaled to stay in lockstep with the cov scaling
-                    # (geometry self-consistent). Allocates ~8 MB per frame;
-                    # trivial at 30 fps.
-                    local_splat.centers = np.ascontiguousarray(
-                        np.asarray(data["frames"][frame]) * _VISER_K
-                    )
-            else:
-                # Points mode: point cloud handle has .points/.colors, not
-                # .centers/.covariances. Same hasattr guard for symmetry.
-                if not hasattr(local_splat, "points"):
-                    pass  # mode race, retry next tick
-                else:
-                    local_splat.points = np.ascontiguousarray(
-                        np.asarray(data["frames"][frame]) * _VISER_K
-                    )
-            with lock:
-                state["pushed_cell"] = cell
-                state["pushed_frame"] = frame
+                local_splat = splat
+                if local_splat is not None:
+                    try:
+                        if need_full_swap:
+                            # rgb + opacity are static per cell; cov is
+                            # static in v1 but gets re-pushed per frame in
+                            # v2. The one-time push gets the cell into a
+                            # consistent state before the frame loop kicks
+                            # in. Cov is K²-scaled by mmap_cell so it lands
+                            # inside fp16's normal range for WS transport.
+                            local_splat.covariances = _cov_for_frame(data, frame)
+                            local_splat.rgbs = np.ascontiguousarray(data["rgb"])
+                            local_splat.opacities = np.ascontiguousarray(data["opacity"])
+                        elif is_v2:
+                            # Per-frame Σᵢ reconstruction so ellipsoids
+                            # rotate with the deformation (~1ms for 683k splats).
+                            local_splat.covariances = _cov_for_frame(data, frame)
+                        local_splat.centers = np.ascontiguousarray(
+                            np.asarray(data["frames"][frame]) * _VISER_K
+                        )
+                        wrote = True
+                    except RuntimeError:
+                        pass  # handle removed mid-write; next tick retries
+                if wrote:
+                    state["pushed_cell"] = cell
+                    state["pushed_frame"] = frame
 
         if need_scene_redo:
             data = cells[cell]
