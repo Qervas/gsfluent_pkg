@@ -18,7 +18,7 @@ native via the vkgs fork).
             │                                  │
             ▼                                  ▼
 ┌────────────────────────────────────────────────────────────┐
-│  SIM     server / sxyin-host                               │
+│  SIM     server (GPU host)                               │
 │  /path/to/GaussianFluent/      (Warp 0.10 + A100)     │
 │  MPM solver → sim_*.ply (200k particles, Z-up)             │
 └─────────────────────────┬──────────────────────────────────┘
@@ -103,7 +103,7 @@ native via the vkgs fork).
 3. **Every sequence has a `_meta.json`.** Fuse writes it; the library API enforces it. Sequences without one are invalid and the API rejects them.
 4. **Fuse output never gets mutated after writing.** No `hide_static_splats`-style post-process on frame plys. Want to change the output? Re-fuse.
 5. **Viewer caches are derived artifacts.** They live in `work/cache/<viewer>/...` (NOT in `sequences/`). They can be deleted at any time and re-derived from sources.
-6. **Sim runs on the server.** The laptop has no torch / warp / taichi / CUDA. Anything that requires those goes through SSH to `sxyin-host`.
+6. **Sim runs on the server.** The laptop has no torch / warp / taichi / CUDA. Anything that requires those goes through SSH to `GPU server`.
 
 ---
 
@@ -144,7 +144,7 @@ work/library/sequences/<name>/
 ```json
 {
   "sim": {
-    "host": "sxyin-host",
+    "host": "<gpu-server>",
     "path": "<sim-output>/simulation_ply",
     "git_sha": "<commit>",
     "recipe_json": "<inline copy of config>"
