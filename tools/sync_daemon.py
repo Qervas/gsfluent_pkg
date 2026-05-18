@@ -125,7 +125,8 @@ def _http_post(url: str, timeout: float) -> None:
 
 
 def _download_resumable(url: str, dst: Path, expected_bytes: Optional[int],
-                        chunk: int = 1024 * 1024, timeout: float = 60.0) -> int:
+                        chunk: int = 1024 * 1024, timeout: float = 60.0,
+                        on_progress=None) -> int:
     """Download `url` to `dst` with HTTP Range resume.
 
     The file is written to `<dst>.partial` and renamed in place on
@@ -136,7 +137,12 @@ def _download_resumable(url: str, dst: Path, expected_bytes: Optional[int],
 
     Returns the number of bytes downloaded *this call* (for status
     accounting). Caller is responsible for deciding whether to call
-    based on mtime/size comparison."""
+    based on mtime/size comparison.
+
+    `on_progress(bytes_so_far, total)` (optional) is invoked periodically
+    (~2 s or ~16 MB cadence, whichever fires first) so the caller can
+    surface progress to the workbench. Errors raised inside the
+    callback are swallowed — progress is best-effort UX, not correctness."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     partial = dst.with_suffix(dst.suffix + ".partial")
     have = partial.stat().st_size if partial.is_file() else 0
@@ -145,7 +151,36 @@ def _download_resumable(url: str, dst: Path, expected_bytes: Optional[int],
         headers["Range"] = f"bytes={have}-"
     req = urllib.request.Request(url, headers=headers)
     written = 0
+    # Heartbeat: emit progress every 2 s or every 16 MB, whichever first.
+    # Two limits because either alone misses common cases — slow links
+    # under-emit on byte-count and fast bursts under-emit on time.
+    PROG_INTERVAL_S = 2.0
+    PROG_INTERVAL_B = 16 * 1024 * 1024
+    last_emit_t = time.time()
+    last_emit_b = 0
+
+    def _emit(force: bool = False) -> None:
+        nonlocal last_emit_t, last_emit_b
+        if on_progress is None:
+            return
+        now = time.time()
+        bytes_so_far = have + written
+        if not force and (
+            now - last_emit_t < PROG_INTERVAL_S and
+            bytes_so_far - last_emit_b < PROG_INTERVAL_B
+        ):
+            return
+        last_emit_t = now
+        last_emit_b = bytes_so_far
+        try:
+            on_progress(bytes_so_far, expected_bytes)
+        except Exception:
+            pass
+
     try:
+        # Initial heartbeat — emits 0% (or have-bytes for resumes) so
+        # the UI shows the download just started before any chunks land.
+        _emit(force=True)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             # HTTP 206 = Partial Content (server honored Range).
             # HTTP 200 = server ignored Range; restart from scratch.
@@ -161,6 +196,7 @@ def _download_resumable(url: str, dst: Path, expected_bytes: Optional[int],
                         break
                     f.write(buf)
                     written += len(buf)
+                    _emit()
     except (urllib.error.URLError, TimeoutError) as e:
         # Leave partial in place — next pass will resume.
         raise IOError(f"download failed for {url}: {e}") from e
@@ -283,7 +319,7 @@ def _needs_sync(server_mtime: Optional[float], server_bytes: Optional[int],
 
 def sync_once(server: str, cache_root: Path, library_root: Path,
               viser_control: Optional[str], status: SyncStatus,
-              verbose: bool) -> None:
+              verbose: bool, status_file: Optional[Path] = None) -> None:
     """One pass over /api/sequences. Mutates `status` in place so the
     caller can write it to --status-file after each tick.
 
@@ -358,10 +394,30 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
         npz_local = viser_dir / f"{name}.npz"
         if _needs_sync(npz_mtime, npz_bytes, npz_local):
             url = f"{server}/api/sequences/{name_q}/cache/viser.npz"
+
+            # Per-chunk progress: stamp the in-memory status with the
+            # latest bytes-so-far and flush to disk so the workbench's
+            # /sync-status poller sees the updates mid-download. Cadence
+            # is controlled by _download_resumable (~2 s or 16 MB).
+            def _on_dl_progress(b: int, total: Optional[int], _name=name, _per=per) -> None:
+                _per["download"] = {
+                    "bytes": int(b),
+                    "total": int(total) if total else None,
+                    "updated_unix": time.time(),
+                }
+                if status_file is not None:
+                    write_status(status, status_file)
+
             try:
-                w = _download_resumable(url, npz_local, npz_bytes)
+                w = _download_resumable(url, npz_local, npz_bytes,
+                                        on_progress=_on_dl_progress)
                 status.files_synced += 1
                 status.bytes_downloaded += w
+                # Clear the in-flight entry; the viser_npz block carries
+                # the "done" signal. Leaving "download" around would
+                # confuse the workbench into thinking another tick is
+                # pending.
+                per.pop("download", None)
                 per["viser_npz"] = {"ok": True, "bytes": npz_bytes, "synced_unix": time.time()}
                 if verbose:
                     print(f"[sync] {name}/viser.npz: {w/1e6:.1f} MB downloaded")
@@ -374,6 +430,7 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
                         if verbose:
                             print(f"[sync]   viser /reload?cell={name} unreachable")
             except IOError as e:
+                per.pop("download", None)
                 per["viser_npz"] = {"ok": False, "error": str(e)}
                 if verbose:
                     print(f"[sync] {name}/viser.npz: FAILED — {e}", file=sys.stderr)
@@ -468,7 +525,7 @@ def main() -> int:
 
     while not stop_requested[0]:
         sync_once(server, args.cache_root, library_root, viser_control,
-                  status, args.verbose)
+                  status, args.verbose, status_file=args.status_file)
         write_status(status, args.status_file)
         # Cadence: 1s when a sim is running (so users see frames advance
         # in viser without the 10s lag), interval (default 10s) otherwise.
