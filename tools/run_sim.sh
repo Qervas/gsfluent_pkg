@@ -139,14 +139,23 @@ EOF
 echo ""
 echo "=== step 1: MPM simulation ==="
 cd "$SIM_HOME"
+# --no_cfl_override and --graph_capture are upstream speed flags that
+# trade safety for ~30-40% perf. They break time-varying-BC scenarios
+# (earthquake's four cuboids alternate every 0.3s) and any recipe whose
+# substep_dt exceeds CFL (illegal memory access from numerical blowup).
+# We don't ship them by default; recipes that genuinely need them can
+# opt back in by setting GSFLUENT_SIM_FAST=1 in the server's environment.
+EXTRA_FLAGS=()
+if [[ "${GSFLUENT_SIM_FAST:-0}" == "1" ]]; then
+    EXTRA_FLAGS+=("--no_cfl_override" "--graph_capture")
+fi
 "$SIM_PY" gs_simulation/watermelon/gs_simulation_building.py \
     --model_path     "$MODEL_DIR" \
     --output_path    "$SIM_OUTPUT_DIR" \
     --config         "$CONFIG" \
-    --no_cfl_override \
-    --graph_capture \
     --target_particles "$PARTICLES" \
-    --output_ply --async_io
+    --output_ply --async_io \
+    "${EXTRA_FLAGS[@]}"
 
 # ---------- step 2: fuse to per-frame splat plys -----------------------------
 echo ""
