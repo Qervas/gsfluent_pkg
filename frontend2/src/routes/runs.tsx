@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api, type RunStatus } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -58,7 +58,15 @@ function RunsPage(): JSX.Element {
           <tbody>
             {runs.map((r) => (
               <tr key={r.id} className="border-b border-border/40 hover:bg-elevated/40">
-                <td className="py-2 font-mono text-xs">{r.name}</td>
+                <td className="py-2 font-mono text-xs">
+                  <Link
+                    to="/runs/$id"
+                    params={{ id: r.id }}
+                    className="hover:text-accent"
+                  >
+                    {r.name}
+                  </Link>
+                </td>
                 <td>
                   <span className={cn("pill", STATUS_TONE[r.status])}>{r.status}</span>
                 </td>
