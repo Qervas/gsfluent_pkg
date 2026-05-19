@@ -183,7 +183,37 @@ services:
       retries: 10
     # Caddy upstream resolves api:8000 via the gsfluent_v2 network.
 
-  # worker-sim — image defined in Phase 3
+  worker-sim:
+    build:
+      context: ..
+      dockerfile: apps/worker-sim/Dockerfile
+    image: gsfluent-worker-sim:dev
+    <<: *restart
+    profiles: ["v2"]
+    runtime: nvidia
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gsfluent:${POSTGRES_PASSWORD}@postgres:5432/gsfluent_v2
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-gsfluent}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_ID: ${WORKER_SIM_ID:-worker-sim-0}
+      NVIDIA_VISIBLE_DEVICES: ${GSFLUENT_V2_GPU_INDEX:-0}
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    volumes:
+      # Mount the engine source from the host. Engine deps come from the
+      # host venv at $CONDA_ROOT (per server convention).
+      - ../core:/opt/engine/gsfluent:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
   # worker-render — image defined in Phase 5
 
 volumes:
