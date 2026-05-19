@@ -58,7 +58,14 @@ ShouldCancel: TypeAlias = Callable[[], Awaitable[bool]]
 
 
 async def _download_model_to(model_minio_path: str, dest_dir: Path) -> Path:
-    """Download model's source.ply from MinIO into dest_dir."""
+    """Download model's source.ply from MinIO into dest_dir.
+
+    Also populates the v1 layout the engine's run_sim.sh expects:
+      dest_dir/point_cloud/iteration_30000/point_cloud.ply
+    Plus a dummy `cameras.json` so the engine doesn't trip over its absence.
+    The actual iteration number doesn't matter; the script picks the
+    highest via `sort -V`.
+    """
     from gsfluent_api.storage import get_minio_client
 
     bucket, _, key = model_minio_path.partition("/")
@@ -69,8 +76,24 @@ async def _download_model_to(model_minio_path: str, dest_dir: Path) -> Path:
         client.fget_object(bucket, key, str(out_file))
 
     await asyncio.to_thread(_download)
-    log.info("engine.model_downloaded", path=str(out_file),
-             size=out_file.stat().st_size)
+    size = out_file.stat().st_size
+
+    # Mirror the v1 model layout expected by tools/run_sim.sh:
+    #   <dest>/point_cloud/iteration_N/point_cloud.ply
+    iter_dir = dest_dir / "point_cloud" / "iteration_30000"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    link_target = iter_dir / "point_cloud.ply"
+    if not link_target.exists():
+        try:
+            link_target.symlink_to(out_file)
+        except OSError:
+            # Fall back to a hard link / copy if symlinks aren't allowed.
+            import shutil
+            shutil.copy2(out_file, link_target)
+
+    log.info("engine.model_downloaded",
+             path=str(out_file), size=size,
+             v1_layout=str(link_target))
     return out_file
 
 
