@@ -2,7 +2,7 @@
 name = "gsfluent-worker-sim"
 version = "0.1.0"
 description = "gsfluent v2 — sim worker. Consumes Arq jobs, runs the MPM/3DGS engine."
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "arq>=0.26",
     "pydantic>=2.9",

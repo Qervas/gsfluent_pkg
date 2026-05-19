@@ -16,7 +16,25 @@ import structlog
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+# Eager imports of api symbols — keep them at module level so the
+# closures in run_sim_job don't have to re-import inside the function.
+from gsfluent_api.event_store import publish as publish_event
+from gsfluent_api.events import (
+    ArtifactCreatedEvent,
+    LogLineEvent,
+    RunCancelledEvent,
+    RunCompletedEvent,
+    RunFailedEvent,
+    RunStartedEvent,
+)
+from gsfluent_api.models.artifact import Artifact
+from gsfluent_api.models.enums import ArtifactKind, RunStatus
+from gsfluent_api.models.model import Model
+from gsfluent_api.models.run import Run
+from gsfluent_api.storage import BUCKET_RUNS, put_object_bytes
+
 from .config import get_settings
+from .engine import run_engine
 
 log = structlog.get_logger("worker_sim")
 
@@ -35,9 +53,6 @@ def _engine_singleton() -> AsyncEngine:
 
 
 async def _set_run_status(run_id: uuid.UUID, **fields: Any) -> None:
-    # Imported lazily so worker doesn't depend on the api package at import time.
-    from gsfluent_api.models.run import Run  # noqa: PLC0415
-
     engine = _engine_singleton()
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         await session.execute(update(Run).where(Run.id == run_id).values(**fields))
@@ -65,28 +80,36 @@ async def run_sim_job(ctx: dict[str, Any], run_id_str: str) -> dict[str, Any]:
     tools/run_sim.sh, streams frame artifacts to MinIO + DB + events,
     streams log lines as events, honors cancel flag.
     """
-    from gsfluent_api.event_store import publish as publish_event  # noqa: PLC0415
-    from gsfluent_api.events import (  # noqa: PLC0415
-        ArtifactCreatedEvent,
-        LogLineEvent,
-        RunCancelledEvent,
-        RunCompletedEvent,
-        RunFailedEvent,
-        RunStartedEvent,
-    )
-    from gsfluent_api.models.artifact import Artifact  # noqa: PLC0415
-    from gsfluent_api.models.enums import ArtifactKind, RunStatus  # noqa: PLC0415
-    from gsfluent_api.models.model import Model  # noqa: PLC0415
-    from gsfluent_api.models.run import Run  # noqa: PLC0415
-    from gsfluent_api.storage import BUCKET_RUNS, put_object_bytes  # noqa: PLC0415
-
-    from .engine import run_engine  # noqa: PLC0415
-
     s = get_settings()
     run_id = uuid.UUID(run_id_str)
-    redis: aioredis.Redis = ctx["redis"]
+    # Don't use ctx["redis"] (arq's own pool — its keepalive interferes
+    # with long-running publish patterns). Open a dedicated connection
+    # for the job's event traffic.
+    redis: aioredis.Redis = aioredis.from_url(s.redis_url)
 
     log.info("job.start", run_id=str(run_id))
+
+    try:
+        return await _run_sim_inner(run_id, run_id_str, s, redis)
+    except BaseException as exc:
+        log.error("job.unhandled",
+                  run_id=str(run_id),
+                  exc_type=type(exc).__name__,
+                  exc=repr(exc)[:400])
+        raise
+    finally:
+        try:
+            await redis.aclose()
+        except Exception:
+            pass
+
+
+async def _run_sim_inner(
+    run_id: uuid.UUID,
+    run_id_str: str,
+    s: Any,
+    redis: aioredis.Redis,
+) -> dict[str, Any]:
 
     # Resolve run + model rows once.
     engine_db = _engine_singleton()
@@ -222,11 +245,20 @@ async def run_sim_job(ctx: dict[str, Any], run_id_str: str) -> dict[str, Any]:
     return {"run_id": run_id_str, "status": "completed"}
 
 
+def _build_redis_settings() -> "object":
+    """Resolved at class-creation time so arq sees a concrete settings object."""
+    from arq.connections import RedisSettings  # noqa: PLC0415
+    return RedisSettings.from_dsn(get_settings().redis_url)
+
+
 class WorkerSettings:
     """Arq entrypoint. `arq worker_sim.jobs.WorkerSettings`."""
 
     functions = [run_sim_job]
     max_jobs = 1  # single sim at a time (single A100 — spec §7.5).
+    # arq treats this as a class attribute (not a method); resolve at
+    # class-creation time. Env vars must be set before importing this module.
+    redis_settings = _build_redis_settings()
 
     @staticmethod
     async def on_startup(ctx: dict[str, Any]) -> None:
@@ -236,11 +268,3 @@ class WorkerSettings:
     @staticmethod
     async def on_shutdown(ctx: dict[str, Any]) -> None:
         log.info("worker.shutdown")
-
-    @staticmethod
-    def redis_settings() -> "object":
-        # Imported lazily to avoid circular config.
-        from arq.connections import RedisSettings  # noqa: PLC0415
-        s = get_settings()
-        # arq parses redis url itself.
-        return RedisSettings.from_dsn(s.redis_url)
