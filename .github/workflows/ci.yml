@@ -1,0 +1,40 @@
+name: ci (rebuild)
+
+on:
+  push:
+    branches: [rebuild]
+  pull_request:
+    branches: [rebuild, main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+
+# Cancel in-progress runs for the same ref when a new push arrives.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-config:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose YAML
+        working-directory: infra
+        env:
+          POSTGRES_PASSWORD: test
+          MINIO_ROOT_PASSWORD: test
+          GRAFANA_ADMIN_PASSWORD: test
+        run: |
+          docker compose --profile v2 config --quiet
+          echo "compose config OK"
+
+      - name: Lint Caddyfile
+        run: |
+          docker run --rm -v "$PWD/infra/caddy:/etc/caddy" \
+            caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+  # api / worker-* / frontend jobs land in later phases when those
+  # directories ship code. Phase 0 only validates infra YAML.
