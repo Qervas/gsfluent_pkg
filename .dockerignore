@@ -1,0 +1,54 @@
+# Mirror .gitignore + build artifacts so docker build context stays small.
+
+.git
+.github
+.gitignore
+.dockerignore
+LICENSE
+*.md
+docs/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+**/.venv/
+
+# Node / frontend
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+.next/
+**/.next/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Runtime state from current stack — never copy into a build context
+work/
+core_runtime/
+vk_plys/
+server/gsfluent/static/
+frontend/dist/
+
+# Deployment-local
+.env
+**/.env
+infra/.env
+
+# AI-collab scratch (per user preference)
+docs/superpowers/
+CLAUDE.md
+AGENTS.md
+.superpowers/
