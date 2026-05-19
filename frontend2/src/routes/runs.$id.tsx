@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api, type RunStatus } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useStream } from "@/hooks/useStream";
+import { Viewer } from "@/components/viewer/Viewer";
 
 export const Route = createFileRoute("/runs/$id")({
   component: RunDetailPage,
@@ -83,6 +84,8 @@ function RunDetailPage(): JSX.Element {
           )}
         </div>
       </header>
+
+      <Viewer runId={r.id} />
 
       <section className="glass p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
         <Stat label="model" value={r.model_id.slice(0, 8)} />
