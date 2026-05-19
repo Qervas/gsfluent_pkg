@@ -36,5 +36,32 @@ jobs:
           docker run --rm -v "$PWD/infra/caddy:/etc/caddy" \
             caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
-  # api / worker-* / frontend jobs land in later phases when those
-  # directories ship code. Phase 0 only validates infra YAML.
+  api-tests:
+    name: api tests (pytest + testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install --no-cache-dir 'uv==0.5.*'
+
+      - name: Install api dev deps
+        working-directory: apps/api
+        run: uv pip install --system -e '.[dev]'
+
+      - name: Run pytest
+        working-directory: apps/api
+        run: pytest -v --tb=short
+
+      - name: OpenAPI drift check (when committed)
+        working-directory: apps/api
+        run: |
+          if [ -f openapi.json ]; then
+            python scripts/export_openapi.py --check
+          else
+            echo "openapi.json not yet committed; first export will land in CI artifact"
+          fi
