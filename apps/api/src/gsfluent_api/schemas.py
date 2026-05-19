@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
+
+T = TypeVar("T")
 
 from .models.enums import ArtifactKind, RenderSessionStatus, RunStatus
 
@@ -155,6 +157,6 @@ class RenderSessionRead(_Strict):
 # ---------- Pagination ----------
 
 
-class Page[T](_Strict):
+class Page(_Strict, Generic[T]):
     items: list[T]
     next_cursor: str | None
