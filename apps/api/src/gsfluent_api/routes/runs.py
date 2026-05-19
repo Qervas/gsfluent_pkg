@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..db import session_scope
+from ..event_store import publish as publish_event
+from ..events import RunCancelledEvent, RunQueuedEvent
 from ..models.artifact import Artifact
 from ..models.enums import RunStatus
 from ..models.model import Model
@@ -108,6 +110,13 @@ async def submit_run(
     queue = await get_queue()
     await queue.enqueue_job("run_sim_job", str(row.id))
 
+    # Fan out run.queued event for any WS subscribers on this run.
+    redis: aioredis.Redis = aioredis.from_url(get_settings().redis_url)
+    try:
+        await publish_event(redis, RunQueuedEvent(run_id=row.id))
+    finally:
+        await redis.aclose()
+
     return RunRead.model_validate(row)
 
 
@@ -188,5 +197,7 @@ async def cancel_run(
     try:
         # 1h TTL on the cancel flag — the worker either sees it or finishes.
         await redis.setex(CANCEL_KEY_PREFIX + str(run_id), 3600, "1")
+        # Fan out cancel event.
+        await publish_event(redis, RunCancelledEvent(run_id=run_id))
     finally:
         await redis.aclose()

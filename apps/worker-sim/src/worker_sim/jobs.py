@@ -59,7 +59,14 @@ async def _publish_sim_running(redis: aioredis.Redis, running: bool) -> None:
 
 
 async def run_sim_job(ctx: dict[str, Any], run_id_str: str) -> dict[str, Any]:
-    """Phase 3.2 scaffold. Replaced by real engine call in Phase 3.6."""
+    """Phase 3.2 scaffold with Phase 4 event publishing.
+    Replaced by real engine call in Task 3.6."""
+    from gsfluent_api.event_store import publish as publish_event  # noqa: PLC0415
+    from gsfluent_api.events import (  # noqa: PLC0415
+        RunCancelledEvent,
+        RunCompletedEvent,
+        RunStartedEvent,
+    )
     from gsfluent_api.models.enums import RunStatus  # noqa: PLC0415
 
     s = get_settings()
@@ -74,10 +81,11 @@ async def run_sim_job(ctx: dict[str, Any], run_id_str: str) -> dict[str, Any]:
         started_at=dt.datetime.now(dt.UTC),
         status=RunStatus.running,
     )
+    await publish_event(redis, RunStartedEvent(run_id=run_id, worker_id=s.worker_id))
 
     await _publish_sim_running(redis, True)
     try:
-        # Placeholder: a real engine call (Phase 3.6) will iterate frames,
+        # Placeholder: a real engine call (Task 3.6) will iterate frames,
         # check cancellation, write artifacts. For now: pretend we ran.
         if await _is_cancelled(run_id):
             await _set_run_status(
@@ -85,12 +93,17 @@ async def run_sim_job(ctx: dict[str, Any], run_id_str: str) -> dict[str, Any]:
                 status=RunStatus.cancelled,
                 completed_at=dt.datetime.now(dt.UTC),
             )
+            await publish_event(redis, RunCancelledEvent(run_id=run_id))
             return {"run_id": run_id_str, "status": "cancelled"}
 
         await _set_run_status(
             run_id,
             status=RunStatus.completed,
             completed_at=dt.datetime.now(dt.UTC),
+        )
+        await publish_event(
+            redis,
+            RunCompletedEvent(run_id=run_id, gpu_seconds=0.0),
         )
     finally:
         await _publish_sim_running(redis, False)
