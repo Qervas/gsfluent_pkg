@@ -65,3 +65,39 @@ jobs:
           else
             echo "openapi.json not yet committed; first export will land in CI artifact"
           fi
+
+  frontend-build:
+    name: frontend build + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9
+
+      - name: Install deps
+        working-directory: frontend2
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Generate TanStack Router routes
+        working-directory: frontend2
+        run: pnpm exec tsr generate || true   # safe before any routes change
+
+      - name: Typecheck
+        working-directory: frontend2
+        run: pnpm typecheck
+
+      - name: Build
+        working-directory: frontend2
+        run: pnpm build
+
+      - name: Upload SPA bundle as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend2/dist
+          retention-days: 7
