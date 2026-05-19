@@ -5,13 +5,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+import re
 from pathlib import Path
 
 import sentry_sdk
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from . import __version__
@@ -97,42 +97,65 @@ _spa_dir = Path(get_settings().spa_dir)
 if (_spa_dir / "index.html").is_file():
     _spa_index = _spa_dir / "index.html"
 
-    # index.html MUST NOT be cached. Vite's hashed asset files (/assets/*)
-    # are content-addressed and safe to cache for a year; index.html is
-    # the manifest pointing at those hashes — if a browser caches an
-    # old index.html, a redeploy strands it on missing-hash 404s.
+    # index.html MUST NOT be cached. Vite's hashed asset files
+    # (/assets/<name>-<hash>.<ext>) are content-addressed and safe to
+    # cache for a year; index.html is the manifest pointing at those
+    # hashes — a stale index.html strands the browser on 404s.
     _NOCACHE = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
     }
+    _IMMUTABLE = {
+        "Cache-Control": "public, max-age=31536000, immutable",
+    }
 
-    if (_spa_dir / "assets").is_dir():
-        app.mount(
-            "/assets",
-            StaticFiles(directory=_spa_dir / "assets"),
-            name="spa-assets",
-        )
+    # Matches Vite's hashed-asset URLs: /assets/<name>-<hash>.<ext>.
+    _HASHED_ASSET_RE = re.compile(
+        r"^assets/[A-Za-z0-9_.$]+-[A-Za-z0-9_-]{6,}\.[a-z0-9]+$",
+    )
+
+    # If the browser asks for a hashed JS asset we don't have, the SPA
+    # they're running was loaded from a stale index.html — likely
+    # because they cached the old v1 manifest (or any prior v2 build).
+    # Return a tiny script that cache-busts + reloads; the next pass
+    # gets the current index.html (no-cache) and the right hashes.
+    _STALE_ASSET_JS = (
+        "console.warn('gsfluent: stale SPA cache; reloading');\n"
+        "var u = new URL(window.location.href);\n"
+        "u.searchParams.set('_v', String(Date.now()));\n"
+        "window.location.replace(u.href);\n"
+    )
 
     @app.get("/", include_in_schema=False)
     async def spa_root() -> FileResponse:
         return FileResponse(_spa_index, headers=_NOCACHE)
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def spa_fallback(full_path: str) -> FileResponse:
-        # /v1/* / /metrics are handled before this; what arrives here is
-        # an SPA route (e.g. /runs/abc) or a static file (favicon, etc).
-        # IMPORTANT: legacy v1 API paths (/api/*) MUST 404 here, not
-        # fall back to index.html — otherwise the old v1 SPA cached in
-        # a browser keeps polling them and gets HTML where it expects
-        # JSON.
-        if full_path.startswith(("api/", "metrics")):
+    async def spa_fallback(full_path: str) -> Response:
+        # /v1/* + /metrics are handled by their routers above. Legacy
+        # v1 API paths (/api/*) must 404 here, not fall back to
+        # index.html.
+        if full_path.startswith(("v1/", "api/", "metrics")):
             raise HTTPException(404, f"unknown path /{full_path}")
 
         candidate = _spa_dir / full_path
         if candidate.is_file():
+            # Hashed assets are content-addressed — cache forever.
+            if _HASHED_ASSET_RE.match(full_path):
+                return FileResponse(candidate, headers=_IMMUTABLE)
             return FileResponse(candidate)
+
+        # Stale-cache recovery: missing hashed JS bundle.
+        if _HASHED_ASSET_RE.match(full_path) and full_path.endswith(".js"):
+            return Response(
+                content=_STALE_ASSET_JS,
+                media_type="text/javascript",
+                headers={"Cache-Control": "no-store"},
+            )
+
         if not _spa_index.is_file():
             raise HTTPException(404, "spa index missing")
+        # SPA route fallback (TanStack Router takes over client-side).
         return FileResponse(_spa_index, headers=_NOCACHE)
 
