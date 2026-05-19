@@ -57,12 +57,15 @@ function RunsPage(): JSX.Element {
           </thead>
           <tbody>
             {runs.map((r) => (
-              <tr key={r.id} className="border-b border-border/40 hover:bg-elevated/40">
+              <tr
+                key={r.id}
+                className="border-b border-border/40 hover:bg-elevated/40 cursor-pointer"
+              >
                 <td className="py-2 font-mono text-xs">
                   <Link
                     to="/runs/$id"
                     params={{ id: r.id }}
-                    className="hover:text-accent"
+                    className="text-accent hover:text-cyan-200 underline-offset-2 hover:underline"
                   >
                     {r.name}
                   </Link>
