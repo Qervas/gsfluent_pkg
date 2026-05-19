@@ -68,6 +68,14 @@ class RecipeVersionRead(_Strict):
 # ---------- Run ----------
 
 
+class RunCreate(_Strict):
+    name: str = Field(min_length=1, max_length=200)
+    model_id: uuid.UUID
+    recipe_id: uuid.UUID | None = None
+    # Either recipe_id or recipe_inline must be supplied.
+    recipe_inline: dict[str, Any] | None = None
+
+
 class RunRead(_Strict):
     id: uuid.UUID
     name: str

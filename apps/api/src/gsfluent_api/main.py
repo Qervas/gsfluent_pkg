@@ -14,8 +14,10 @@ from . import __version__
 from .config import get_settings
 from .logging_setup import configure_logging, get_logger
 from .middleware import TraceIdMiddleware
+from .queue import close_queue
 from .routes.models import router as models_router
 from .routes.recipes import router as recipes_router
+from .routes.runs import router as runs_router
 from .routes.system import router as system_router
 
 
@@ -27,6 +29,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         sentry_sdk.init(dsn=s.sentry_dsn, release=s.version, environment="v2")
     get_logger().info("api.start", version=__version__, git_sha=s.git_sha)
     yield
+    await close_queue()
     get_logger().info("api.stop")
 
 
@@ -49,3 +52,4 @@ Instrumentator(
 app.include_router(system_router)
 app.include_router(models_router)
 app.include_router(recipes_router)
+app.include_router(runs_router)
