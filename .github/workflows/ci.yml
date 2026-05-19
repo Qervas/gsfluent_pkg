@@ -1,10 +1,10 @@
-name: ci (rebuild)
+name: ci (v2)
 
 on:
   push:
-    branches: [rebuild]
+    branches: [main, rebuild]
   pull_request:
-    branches: [rebuild, main]
+    branches: [main, rebuild]
     paths-ignore:
       - 'docs/**'
       - '**.md'
@@ -57,13 +57,13 @@ jobs:
         working-directory: apps/api
         run: pytest -v --tb=short
 
-      - name: OpenAPI drift check (when committed)
+      - name: OpenAPI drift check
         working-directory: apps/api
         run: |
           if [ -f openapi.json ]; then
             python scripts/export_openapi.py --check
           else
-            echo "openapi.json not yet committed; first export will land in CI artifact"
+            echo "openapi.json not yet committed; skip"
           fi
 
   frontend-build:
@@ -94,7 +94,7 @@ jobs:
         working-directory: frontend2
         run: npm run build
 
-      - name: Upload SPA bundle as artifact
+      - name: Upload SPA bundle
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist

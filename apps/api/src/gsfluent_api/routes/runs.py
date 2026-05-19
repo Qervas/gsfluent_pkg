@@ -14,7 +14,7 @@ from typing import Annotated, Any
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
@@ -27,6 +27,7 @@ from ..models.model import Model
 from ..models.recipe import Recipe
 from ..models.run import Run
 from ..queue import get_queue
+from ..routes.system import CONFIG_KEY_PREFIX
 from ..schemas import ArtifactRead, Page, RunCreate, RunRead
 
 router = APIRouter(prefix="/v1/runs", tags=["runs"])
@@ -68,7 +69,30 @@ async def submit_run(
     if model is None or model.deleted_at is not None:
         raise HTTPException(404, "model not found")
 
-    redis: aioredis.Redis = aioredis.from_url(get_settings().redis_url)
+    s = get_settings()
+    redis: aioredis.Redis = aioredis.from_url(s.redis_url)
+
+    # Enforce concurrency cap (spec §7.5). Read from Redis override first,
+    # then fall back to the env default. Count queued + running rows;
+    # 429 if at capacity (the client should back off and retry).
+    cap_raw = await redis.get(CONFIG_KEY_PREFIX + "max_concurrent_sims")
+    try:
+        cap = int(cap_raw) if cap_raw is not None else s.max_concurrent_sims
+    except (TypeError, ValueError):
+        cap = s.max_concurrent_sims
+    in_flight = await session.scalar(
+        select(func.count()).where(
+            Run.status.in_([RunStatus.queued, RunStatus.running]),
+        ),
+    ) or 0
+    # cap < 0 means unlimited. cap = 0 means reject all. cap >= 1 enforces.
+    if cap >= 0 and in_flight >= cap:
+        await redis.aclose()
+        raise HTTPException(
+            status_code=429,
+            detail=f"concurrency cap reached ({in_flight}/{cap}); retry later",
+        )
+
     try:
         # Explicit Idempotency-Key: short-circuit if seen recently.
         if idempotency_key:
