@@ -1,0 +1,41 @@
+{
+  "title": "gsfluent v2 — Cluster Overview (placeholder)",
+  "uid": "gsfluent-v2-cluster",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": ["gsfluent", "v2"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "type": "text",
+      "title": "Welcome",
+      "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0},
+      "options": {
+        "content": "Placeholder dashboard for gsfluent v2 cluster overview. Real panels land in Phase 1 (api metrics: requests/s, latency, errors), Phase 3 (sim worker: queue depth, job duration, GPU util), and Phase 5 (render worker: active sessions, bitrate, NVENC util).",
+        "mode": "markdown"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Prometheus self-scrape",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 3},
+      "targets": [
+        {"expr": "up{job=\"prometheus\"}", "refId": "A"}
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "graphMode": "none",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "down", "color": "red"}, "1": {"text": "up", "color": "green"}}}
+          ]
+        }
+      }
+    }
+  ]
+}

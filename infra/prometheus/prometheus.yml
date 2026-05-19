@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: gsfluent-v2
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # api — added in Phase 1
+  - job_name: 'gsfluent-api'
+    static_configs:
+      - targets: ['api:8000']
+    metrics_path: '/metrics'
+    # 404 until Phase 1 ships; that's fine.
+
+  # worker-sim — added in Phase 3
+  - job_name: 'gsfluent-worker-sim'
+    static_configs:
+      - targets: ['worker-sim:8080']
+    metrics_path: '/metrics'
+
+  # worker-render — added in Phase 5
+  - job_name: 'gsfluent-worker-render'
+    static_configs:
+      - targets: ['worker-render:8080']
+    metrics_path: '/metrics'

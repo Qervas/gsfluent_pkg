@@ -1,0 +1,47 @@
+# gsfluent v2 — Caddy reverse proxy
+# Internal-network only at v1. HTTP only (no TLS).
+
+{
+    auto_https off
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
+
+:80 {
+    # API routes — added in Phase 1
+    handle /v1/stream {
+        reverse_proxy api:8000
+    }
+
+    handle /v1/* {
+        reverse_proxy api:8000
+    }
+
+    # MinIO via reverse proxy so presigned URLs work from the browser.
+    # Strip /minio prefix before forwarding (handle_path).
+    handle_path /minio/* {
+        reverse_proxy minio:9000
+    }
+
+    # Grafana sub-path; GF_SERVER_SERVE_FROM_SUB_PATH is set so Grafana
+    # generates correct asset URLs.
+    handle_path /grafana/* {
+        reverse_proxy grafana:3000
+    }
+
+    # Friendly response at / while the SPA is being built (Phase 6).
+    @root path /
+    handle @root {
+        respond "gsfluent v2 — phase 0 infrastructure up. SPA lands in Phase 6." 200
+    }
+
+    # SPA fallback — when CI copies dist into spa-static volume.
+    handle {
+        root * /srv/spa
+        try_files {path} /index.html
+        file_server
+    }
+}

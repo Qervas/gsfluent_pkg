@@ -46,3 +46,8 @@ frontend/dist/
 .venv/
 **/.venv/
 docs/viser_culling_issue.md
+
+# AI-collab scratch (user preference 2026-05-19): keep local, never commit
+docs/superpowers/
+CLAUDE.md
+AGENTS.md
