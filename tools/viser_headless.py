@@ -512,8 +512,10 @@ def main() -> int:
     # still carries an orientation cue without dominating the view.
     server.scene.world_axes.visible = False
 
-    # Bootstrap with the first cell. Centers K-scaled to keep geometry
-    # self-consistent with the cov scaling done in mmap_cell.
+    # Bootstrap scene helpers (grid, gizmo, initial camera) using the
+    # first cell's bbox as a reasonable default — but DO NOT auto-load
+    # the cell's splat. The frontend should show an empty scene until
+    # the user explicitly picks something in the outliner.
     cur_name = next(iter(cells))
     cur = cells[cur_name]
     splat = None
@@ -562,10 +564,13 @@ def main() -> int:
     server.initial_camera.far  = _camera_far_for_scene(cur_scale)
 
     # Shared state between control API and the render thread.
+    # `cell` starts as None: the frontend will see /state.cell=null
+    # until the user picks an outliner item. Otherwise viser would
+    # auto-start playing the first mmap'd cell, which surprises users.
     state = {
-        "cell": cur_name,
+        "cell": None,
         "frame": 0,
-        "pushed_cell": cur_name,
+        "pushed_cell": None,
         "pushed_frame": -1,
         # Cached last-known camera so the React side can read it via
         # GET /camera without having to subscribe to viser's own WS.
@@ -607,7 +612,9 @@ def main() -> int:
         state["pushed_cell"] = state["cell"]
         state["pushed_frame"] = state["frame"]
 
-    _rebuild_scene_node()
+    # Skip startup rebuild — `state["cell"]` is None until the user
+    # explicitly picks a cell via /set. _rebuild_scene_node assumes a
+    # non-None cell, so calling it here would index cells[None] → crash.
 
     # When a client connects: re-apply initial camera + register an
     # on_update so user-driven orbits get reflected back into our
@@ -685,9 +692,20 @@ def main() -> int:
     @api.get("/state")
     def get_state() -> dict:
         with lock:
-            cur_c = cells[state["cell"]]
+            cell = state["cell"]
+            # cell may be None at startup (no auto-load). The frontend
+            # treats null as "viewport empty, waiting for outliner pick".
+            if cell is None or cell not in cells:
+                return {
+                    "cell": None,
+                    "frame": 0,
+                    "n_frames": 0,
+                    "cells": list(cells),
+                    "bbox": None,
+                }
+            cur_c = cells[cell]
             return {
-                "cell": state["cell"],
+                "cell": cell,
                 "frame": state["frame"],
                 "n_frames": cur_c["frames"].shape[0],
                 "cells": list(cells),
@@ -882,6 +900,13 @@ def main() -> int:
             need_full_swap = cell != state["pushed_cell"]
             need_frame_push = frame != state["pushed_frame"] or need_full_swap
             need_scene_redo = state["scene_dirty"]
+
+        # Empty scene path: no cell selected (startup state) means nothing
+        # to render. Just spin until /set delivers a cell. 1/30 matches
+        # the steady-state tick rate at the bottom of the loop.
+        if cell is None:
+            time.sleep(1 / 30)
+            continue
 
         if need_frame_push:
             data = cells[cell]
