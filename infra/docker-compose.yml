@@ -1,0 +1,257 @@
+# gsfluent v2 stack — rebuild-branch deployment
+#
+# Profile `v2` isolates from any running v1 stack (the current `gsfluent serve`
+# on port 7869 + viser_headless on laptop). Both stacks can coexist during
+# the parallel-run period.
+#
+# Bring up:   docker compose --profile v2 up -d
+# Validate:   docker compose --profile v2 config
+# Logs:       docker compose --profile v2 logs -f <service>
+# Tear down:  docker compose --profile v2 down  (volumes preserved)
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-gpu: &gpu
+  runtime: nvidia
+  environment:
+    NVIDIA_VISIBLE_DEVICES: ${GSFLUENT_V2_GPU_INDEX:-0}
+    NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+
+services:
+  caddy:
+    image: caddy:2
+    <<: *restart
+    profiles: ["v2"]
+    ports:
+      - "${GSFLUENT_V2_PORT:-8869}:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      - spa-static:/srv/spa:ro
+
+  postgres:
+    image: postgres:16
+    <<: *restart
+    profiles: ["v2"]
+    environment:
+      POSTGRES_DB: gsfluent_v2
+      POSTGRES_USER: gsfluent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gsfluent -d gsfluent_v2"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+
+  redis:
+    image: redis:7-alpine
+    <<: *restart
+    profiles: ["v2"]
+    command: redis-server --appendonly yes --save 60 1000
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-16379}:6379"
+
+  minio:
+    image: minio/minio:latest
+    <<: *restart
+    profiles: ["v2"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-gsfluent}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-19000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-19001}:9001"
+
+  minio-init:
+    image: minio/mc:latest
+    profiles: ["v2"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-gsfluent}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    entrypoint: /bin/sh
+    command: /init-buckets.sh
+    volumes:
+      - ./minio/init-buckets.sh:/init-buckets.sh:ro
+
+  loki:
+    image: grafana/loki:latest
+    <<: *restart
+    profiles: ["v2"]
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  promtail:
+    image: grafana/promtail:latest
+    <<: *restart
+    profiles: ["v2"]
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+
+  prometheus:
+    image: prom/prometheus:latest
+    <<: *restart
+    profiles: ["v2"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+
+  grafana:
+    image: grafana/grafana:latest
+    <<: *restart
+    profiles: ["v2"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    image: gsfluent-api:dev
+    <<: *restart
+    profiles: ["v2"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gsfluent:${POSTGRES_PASSWORD}@postgres:5432/gsfluent_v2
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-gsfluent}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v1/system/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    # Caddy upstream resolves api:8000 via the gsfluent_v2 network.
+
+  worker-sim:
+    build:
+      context: ..
+      dockerfile: apps/worker-sim/Dockerfile
+    image: gsfluent-worker-sim:dev
+    <<: *restart
+    profiles: ["v2"]
+    runtime: nvidia
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gsfluent:${POSTGRES_PASSWORD}@postgres:5432/gsfluent_v2
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-gsfluent}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_ID: ${WORKER_SIM_ID:-worker-sim-0}
+      NVIDIA_VISIBLE_DEVICES: ${GSFLUENT_V2_GPU_INDEX:-0}
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    volumes:
+      # Mount the engine source from the host. Engine deps come from the
+      # host venv at /data/yinshaoxuan/miniconda3 (per server convention).
+      - ../core:/opt/engine/gsfluent:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker-render:
+    build:
+      context: ..
+      dockerfile: apps/worker-render/Dockerfile
+    image: gsfluent-worker-render:dev
+    <<: *restart
+    profiles: ["v2"]
+    runtime: nvidia
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gsfluent:${POSTGRES_PASSWORD}@postgres:5432/gsfluent_v2
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-gsfluent}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SENTRY_DSN: ${SENTRY_DSN_API:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_ID: ${WORKER_RENDER_ID:-worker-render-0}
+      NVIDIA_VISIBLE_DEVICES: ${GSFLUENT_V2_GPU_INDEX:-0}
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:
+  redis-data:
+  minio-data:
+  loki-data:
+  prometheus-data:
+  grafana-data:
+  spa-static:
+
+networks:
+  default:
+    name: gsfluent_v2
