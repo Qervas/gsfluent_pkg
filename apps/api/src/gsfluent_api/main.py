@@ -97,6 +97,16 @@ _spa_dir = Path(get_settings().spa_dir)
 if (_spa_dir / "index.html").is_file():
     _spa_index = _spa_dir / "index.html"
 
+    # index.html MUST NOT be cached. Vite's hashed asset files (/assets/*)
+    # are content-addressed and safe to cache for a year; index.html is
+    # the manifest pointing at those hashes — if a browser caches an
+    # old index.html, a redeploy strands it on missing-hash 404s.
+    _NOCACHE = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
     if (_spa_dir / "assets").is_dir():
         app.mount(
             "/assets",
@@ -106,16 +116,23 @@ if (_spa_dir / "index.html").is_file():
 
     @app.get("/", include_in_schema=False)
     async def spa_root() -> FileResponse:
-        return FileResponse(_spa_index)
+        return FileResponse(_spa_index, headers=_NOCACHE)
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str) -> FileResponse:
         # /v1/* / /metrics are handled before this; what arrives here is
         # an SPA route (e.g. /runs/abc) or a static file (favicon, etc).
+        # IMPORTANT: legacy v1 API paths (/api/*) MUST 404 here, not
+        # fall back to index.html — otherwise the old v1 SPA cached in
+        # a browser keeps polling them and gets HTML where it expects
+        # JSON.
+        if full_path.startswith(("api/", "metrics")):
+            raise HTTPException(404, f"unknown path /{full_path}")
+
         candidate = _spa_dir / full_path
         if candidate.is_file():
             return FileResponse(candidate)
         if not _spa_index.is_file():
             raise HTTPException(404, "spa index missing")
-        return FileResponse(_spa_index)
+        return FileResponse(_spa_index, headers=_NOCACHE)
 
