@@ -360,6 +360,26 @@
         "title": "Page[RunRead]",
         "type": "object"
       },
+      "PresignedUrl": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "expires_at"
+        ],
+        "title": "PresignedUrl",
+        "type": "object"
+      },
       "RecipeCreate": {
         "additionalProperties": false,
         "properties": {
@@ -860,6 +880,59 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/artifacts/{artifact_id}/url": {
+      "get": {
+        "operationId": "get_presigned_url_v1_artifacts__artifact_id__url_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expires_seconds",
+            "required": false,
+            "schema": {
+              "default": 300,
+              "title": "Expires Seconds",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresignedUrl"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Presigned Url",
+        "tags": [
+          "artifacts"
+        ]
+      }
+    },
     "/v1/models": {
       "get": {
         "operationId": "list_models_v1_models_get",
