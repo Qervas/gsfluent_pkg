@@ -17,6 +17,25 @@ type State = {
   viserState: { cell: string | null; frame: number; n_frames: number };
   setViserState: (s: { cell: string | null; frame: number; n_frames: number }) => void;
 
+  /** Manual on/off for the viser splat viewer iframe. When `false` the
+   *  iframe is unmounted (no WebGL, no /state polling, no sorter WASM).
+   *  Lets the user keep working in the rest of the app when the viser
+   *  renderer crashes or NaN's. Persisted to localStorage. */
+  viserEnabled: boolean;
+  setViserEnabled: (b: boolean) => void;
+
+  /** Runtime-configurable backend URL. When set, `api.ts`'s fetch wrapper
+   *  prepends this base to every /api/* path (and bypasses the vite
+   *  proxy). When null, requests stay as bare /api/* and rely on the
+   *  vite-preview proxy / dev-server proxy. Persisted to localStorage so
+   *  the user only has to set it once per browser. */
+  apiBase: string | null;
+  setApiBase: (url: string | null) => void;
+
+  /** Settings modal visibility. Triggered from a gear icon in TopBar. */
+  settingsOpen: boolean;
+  setSettingsOpen: (b: boolean) => void;
+
   // Workspace selection
   activeWorkspace: Workspace;
   setActiveWorkspace: (w: Workspace) => void;
@@ -166,9 +185,49 @@ function loadPanels(): State["panels"] {
   return { outliner: "expanded", properties: "expanded" };
 }
 
+function loadViserEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem("gsfluent.viserEnabled");
+    if (raw === "false") return false;
+    if (raw === "true") return true;
+  } catch { /* private mode / no storage */ }
+  return true; // default: on
+}
+
+function loadApiBase(): string | null {
+  try {
+    const raw = localStorage.getItem("gsfluent.apiBase");
+    if (raw && raw.trim()) return raw.trim().replace(/\/$/, "");
+  } catch { /* private mode / no storage */ }
+  return null; // default: use vite proxy via /api/*
+}
+
+function loadSettingsOpen(): boolean {
+  return false; // never persist — modal closed on each load
+}
+
 export const useStore = create<State>((set) => ({
   viserState: { cell: null, frame: 0, n_frames: 0 },
   setViserState: (s) => set({ viserState: s }),
+  viserEnabled: loadViserEnabled(),
+  setViserEnabled: (b) =>
+    set(() => {
+      try { localStorage.setItem("gsfluent.viserEnabled", b ? "true" : "false"); } catch { /* private mode */ }
+      return { viserEnabled: b };
+    }),
+  apiBase: loadApiBase(),
+  setApiBase: (url) =>
+    set(() => {
+      // Normalize: trim, strip trailing slash; null/empty means "use vite proxy".
+      const norm = url && url.trim() ? url.trim().replace(/\/$/, "") : null;
+      try {
+        if (norm) localStorage.setItem("gsfluent.apiBase", norm);
+        else      localStorage.removeItem("gsfluent.apiBase");
+      } catch { /* private mode */ }
+      return { apiBase: norm };
+    }),
+  settingsOpen: loadSettingsOpen(),
+  setSettingsOpen: (b) => set({ settingsOpen: b }),
   activeWorkspace: "sim",
   setActiveWorkspace: (w) => set({ activeWorkspace: w }),
   activeModel: null,

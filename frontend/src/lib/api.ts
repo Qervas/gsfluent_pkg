@@ -9,6 +9,22 @@ import type {
   MaterialDefaults,
   BackendHealth,
 } from "./types";
+import { useStore } from "./store";
+
+/** Prepend the user-configured backend URL to /api/* paths.
+ *
+ * Settings modal writes `apiBase` to the store (and localStorage). When
+ * set, every /api/* request bypasses the vite proxy and hits the backend
+ * directly — needed for runtime swap between local (vite proxy / SSH
+ * tunnel) and remote (public-IP port mapping) deploys without a rebuild.
+ * When null, paths are left bare so vite's preview/dev proxy still works. */
+function apiUrl(path: string): string {
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  const base = useStore.getState().apiBase;
+  if (!base) return path;
+  // Both are normalized: base has no trailing slash, path starts with "/".
+  return base + path;
+}
 
 const j = async <T>(r: Response): Promise<T> => {
   if (!r.ok) {
@@ -16,6 +32,14 @@ const j = async <T>(r: Response): Promise<T> => {
     throw new Error(`HTTP ${r.status}: ${text || r.statusText}`);
   }
   return r.json();
+};
+
+// Thin wrapper so every call site below pulls apiBase at fetch time.
+// Doing `const f = fetch` would capture the global once; we want each
+// invocation to re-read apiBase since the user can change it at runtime.
+const f: typeof fetch = (input, init) => {
+  const url = typeof input === "string" ? apiUrl(input) : input;
+  return fetch(url, init);
 };
 
 // Gzip a File/Blob in the browser via the Compression Streams API
@@ -29,23 +53,23 @@ async function gzipFile(file: File): Promise<Blob> {
 
 export const api = {
   recipes: {
-    list: () => fetch("/api/recipes").then(j<RecipeListItem[]>),
-    get:  (n: string) => fetch(`/api/recipes/${encodeURIComponent(n)}`).then(j<Recipe>),
+    list: () => f("/api/recipes").then(j<RecipeListItem[]>),
+    get:  (n: string) => f(`/api/recipes/${encodeURIComponent(n)}`).then(j<Recipe>),
     save: (n: string, data: Record<string, unknown>, based_on?: string) =>
-      fetch(`/api/recipes/${encodeURIComponent(n)}`, {
+      f(`/api/recipes/${encodeURIComponent(n)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data, based_on }),
       }).then(j<Recipe>),
     delete: (n: string) =>
-      fetch(`/api/recipes/${encodeURIComponent(n)}`, { method: "DELETE" }).then(
+      f(`/api/recipes/${encodeURIComponent(n)}`, { method: "DELETE" }).then(
         j<{ deleted: string }>,
       ),
   },
   models: {
-    list: () => fetch("/api/models").then(j<ModelItem[]>),
+    list: () => f("/api/models").then(j<ModelItem[]>),
     checkHash: (sha256: string, filename?: string) =>
-      fetch("/api/models/check_hash", {
+      f("/api/models/check_hash", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sha256, filename }),
@@ -88,7 +112,7 @@ export const api = {
 
       return new Promise<ModelItem>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open("POST", "/api/models/upload");
+        xhr.open("POST", apiUrl("/api/models/upload"));
         opts?.onPhase?.("uploading");
         if (opts?.signal) {
           opts.signal.addEventListener("abort", () => xhr.abort());
@@ -119,19 +143,19 @@ export const api = {
       });
     },
     register: (path: string, convertYUp?: boolean) =>
-      fetch("/api/models/register", {
+      f("/api/models/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path, convert_y_up: !!convertYUp }),
       }).then(j<ModelItem>),
     delete: (n: string) =>
-      fetch(`/api/models/${encodeURIComponent(n)}`, { method: "DELETE" }).then(
+      f(`/api/models/${encodeURIComponent(n)}`, { method: "DELETE" }).then(
         j<{ deleted: string }>,
       ),
   },
   runs: {
-    list:    () => fetch("/api/runs").then(j<RunStatus[]>),
-    history: () => fetch("/api/runs/history").then(j<HistoryEntry[]>),
+    list:    () => f("/api/runs").then(j<RunStatus[]>),
+    history: () => f("/api/runs/history").then(j<HistoryEntry[]>),
     start: (req: {
       run_name: string;
       model_path: string;
@@ -139,38 +163,38 @@ export const api = {
       recipe_source: string;
       particles: number;
     }) =>
-      fetch("/api/runs", {
+      f("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
       }).then(j<{ run_id: string; run_name: string }>),
     cancel: (id: string) =>
-      fetch(`/api/runs/${encodeURIComponent(id)}`, { method: "DELETE" }).then(
+      f(`/api/runs/${encodeURIComponent(id)}`, { method: "DELETE" }).then(
         j<{ status: string }>,
       ),
     deleteHistory: (run_name: string) =>
-      fetch(`/api/runs/history/${encodeURIComponent(run_name)}`, {
+      f(`/api/runs/history/${encodeURIComponent(run_name)}`, {
         method: "DELETE",
       }).then(j<{ deleted: string }>),
     log: (run_name: string, offset: number) =>
-      fetch(
+      f(
         `/api/runs/${encodeURIComponent(run_name)}/log?offset=${offset}`,
       ).then(j<{ content: string; offset: number; size: number }>),
   },
   schemas: {
-    boundaries: () => fetch("/api/schemas/boundaries").then(j<BCSchemas>),
-    materials:  () => fetch("/api/schemas/materials").then(j<MaterialDefaults>),
+    boundaries: () => f("/api/schemas/boundaries").then(j<BCSchemas>),
+    materials:  () => f("/api/schemas/materials").then(j<MaterialDefaults>),
   },
   diag: {
     // Backend reachability probe. The vite proxy decides which actual
     // host this hits (local uvicorn or tunneled server); from the
     // workbench's perspective, "can we talk to /api/*?" is the signal.
-    health: () => fetch("/api/health").then(j<BackendHealth>),
+    health: () => f("/api/health").then(j<BackendHealth>),
   },
   sequences: {
-    list: () => fetch("/api/sequences").then(j<SequenceItem[]>),
+    list: () => f("/api/sequences").then(j<SequenceItem[]>),
     import: (folder_path: string, name?: string, convertYUp?: boolean) =>
-      fetch("/api/sequences/import", {
+      f("/api/sequences/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ folder_path, name, convert_y_up: !!convertYUp }),
@@ -179,13 +203,13 @@ export const api = {
       const fd = new FormData();
       fd.append("file", npz);
       if (name) fd.append("name", name);
-      return fetch("/api/sequences/upload-npz", {
+      return f("/api/sequences/upload-npz", {
         method: "POST",
         body: fd,
       }).then(j<SequenceItem>);
     },
     delete: (name: string) =>
-      fetch(`/api/sequences/${encodeURIComponent(name)}`, { method: "DELETE" }).then(
+      f(`/api/sequences/${encodeURIComponent(name)}`, { method: "DELETE" }).then(
         j<{ deleted: string }>,
       ),
   },

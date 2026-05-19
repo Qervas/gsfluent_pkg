@@ -2,18 +2,26 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
-// Backend the dev + preview servers proxy /api to. Defaults to 8080
-// (local uvicorn or SSH tunnel forwarding to the server). Strong
-// frontend/backend split: the SPA is served from THIS machine
-// (`vite dev` for development, `vite preview` for distribution-style
-// served-from-disk runs), and it talks to the API process via this
-// proxy. `run-client.sh` sets this to $LOCAL_PORT to land on the
-// tunnel's client end.
-const BACKEND_PORT = process.env.GSFLUENT_BACKEND_PORT ?? "8080";
+// Backend the dev + preview servers proxy /api to. Two configurations:
+//
+//   GSFLUENT_BACKEND_URL=http://host:port    (full URL — takes precedence)
+//       Used when the backend is LAN- or WAN-reachable directly (e.g.,
+//       a public IP / port mapping). WS scheme derived from http(s).
+//
+//   GSFLUENT_BACKEND_PORT=<port>             (default 8080)
+//       Legacy localhost pattern for SSH-tunnelled deployments
+//       (run-client.sh's $LOCAL_PORT).
+//
+// Strong frontend/backend split: SPA served from THIS machine, talks to
+// the API via this proxy.
+const BACKEND_URL =
+  process.env.GSFLUENT_BACKEND_URL ??
+  `http://localhost:${process.env.GSFLUENT_BACKEND_PORT ?? "8080"}`;
+const WS_URL = BACKEND_URL.replace(/^http/, "ws");
 
 const proxy = {
-  "/api/stream": { target: `ws://localhost:${BACKEND_PORT}`, ws: true },
-  "/api":        { target: `http://localhost:${BACKEND_PORT}` },
+  "/api/stream": { target: WS_URL, ws: true, changeOrigin: true },
+  "/api":        { target: BACKEND_URL, changeOrigin: true },
 };
 
 export default defineConfig({

@@ -22,11 +22,24 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="gsfluent", version="0.1.0", lifespan=lifespan)
+    # CORS: allow any localhost/127.0.0.1 port (vite dev :5173, vite
+    # preview :4173, and any user-chosen port). Also accept the
+    # GSFLUENT_EXTRA_CORS_ORIGINS env var (comma-separated) so deploys
+    # behind a public-IP port-mapping can let the SPA hit the API
+    # directly without a tunnel, e.g.:
+    #   GSFLUENT_EXTRA_CORS_ORIGINS=http://your-backend:port
+    extra = [
+        o.strip()
+        for o in os.environ.get("GSFLUENT_EXTRA_CORS_ORIGINS", "").split(",")
+        if o.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173"],   # vite dev server
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_origins=extra,
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=False,
     )
 
     @app.get("/api/health")
