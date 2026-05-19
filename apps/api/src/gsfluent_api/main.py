@@ -26,6 +26,7 @@ from .routes.render_sessions import router as render_sessions_router
 from .routes.runs import router as runs_router
 from .routes.stream import router as stream_router
 from .routes.system import router as system_router
+from .routes.v1_proxy import router as v1_proxy_router
 from .storage import ensure_buckets
 
 
@@ -77,6 +78,9 @@ app.include_router(runs_router)
 app.include_router(artifacts_router)
 app.include_router(render_sessions_router)
 app.include_router(stream_router)
+# Reverse-proxy /api/* (and /api/stream WS) to v1 backend on internal
+# port. Registered BEFORE the SPA catchall so /api/* hits the proxy.
+app.include_router(v1_proxy_router)
 
 
 # ---------- SPA serving ---------------------------------------------------
