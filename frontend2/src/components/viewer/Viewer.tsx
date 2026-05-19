@@ -12,13 +12,15 @@ export function Viewer({
   const search = useSearch({ strict: false }) as { render?: string; paused?: string };
   const navigate = useNavigate();
 
-  const mode: Mode = search.render === "local" ? "local" : "server";
+  // Default to local (browser WebGL) since worker-render isn't always
+  // running. Server mode is an explicit opt-in.
+  const mode: Mode = search.render === "server" ? "server" : "local";
   const paused = search.paused === "1";
 
   const setMode = (m: Mode) => {
     navigate({
       to: ".",
-      search: (prev) => ({ ...prev, render: m === "server" ? undefined : "local" }),
+      search: (prev) => ({ ...prev, render: m === "local" ? undefined : "server" }),
       replace: true,
     });
   };

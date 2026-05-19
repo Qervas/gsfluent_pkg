@@ -97,7 +97,12 @@ class StreamClient {
     if (!set) {
       set = new Set();
       this.subs.set(channel, set);
-      this.ws?.send?.(JSON.stringify({ subscribe: [channel] }));
+      // Only send immediately if the socket is OPEN. If it's still
+      // CONNECTING (the typical first call from a component mount),
+      // the open handler will send the full subs list once the
+      // connection establishes — sending now would throw with
+      // "Failed to execute 'send' on 'WebSocket': Still in CONNECTING".
+      this._safeSend({ subscribe: [channel] });
     }
     set.add(handler);
     this.open();
@@ -107,9 +112,16 @@ class StreamClient {
       s.delete(handler);
       if (s.size === 0) {
         this.subs.delete(channel);
-        this.ws?.send?.(JSON.stringify({ unsubscribe: [channel] }));
+        this._safeSend({ unsubscribe: [channel] });
       }
     };
+  }
+
+  private _safeSend(payload: unknown): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(payload));
+    }
+    // If not open: open-handler will re-send everything from this.subs.
   }
 }
 
