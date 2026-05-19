@@ -244,11 +244,14 @@ export function DropZone() {
 
   return (
     <>
-      {/* Persistent Y-up toggle, top-right of the viewport. Only
-       *  relevant for .ply (model) uploads; hidden while a .npz drag
-       *  is in progress to avoid suggesting it does anything.
-       *  Parked just below the TopBar (top-[68px]). */}
-      {dragKind !== "npz" && (
+      {/* Y-up toggle for .ply uploads — only visible while a .ply drag
+       *  is in progress over the viewport. Previously rendered whenever
+       *  `dragKind !== "npz"`, which is true in the no-drag default
+       *  (null !== "npz"), so the toggle appeared at all times and
+       *  read as a global "scene up-axis" control. It is not — it only
+       *  affects how the next ply upload gets re-oriented. Gate on
+       *  isOver + ply so it only appears in its actual scope. */}
+      {isOver && dragKind === "ply" && (
         <div
           className="absolute top-[68px] right-3 z-10"
         >

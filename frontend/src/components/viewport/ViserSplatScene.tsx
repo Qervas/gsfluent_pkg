@@ -176,7 +176,8 @@ export function ViserSplatScene() {
           background: "#0a0f1a",
           display: "block",
         }}
-        sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-fullscreen"
+        sandbox="allow-scripts allow-same-origin allow-pointer-lock"
+        allowFullScreen
       />
       {cellMissing && (
         // top-[68px] parks the banner below the TopBar so the breadcrumb
