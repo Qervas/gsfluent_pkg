@@ -75,25 +75,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
-      - name: Install pnpm
-        run: npm install -g pnpm@9
+          cache: 'npm'
+          cache-dependency-path: frontend2/package-lock.json
 
       - name: Install deps
         working-directory: frontend2
-        run: pnpm install --frozen-lockfile=false
+        run: npm ci
 
       - name: Generate TanStack Router routes
         working-directory: frontend2
-        run: pnpm exec tsr generate || true   # safe before any routes change
+        run: npx tsr generate || true
 
       - name: Typecheck
         working-directory: frontend2
-        run: pnpm typecheck
+        run: npm run typecheck
 
       - name: Build
         working-directory: frontend2
-        run: pnpm build
+        run: npm run build
 
       - name: Upload SPA bundle as artifact
         uses: actions/upload-artifact@v4
