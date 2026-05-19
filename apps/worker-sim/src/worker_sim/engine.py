@@ -223,8 +223,15 @@ async def run_engine(
                 t.cancel()
             await asyncio.gather(tail, watch, canceller, return_exceptions=True)
 
-        cancelled = (canceller.done() and canceller.exception() is None
-                     and canceller.result())
+        # canceller.result() on a force-cancelled task raises CancelledError;
+        # guard against that. Real cancellation is signaled by canceller
+        # having returned True BEFORE the finally block cancelled it.
+        cancelled = False
+        if canceller.done():
+            try:
+                cancelled = bool(canceller.result())
+            except (asyncio.CancelledError, Exception):
+                cancelled = False
 
         if cancelled:
             return False, "cancelled by user"
