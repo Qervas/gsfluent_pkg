@@ -14,6 +14,8 @@ from . import __version__
 from .config import get_settings
 from .logging_setup import configure_logging, get_logger
 from .middleware import TraceIdMiddleware
+from .routes.models import router as models_router
+from .routes.recipes import router as recipes_router
 from .routes.system import router as system_router
 
 
@@ -45,3 +47,5 @@ Instrumentator(
 ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 app.include_router(system_router)
+app.include_router(models_router)
+app.include_router(recipes_router)
