@@ -14,7 +14,14 @@ dependencies = [
     "sentry-sdk>=2.18",
     "numpy>=1.26",
     "Pillow>=10",
-    # viser pinned at runtime; render-loop integration in Task 5.5.
+    "plyfile>=1.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    # torch + gsplat are OPTIONAL at the container level — they're loaded
+    # via lazy import in scene_renderer.py. If absent, the worker falls
+    # back to a test pattern. Install on the host alongside the engine
+    # (server-side `pip install torch gsplat`), and mount that venv into
+    # the container at /opt/engine like worker-sim does.
 ]
 
 [project.optional-dependencies]
