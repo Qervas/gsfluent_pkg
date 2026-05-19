@@ -14,6 +14,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from testcontainers.core.container import DockerContainer
+from testcontainers.core.waiting_utils import wait_for_logs
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
@@ -52,12 +54,46 @@ def redis_url() -> Iterator[str]:
         yield url
 
 
+@pytest.fixture(scope="session")
+def minio_url() -> Iterator[str]:
+    """Spin a real MinIO container. Returns the host:port endpoint.
+
+    Idempotent bucket creation so test_models can upload without first
+    running the init sidecar.
+    """
+    user = "testuser"
+    pwd = "testpasswd"
+    with (
+        DockerContainer("minio/minio:latest")
+        .with_exposed_ports(9000)
+        .with_env("MINIO_ROOT_USER", user)
+        .with_env("MINIO_ROOT_PASSWORD", pwd)
+        .with_command("server /data")
+    ) as container:
+        wait_for_logs(container, "API:", timeout=30)
+        host = container.get_container_host_ip()
+        port = container.get_exposed_port(9000)
+        endpoint = f"{host}:{port}"
+
+        os.environ["MINIO_ENDPOINT"] = endpoint
+        os.environ["MINIO_ACCESS_KEY"] = user
+        os.environ["MINIO_SECRET_KEY"] = pwd
+        os.environ["MINIO_SECURE"] = "false"
+
+        # Pre-create the buckets the api expects (mirror infra/minio/init-buckets.sh).
+        from minio import Minio
+        client = Minio(endpoint, access_key=user, secret_key=pwd, secure=False)
+        for bucket in ("gsfluent-models", "gsfluent-runs", "gsfluent-misc"):
+            if not client.bucket_exists(bucket):
+                client.make_bucket(bucket)
+
+        yield endpoint
+
+
 @pytest.fixture(scope="session", autouse=True)
-def stub_minio_gpu_env(postgres_url: str, redis_url: str) -> Iterator[None]:
-    """Minimal env so Settings() validates. Real MinIO is exercised in Phase 2."""
-    os.environ.setdefault("MINIO_ENDPOINT", "minio:9000")
-    os.environ.setdefault("MINIO_ACCESS_KEY", "test")
-    os.environ.setdefault("MINIO_SECRET_KEY", "test")
+def _env_glue(postgres_url: str, redis_url: str, minio_url: str) -> Iterator[None]:
+    """Ensure all 3 backends are up before the test session runs."""
+    _ = postgres_url, redis_url, minio_url
     yield
 
 
@@ -78,13 +114,15 @@ async def db_session(postgres_url: str) -> AsyncIterator[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def client(postgres_url: str, redis_url: str) -> AsyncIterator[AsyncClient]:
+async def client(postgres_url: str, redis_url: str, minio_url: str) -> AsyncIterator[AsyncClient]:
     """ASGI test client. Reset settings cache so env changes take effect."""
     from gsfluent_api.config import get_settings
     from gsfluent_api.db import reset_for_tests
     from gsfluent_api.main import app
+    from gsfluent_api.storage import get_minio_client
 
     get_settings.cache_clear()
+    get_minio_client.cache_clear()
     await reset_for_tests()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
