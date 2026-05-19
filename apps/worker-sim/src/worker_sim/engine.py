@@ -119,13 +119,41 @@ async def _tail_stream(stream: asyncio.StreamReader, on_log: OnLog) -> None:
             log.warning("on_log_failed", error=str(e)[:200])
 
 
-async def _scan_once(output_dir: Path, on_frame: OnFrame,
-                    seen: set[Path]) -> None:
-    """One sweep of output_dir looking for new frame files."""
-    for sub in (output_dir, output_dir / "frames", output_dir / "simulation_ply"):
+def _engine_output_dirs(run_id_str: str, workspace_output: Path) -> list[Path]:
+    """All the places the v1 engine + fuse step may write frames.
+
+    tools/run_sim.sh ignores GSFLUENT_SIM_OUTPUT_DIR — it writes raw
+    sim plys to $SIM_HOME/output/$OUTPUT/simulation_ply and per-frame
+    fused plys to $PKG_ROOT/work/library/sequences/$OUTPUT/frames.
+    We scan both, plus the workspace-relative paths for forward-compat.
+    """
+    dirs = [
+        workspace_output,
+        workspace_output / "frames",
+        workspace_output / "simulation_ply",
+    ]
+    sim_home = os.environ.get("GSFLUENT_SIM_HOME", "")
+    if sim_home:
+        engine_out = Path(sim_home) / "output" / run_id_str
+        dirs += [engine_out, engine_out / "simulation_ply"]
+    pkg_root = os.environ.get("GSFLUENT_PKG_ROOT", "")
+    if pkg_root:
+        dirs += [Path(pkg_root) / "work" / "library" / "sequences" / run_id_str / "frames"]
+    return dirs
+
+
+async def _scan_once(
+    scan_dirs: list[Path], on_frame: OnFrame, seen: set[Path],
+) -> None:
+    """One sweep of every output dir looking for new frame files."""
+    for sub in scan_dirs:
         if not sub.is_dir():
             continue
-        for f in sorted(sub.iterdir()):
+        try:
+            entries = sorted(sub.iterdir())
+        except OSError:
+            continue
+        for f in entries:
             if not f.is_file() or f in seen:
                 continue
             m = FRAME_RE.search(f.name) or ITER_PLY_RE.search(f.name)
@@ -147,15 +175,17 @@ async def _scan_once(output_dir: Path, on_frame: OnFrame,
                             error=str(e)[:200])
 
 
-async def _watch_output(output_dir: Path, on_frame: OnFrame) -> None:
-    """Periodically scan output_dir for new frame files; emit each once."""
+async def _watch_output(scan_dirs: list[Path], on_frame: OnFrame) -> None:
+    """Periodically scan every dir for new frame files; emit each once."""
     seen: set[Path] = set()
     try:
         while True:
-            await _scan_once(output_dir, on_frame, seen)
+            await _scan_once(scan_dirs, on_frame, seen)
             await asyncio.sleep(SCAN_INTERVAL_S)
     except asyncio.CancelledError:
-        await _scan_once(output_dir, on_frame, seen)
+        # Final pass so frames written between last tick and proc exit
+        # are still picked up.
+        await _scan_once(scan_dirs, on_frame, seen)
 
 
 async def _cancel_poller(proc: asyncio.subprocess.Process,
@@ -235,8 +265,9 @@ async def run_engine(
         )
 
         assert proc.stdout is not None
+        scan_dirs = _engine_output_dirs(str(run_id), output_dir)
         tail = asyncio.create_task(_tail_stream(proc.stdout, on_log))
-        watch = asyncio.create_task(_watch_output(output_dir, on_frame))
+        watch = asyncio.create_task(_watch_output(scan_dirs, on_frame))
         canceller = asyncio.create_task(_cancel_poller(proc, should_cancel))
 
         try:
