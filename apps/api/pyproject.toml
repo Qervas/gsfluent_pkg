@@ -30,6 +30,8 @@ dev = [
     "mypy>=1.13",
     "ruff>=0.8",
     "types-redis>=4.6",
+    "testcontainers[postgres,redis]>=4.8",
+    "psycopg2-binary>=2.9",  # sync driver for testcontainers + alembic offline
 ]
 
 [build-system]
