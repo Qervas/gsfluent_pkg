@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     version: str = "dev"
     git_sha: str = "unknown"
 
+    # Where the built SPA lives. When this dir exists + has index.html,
+    # the api serves it at / with SPA-style fallback routing. Same-origin
+    # solves the frontend->backend connection without CORS hacks.
+    spa_dir: str = "/srv/spa"
+
+    # CORS for non-browser tooling (curl, postman, programmatic clients
+    # on other hosts). The SPA doesn't need this since it's same-origin.
+    # Regex permissive for internal-network demo; tighten before external.
+    cors_allow_origin_regex: str = r".*"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
