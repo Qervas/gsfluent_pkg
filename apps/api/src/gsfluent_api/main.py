@@ -17,6 +17,7 @@ from .middleware import TraceIdMiddleware
 from .queue import close_queue
 from .routes.models import router as models_router
 from .routes.recipes import router as recipes_router
+from .routes.render_sessions import router as render_sessions_router
 from .routes.runs import router as runs_router
 from .routes.stream import router as stream_router
 from .routes.system import router as system_router
@@ -54,4 +55,5 @@ app.include_router(system_router)
 app.include_router(models_router)
 app.include_router(recipes_router)
 app.include_router(runs_router)
+app.include_router(render_sessions_router)
 app.include_router(stream_router)

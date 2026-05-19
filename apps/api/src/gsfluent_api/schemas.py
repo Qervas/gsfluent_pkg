@@ -114,6 +114,32 @@ class PresignedUrl(_Strict):
 # ---------- RenderSession ----------
 
 
+class RenderSessionCreate(_Strict):
+    run_id: uuid.UUID | None = None
+    model_id: uuid.UUID | None = None
+
+
+class RenderSessionCreated(_Strict):
+    session_id: uuid.UUID
+    ice_servers: list[dict[str, Any]]
+
+
+class SdpOffer(_Strict):
+    sdp: str
+    type: str
+
+
+class SdpAnswer(_Strict):
+    sdp: str
+    type: str
+
+
+class IceCandidate(_Strict):
+    candidate: str
+    sdpMid: str | None
+    sdpMLineIndex: int | None
+
+
 class RenderSessionRead(_Strict):
     id: uuid.UUID
     run_id: uuid.UUID | None
