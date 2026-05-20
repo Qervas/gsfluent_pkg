@@ -542,7 +542,7 @@ def main() -> int:
     gizmo_size = grid_params["scene_scale"] * 0.05
     gizmo = server.scene.add_frame(
         "gizmo",
-        show_axes=True,
+        show_axes=False,
         axes_length=gizmo_size,
         axes_radius=gizmo_size * 0.04,
         position=(float(cur["bbox_lo"][0]),
@@ -1008,7 +1008,7 @@ def main() -> int:
             gizmo.remove()
             new_gizmo = server.scene.add_frame(
                 "gizmo",
-                show_axes=True,
+                show_axes=False,
                 axes_length=gsize,
                 axes_radius=gsize * 0.04,
                 position=(float(data["bbox_lo"][0]),
