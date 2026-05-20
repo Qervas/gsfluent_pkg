@@ -1,28 +1,28 @@
 # gsfluent_pkg — Architecture
 
-Status: 2026-05-13. Describes the system as it stands today. The
-"scattered" state of the May-12 draft has been cleaned up — local sim
-code is gone, viewer caches are out of the library tree, K-NN skinning
-has landed, and the laptop is pure-Python.
+Status: 2026-05-20. Describes the system as deployed today: a single v1
+backend on your-server, a laptop-local SPA + viser pair on each teammate's
+machine, and a public NAT port linking the two.
 
 ---
 
 ## What the system is
 
-A pipeline from a 3DGS scene + a physics recipe to an animated 3DGS
-sequence playable in two viewers (browser via the React workbench,
-native via the vkgs fork).
+A pipeline from a trained 3DGS scene + a physics recipe to an animated
+3DGS sequence that scrubs interactively in the browser. The MPM solver
+is server-side (GPU); the viewer (viser splat renderer + React SPA) is
+laptop-side.
 
 ```
 3DGS reference (.ply, trained)         physics recipe (json)
             │                                  │
             ▼                                  ▼
 ┌────────────────────────────────────────────────────────────┐
-│  SIM     server (GPU host)                               │
-│  /path/to/GaussianFluent/      (Warp 0.10 + A100)     │
+│  SIM     server (your-server GPU host)                           │
+│  GaussianFluent / Warp 0.10 / Taichi 1.5 / A100            │
 │  MPM solver → sim_*.ply (200k particles, Z-up)             │
 └─────────────────────────┬──────────────────────────────────┘
-                          ▼  (rsync sim_*.ply down to laptop)
+                          ▼
 ┌────────────────────────────────────────────────────────────┐
 │  FUSE    tools/fuse_to_full_ply.py                         │
 │  K-NN-weighted skinning, per-frame Kabsch rotation         │
@@ -38,9 +38,10 @@ native via the vkgs fork).
 ┌─────────────────────┐    ┌────────────────────┐
 │  WEB                │    │  VKGS              │
 │  React workbench    │    │  Native Vulkan     │
-│  • Points (R3F+WS)  │    │  • 236 fps         │
-│  • Splats (viser)   │    │  • Y-up adapter    │
-│  • Z-up, raw frames │    │    in vkgs_play.py │
+│  (laptop-local)     │    │  (sibling repo,    │
+│  • Points (R3F+WS)  │    │   not in use today)│
+│  • Splats (viser)   │    │                    │
+│  • Z-up, raw frames │    │                    │
 └─────────────────────┘    └────────────────────┘
 ```
 
@@ -48,17 +49,26 @@ native via the vkgs fork).
 
 ## Components and responsibilities
 
-### `server/gsfluent/` — backend service
-- FastAPI process on `:8080`. Serves the React SPA + REST endpoints
-  (`/api/recipes`, `/api/models`, `/api/runs`, `/api/sequences`)
-  + WebSocket stream at `/api/stream` for per-frame xyz delivery.
-- **Owns**: the library API surface and the WS frame pump.
-- **Contract**: every sequence it returns has a valid `_meta.json`.
-  No exceptions.
-- **Does NOT own**: simulation execution (server-side), viewer
-  rendering (client-side), per-cell viser caches (`tools/viser_headless.py`).
+### `server/gsfluent/` — v1 backend
+
+- FastAPI process on `0.0.0.0:7869`, reached publicly as
+  `your-backend:port` via NAT. The wire contract for every route is in
+  [`docs/API.md`](API.md) / [`docs/API.zh.md`](API.zh.md).
+- Mounts REST routes under `/api/*`: `recipes`, `models`, `runs`,
+  `sequences`, `schemas`, plus the per-frame xyz WebSocket at
+  `/api/stream`. The SPA static fallback is mounted last so `/api/*`
+  always wins on prefix conflict.
+- **Owns**: the library API surface, the WS frame pump, the runner that
+  spawns sim subprocesses.
+- **Does NOT own**: viewer rendering (laptop-side), per-cell viser
+  caches (built by `tools/sequence_to_viser_npz.py`, served by
+  `tools/viser_headless.py`).
+- Process management: `tools/supervise.sh up|stop|status` — a small
+  shell supervisor (no systemd, no docker) that respawns the backend
+  and viser_headless if they die.
 
 ### `tools/` — pipeline glue
+
 - `fuse_to_full_ply.py` — sim_*.ply + reference 3DGS → frame_*.ply.
   K-NN skinning and per-frame Kabsch rotation behind flags.
 - `pack_sequence.py` — frame_*.ply → `frames.bin` (GSSQ int16-quantized
@@ -67,32 +77,41 @@ native via the vkgs fork).
 - `sequence_to_viser_npz.py`, `batch_convert_to_npz.py` — build the
   per-sequence `.npz` files in `work/cache/viser/` that
   `viser_headless.py` mmaps for Splats-mode playback.
-- `viser_headless.py` — viser splat renderer on `:8091` + FastAPI control
-  sidecar on `:8092`. React drives sequence/frame/camera via the
-  control API; viser handles WebGL rendering.
-- `vkgs_play.py` — viewer-specific adapter for the vkgs native renderer:
-  Z-up→Y-up rotation, launch wrapper. Operates on a copy in
-  `work/cache/vkgs_yup/`, never mutates library frames.
-- `migrate_to_library.py` — backfills `_meta.json` on legacy
-  sequence directories.
+- `viser_headless.py` — viser splat renderer on `:8091` + FastAPI
+  control sidecar on `:8092`. The SPA drives sequence / frame / camera
+  via the control API; viser handles WebGL rendering.
+- `vkgs_play.py` — viewer-specific adapter for the vkgs native renderer
+  (Z-up→Y-up rotation, launch wrapper). Operates on a copy in
+  `work/cache/vkgs_yup/`; never mutates library frames.
 - `recipes/*.json` — physics recipes consumed by the server-side sim.
+- `supervise.sh` — your-server process manager described above.
 
-### `frontend/` — React + Vite + R3F workbench
-- Reads the library API; renders Points and Splats modes.
-- **Owns**: web-side viewer concerns only. Cannot mutate library data.
-- **Points mode** (`SplatScene.tsx`): R3F renders a `THREE.Points`
-  cloud driven by per-frame xyz arriving over `/api/stream`. Static
-  attrs (cov, rgb, opacity) ship in frame 0; subsequent frames are
-  int16-quantized xyz only.
+### `frontend/` — React + Vite + R3F workbench (laptop-local)
+
+- Built once via `vite build` and served by `vite preview` on the
+  laptop. Read-only against the backend over `/api/*`.
+- **Build-time env** (frontend/.env.production):
+  - `VITE_VISER_URL=http://127.0.0.1:8091/` — splat WS endpoint
+    (trailing slash matters; viser strips it to build its WS URL)
+  - `VITE_VISER_CONTROL_URL=http://127.0.0.1:8092` — viser control
+    sidecar
+  - `VITE_BACKEND_URL=` — left empty so `/api/*` flows through the
+    vite preview proxy; set to a full URL only when shipping the
+    bundle to a static host without a preview server.
+- **Points mode** (`SplatScene.tsx`): R3F renders `THREE.Points` driven
+  by per-frame xyz over `/api/stream`. Static attrs (cov, rgb, opacity)
+  ship in frame 0; subsequent frames are int16-quantized xyz only.
 - **Splats mode** (`ViserSplatScene.tsx`): iframes `:8091`. On
   `simRunName` or `currentFrameIdx` change, POSTs to `:8092/set`. On
-  mode-toggle (later: Pass B), POSTs to `:8092/camera` to sync the
-  viewpoint with Points mode's OrbitControls.
+  mode toggles, POSTs to `:8092/camera` to keep the viewpoint in sync
+  with Points mode's OrbitControls.
 
-### `vk_gaussian_splatting/` (sibling repo, `~/Desktop/work/vk_gaussian_splatting/`)
-- Native Vulkan splat renderer with our `--frames_dir` animation patch.
-- 236 fps validated for animated 3DGS playback.
-- Y-up internally; `vkgs_play.py` produces the rotated copy at launch.
+### `vk_gaussian_splatting/` (sibling repo)
+
+- Native Vulkan splat renderer at `~/Desktop/work/vk_gaussian_splatting/`,
+  with a `--frames_dir` animation patch (236 fps validated).
+- **Not currently in use** — viser is the renderer for the laptop SPA.
+  Kept available for native-playback demos.
 
 ---
 
@@ -103,7 +122,7 @@ native via the vkgs fork).
 3. **Every sequence has a `_meta.json`.** Fuse writes it; the library API enforces it. Sequences without one are invalid and the API rejects them.
 4. **Fuse output never gets mutated after writing.** No `hide_static_splats`-style post-process on frame plys. Want to change the output? Re-fuse.
 5. **Viewer caches are derived artifacts.** They live in `work/cache/<viewer>/...` (NOT in `sequences/`). They can be deleted at any time and re-derived from sources.
-6. **Sim runs on the server.** The laptop has no torch / warp / taichi / CUDA. Anything that requires those goes through SSH to `GPU server`.
+6. **Sim runs on your-server.** The laptop has no torch / warp / taichi / CUDA. Anything that requires those goes through the backend on your-server.
 
 ---
 
@@ -169,29 +188,47 @@ as sequences. The viewer wrappers know how to derive them.
 
 ---
 
-## Runtime topology (laptop side)
+## Runtime topology
 
 ```
-┌─────────────────────┐  REST + WS  ┌────────────────────┐
-│ gsfluent serve      │ ←─────────→ │ React SPA (browser)│
-│ :8080 (FastAPI)     │             │                    │
-│  - SPA static       │             │  Points mode:      │
-│  - /api/sequences   │  ws://      │   useStreamClient  │
-│  - /api/recipes     │  /api/stream│   → PackedReader   │
-│  - /api/runs        │             │   → R3F SplatScene │
-│  - /api/stream WS   │             │                    │
-└─────────────────────┘             │  Splats mode:      │
-                                    │   iframe :8091  ←──┐
-┌─────────────────────┐             │   POST :8092/set   │
-│ viser_headless.py   │ ←───────────┴────────────────────┘
-│  viser :8091        │
-│  control :8092      │  mmap → work/cache/viser/*.npz
-└─────────────────────┘
+┌─────── Teammate laptop ─────────────────────────────────────┐
+│                                                             │
+│  Browser  ───────► http://localhost:5173/                   │
+│                                                             │
+│  vite preview :5173                                         │
+│    proxy /api/*       ─────────────► your-server :24701           │
+│    proxy /api/stream (WS) ─────────► your-server :24701           │
+│    static /           ─────────────► frontend/dist/         │
+│                                                             │
+│  viser_headless                                             │
+│    127.0.0.1:8091 (splat WS)    ◄── iframe in SPA           │
+│    127.0.0.1:8092 (control API) ◄── fetch from SPA          │
+│    mmap → work/cache/viser/*.npz                            │
+│                                                             │
+└────────────────────────────┬────────────────────────────────┘
+                             │ HTTP (/api/*, /api/stream WS)
+                             ▼  (public NAT  24701 → 7869)
+┌─────── your-server GPU host ──────────────────────────────────────┐
+│                                                             │
+│  v1 backend  0.0.0.0:7869                                   │
+│    /api/{recipes,models,runs,sequences,schemas}             │
+│    /api/stream (WS, per-frame xyz)                          │
+│    runner → spawns gs_simulation_building.py                │
+│                                                             │
+│  GaussianFluent sim stack (torch + warp + taichi, A100)     │
+│  work/library/sequences/<run>/  ← canonical PLY frames      │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Server-side service starts via `./run-server.sh`. Laptop-side
-(viser + sync daemon + Points WS) starts via `./run-laptop.sh`,
-which shares a single cleanup trap on SIGINT.
+Launch on your-server: `bash tools/supervise.sh up` (starts and supervises
+v1 backend on `:7869` + viser_headless on loopback `:8091/:8092`).
+Launch on a teammate's laptop: `cd frontend && npm start` (runs
+`scripts/_start.sh`, which brings up viser_headless on the laptop's
+own loopback + vite preview proxying `/api/*` to your-server).
+
+The splat WebSocket stays on the laptop's loopback in both topologies —
+there is no high-bandwidth WAN hop for splat playback.
 
 ---
 
@@ -210,26 +247,19 @@ which shares a single cleanup trap on SIGINT.
 
 ## What's next
 
-Two open slices, both planned but not yet built:
+Active research in Phase 18 (R_pi, 12–16 week scope) on top of the
+current backend:
 
-### Sim submission protocol (laptop ↔ server)
-- `runner.py` (server-side) now spawns `tools/run_sim.sh`, which
-  orchestrates `gs_simulation_building.py` + `fuse_to_full_ply.py`
-  and triggers `batch_convert_to_npz.py` on completion. The wrapper
-  paths are configurable via `GSFLUENT_SIM_HOME`, `GSFLUENT_SIM_PYTHON`,
-  `GSFLUENT_SIM_ENV`, `GSFLUENT_SIM_SCRIPT_RUNNER` so each deployment
-  adapts without code changes.
-- The `POST /api/runs` API contract is unchanged from the pre-split
-  shape — the React side submits the same recipe + model + particles
-  payload; the server just spawns locally instead of trying SSH.
+- **Implicit MPM** — replace the current explicit Warp solver with an
+  implicit time integrator for stability under stiff materials.
+- **CK-MPM** — compatible-kernel MPM port to GaussianFluent for fracture
+  scenarios.
+- **CDM damage** — continuum damage mechanics layered on the implicit
+  solver to drive crack initiation + propagation.
 
-### Per-frame covariance in Splats mode
-- Today `sequence_to_viser_npz.py` stores frame-0 covariance only; per-frame
-  rotation is in the fused plies (via `--knn_rotation`) but not in the npz.
-- During motion, splat ellipsoids smear because Σ' = F·Σ·F^T isn't applied.
-- Plan: extend the npz schema with a per-frame quaternion array; viser_headless's
-  push loop reconstructs Σ' on each frame before writing to `splat.covariances`.
-- ~1.6× xyz size on disk; cheap CPU on push.
+These are sim-side changes; the API contract above is expected to stay
+stable. New recipe fields (damage params, implicit-step config) will
+land additively in `tools/recipes/*.json`.
 
 ---
 
@@ -238,5 +268,5 @@ Two open slices, both planned but not yet built:
 - A monorepo refactor.
 - A new framework / DI / plugin system.
 - A web-vs-vkgs unification. The two viewers have different goals:
-  - Web = scrub + inspect + share via URL (workbench-grade).
-  - vkgs = 236 fps native playback (demo-grade).
+  - Web = scrub + inspect + share (workbench-grade).
+  - vkgs = 236 fps native playback (demo-grade, currently shelved).
