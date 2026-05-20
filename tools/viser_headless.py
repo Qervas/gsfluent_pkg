@@ -406,16 +406,24 @@ def main() -> int:
     print(f"mmap-loading {len(npz_paths)} cells from {npz_root}...")
     cells: dict[str, dict] = {}
     for path in npz_paths:
+        # Key cells by their wire-format name (`sequence:<stem>`) so they
+        # match what the React workbench sends. Without this, pre-mmap'd
+        # cells live under bare names while lazy-loaded ones live under
+        # the prefixed form — the SPA then flags the bare-name pre-mmap
+        # cells as "not in viser cache" because it only knows the wire
+        # form. Models go through resolve_cell_lazily on demand and
+        # already land under `model:<name>`, so we don't add any here.
+        key = f"sequence:{path.stem}"
         try:
-            cells[path.stem] = mmap_cell(path)
+            cells[key] = mmap_cell(path)
         except (KeyError, ValueError, OSError) as e:
             # A single malformed .npz (missing cov / quats / scales /
             # truncated archive) shouldn't kill the whole renderer.
             # Skip it with a warning so the remaining cells still load.
-            print(f"  {path.stem}: SKIPPED — {type(e).__name__}: {e}")
+            print(f"  {key}: SKIPPED — {type(e).__name__}: {e}")
             continue
-        c = cells[path.stem]
-        print(f"  {path.stem}: {c['frames'].shape}  "
+        c = cells[key]
+        print(f"  {key}: {c['frames'].shape}  "
               f"bbox=({c['bbox_lo']}, {c['bbox_hi']})")
     if not cells:
         print(f"ERROR: every .npz in {npz_root} was malformed")
