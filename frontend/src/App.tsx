@@ -32,14 +32,22 @@ export default function App() {
   const activeSequenceName =
     activeCell?.kind === "sequence" ? activeCell.name : null;
   useEffect(() => {
+    // 12 fps is the steady-state ceiling for viser→browser splat
+    // streaming over WAN: each frame push is ~8 MB for cluster_6_15-
+    // class scenes, the link is ~100 Mbps, and the WASM sorter chews
+    // through one frame at a time. 24 fps overruns the pipe, stalls
+    // the main thread for seconds at a time, and the bar looks frozen.
+    // Clamp whatever meta.fps_hint declares to that ceiling.
+    const MAX_PLAYBACK_FPS = 12;
     if (!activeSequenceName) {
-      setFpsHint(24);
+      setFpsHint(MAX_PLAYBACK_FPS);
       return;
     }
     const seq = (sequences as SequenceItem[]).find(
       (s) => s.name === activeSequenceName,
     );
-    setFpsHint(seq?.fps_hint ?? 24);
+    const declared = seq?.fps_hint ?? MAX_PLAYBACK_FPS;
+    setFpsHint(Math.min(declared, MAX_PLAYBACK_FPS));
   }, [activeSequenceName, sequences, setFpsHint]);
 
   // Cmd-R toggles the recipes modal. Registered globally so it works

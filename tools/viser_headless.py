@@ -129,6 +129,15 @@ def mmap_cell(npz_path: Path) -> dict:
     f0 = np.asarray(d["frames"][0]) * _VISER_K
     bbox_lo = f0.min(axis=0).astype(np.float32)
     bbox_hi = f0.max(axis=0).astype(np.float32)
+    # Floor reference for the grid mesh — we want the grid to sit at
+    # or below the lowest splat across the WHOLE sequence, not just
+    # frame 0, so when the animation drops splats lower than the rest
+    # pose (collapse, earthquake displacement, jelly stretch) they
+    # don't sink through the visible ground. Cheap: scan all frame
+    # z-coords once at load. Only z is needed.
+    frames_z = np.asarray(d["frames"][..., 2])
+    floor_z = float(frames_z.min() * _VISER_K)
+    bbox_lo[2] = floor_z
     K2 = _VISER_K * _VISER_K
 
     if "quats" in d.files and "scales" in d.files:
@@ -533,7 +542,12 @@ def main() -> int:
     # new bbox. Storing the handles lets us mutate them in place.
     grid_params = _grid_params_for_bbox(cur["bbox_lo"], cur["bbox_hi"])
     bbox_center = ((cur["bbox_lo"] + cur["bbox_hi"]) * 0.5).astype(float)
-    floor_z = float(cur["bbox_lo"][2])
+    # Ground sits at world z=0 — the convention the pitch view uses for
+    # "where the building rests." Splats and camera target both lift by
+    # `floor_lift` so the cell's lowest point coincides with z=0 instead
+    # of the original sim-coord bbox_lo[2] (which is usually negative).
+    floor_lift = -float(cur["bbox_lo"][2])
+    floor_z = 0.0
     grid = server.scene.add_grid(
         "ground",
         width=grid_params["plane_size"],
@@ -562,6 +576,11 @@ def main() -> int:
     # AFTER this is set; for clients connected at startup we re-apply on
     # the first /set or on the on_client_connect hook below.
     pos0, look0 = _camera_for_bbox(cur["bbox_lo"], cur["bbox_hi"])
+    # Camera was framed against the un-lifted bbox; the splat node is
+    # rendered with a (0,0,floor_lift) offset, so the camera target +
+    # position both need the same upward shift to keep the model in view.
+    pos0  = (pos0[0],  pos0[1],  pos0[2]  + floor_lift)
+    look0 = (look0[0], look0[1], look0[2] + floor_lift)
     cur_scale = grid_params["scene_scale"]
     cam_dist0 = float(np.linalg.norm(np.asarray(pos0) - np.asarray(look0)))
     server.initial_camera.position = pos0
@@ -614,6 +633,7 @@ def main() -> int:
             covariances=_cov_for_frame(cur_c, state["frame"]),
             rgbs=np.ascontiguousarray(cur_c["rgb"]),
             opacities=np.ascontiguousarray(cur_c["opacity"]),
+            position=(0.0, 0.0, -float(cur_c["bbox_lo"][2])),
         )
         # The rebuild just populated the node with the current frame's
         # data, so the render loop doesn't need to push again this tick.
@@ -995,7 +1015,10 @@ def main() -> int:
             data = cells[cell]
             gp = _grid_params_for_bbox(data["bbox_lo"], data["bbox_hi"])
             ctr = ((data["bbox_lo"] + data["bbox_hi"]) * 0.5).astype(float)
-            fz = float(data["bbox_lo"][2])
+            # Same lift-to-z=0 convention as the boot path: grid at z=0,
+            # gizmo at z=0, splat node was added with position=(0,0,lift).
+            scene_lift = -float(data["bbox_lo"][2])
+            fz = 0.0
             # Remove + re-add is more robust than mutating size attrs in
             # place — `GridHandle` only exposes position/visible, not
             # cell_size/section_size, so the existing handle can't be
@@ -1028,6 +1051,10 @@ def main() -> int:
             # near/far writes mid-orbit caused silent WS crashes in
             # viser 1.0.20 — we stick to initial_camera here.
             pos, look = _camera_for_bbox(data["bbox_lo"], data["bbox_hi"])
+            # Match the lift applied to the splat node so the camera
+            # frames the model in its new world-z position.
+            pos  = (pos[0],  pos[1],  pos[2]  + scene_lift)
+            look = (look[0], look[1], look[2] + scene_lift)
             dist_new = float(np.linalg.norm(np.asarray(pos) - np.asarray(look)))
             server.initial_camera.position = pos
             server.initial_camera.look_at = look
