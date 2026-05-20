@@ -421,7 +421,7 @@ def _cleanup_intermediates(run_name: str, run_dir: Path, log_path: Path) -> None
     bytes_freed = 0
 
     sim_home = Path(os.environ.get(
-        "GSFLUENT_SIM_HOME", "$GSFLUENT_SIM_HOME",
+        "GSFLUENT_SIM_HOME", "${GSFLUENT_SIM_HOME}",
     ))
     sim_output = sim_home / "output" / run_name
     if sim_output.is_dir():

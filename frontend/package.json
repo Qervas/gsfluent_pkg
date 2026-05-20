@@ -1,6 +1,6 @@
 {
   "name": "gsfluent-frontend",
-  "description": "GaussianFluent laptop-local SPA + viser launcher. `npm install` bootstraps the Python venv, pip deps, npm deps, and the SPA build; `npm start` brings up viser_headless + vite preview against the shared your-server backend.",
+  "description": "GaussianFluent laptop-local SPA + viser launcher. `npm install` bootstraps the Python venv, pip deps, npm deps, and the SPA build; `npm start` brings up viser_headless + vite preview against the shared your server backend.",
   "private": true,
   "version": "0.1.0",
   "type": "module",

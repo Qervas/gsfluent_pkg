@@ -14,9 +14,9 @@ is right and this doc is wrong — please file a fix.
 
 ### Base URL
 
-Public deployment: `http://your-backend:port`. All HTTP routes documented
+Public deployment: `${BACKEND_URL}`. All HTTP routes documented
 below are mounted under the `/api/` prefix, e.g.
-`http://your-backend:port/api/health`. The SPA is served from `/` and is
+`${BACKEND_URL}/api/health`. The SPA is served from `/` and is
 mounted last so `/api/*` always wins on prefix conflict.
 
 ### Authentication
@@ -81,7 +81,7 @@ Liveness probe. Always returns 200 while the process is up.
 ```json
 {
   "status": "ok",
-  "pkg_root": "$GSFLUENT_PKG_ROOT"
+  "pkg_root": "/path/to/gsfluent_pkg"
 }
 ```
 
@@ -93,7 +93,7 @@ Liveness probe. Always returns 200 while the process is up.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/health
+curl ${BACKEND_URL}/api/health
 ```
 
 ### GET /api/gpu-check
@@ -138,7 +138,7 @@ Always returns HTTP 200, even on failure — the JSON `ok` field is the gate.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/gpu-check
+curl ${BACKEND_URL}/api/gpu-check
 ```
 
 ### GET /api/system
@@ -152,7 +152,7 @@ Container / host introspection. No secrets exposed.
   "hostname": "jy-r308-f01-7",
   "platform": "Linux-5.15.0-171-generic-x86_64-with-glibc2.35",
   "python": "3.11.15",
-  "pkg_root": "$GSFLUENT_PKG_ROOT",
+  "pkg_root": "/path/to/gsfluent_pkg",
   "sim_script": "<default>",
   "sim_home": "<default>",
   "in_container": false
@@ -172,7 +172,7 @@ Container / host introspection. No secrets exposed.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/system
+curl ${BACKEND_URL}/api/system
 ```
 
 ---
@@ -209,7 +209,7 @@ alphabetically.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/recipes
+curl ${BACKEND_URL}/api/recipes
 ```
 
 ### GET /api/recipes/{name}
@@ -257,7 +257,7 @@ Fetch a single recipe by name. If a name exists in both `builtin` and
 **curl**
 
 ```bash
-curl http://your-backend:port/api/recipes/demolition
+curl ${BACKEND_URL}/api/recipes/demolition
 ```
 
 ### PUT /api/recipes/{name}
@@ -317,7 +317,7 @@ a builtin's name creates a user copy that shadows the builtin on read
 **curl**
 
 ```bash
-curl -X PUT http://your-backend:port/api/recipes/my_run \
+curl -X PUT ${BACKEND_URL}/api/recipes/my_run \
   -H 'Content-Type: application/json' \
   -d '{"data":{"sim_area":[-30,30,-10,10,-2,45]},"based_on":"demolition"}'
 ```
@@ -350,7 +350,7 @@ Delete a user recipe. Built-ins cannot be deleted.
 **curl**
 
 ```bash
-curl -X DELETE http://your-backend:port/api/recipes/my_run
+curl -X DELETE ${BACKEND_URL}/api/recipes/my_run
 ```
 
 ---
@@ -374,14 +374,14 @@ List every model in the library (internal + registered).
     "name": "cluster_6_15",
     "kind": "model",
     "source": "register",
-    "source_path": "$GSFLUENT_SIM_HOME/model/cluster_6_15",
+    "source_path": "/path/to/GaussianFluent/model/cluster_6_15",
     "n_splats": 683741,
     "bbox": [[3443.6, 29036.1, -19.9], [3474.1, 29054.1, 30.5]],
     "coord_convention": "z-up",
     "imported_at": "2026-05-18T01:03:34Z",
     "converted_from": null,
     "sha256": null,
-    "path": "$GSFLUENT_SIM_HOME/model/cluster_6_15"
+    "path": "/path/to/GaussianFluent/model/cluster_6_15"
   }
 ]
 ```
@@ -406,7 +406,7 @@ last, alphabetically.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/models
+curl ${BACKEND_URL}/api/models
 ```
 
 ### POST /api/models/check_hash
@@ -452,7 +452,7 @@ entirely.
 **curl**
 
 ```bash
-curl -X POST http://your-backend:port/api/models/check_hash \
+curl -X POST ${BACKEND_URL}/api/models/check_hash \
   -H 'Content-Type: application/json' \
   -d '{"sha256":"'$(sha256sum scene.ply | cut -c1-64)'"}'
 ```
@@ -497,7 +497,7 @@ existing model's full meta dict).
 **curl**
 
 ```bash
-curl -X POST http://your-backend:port/api/models/upload \
+curl -X POST ${BACKEND_URL}/api/models/upload \
   -F 'ply=@scene.ply' \
   -F 'cameras_json=@cameras.json' \
   -F 'convert_y_up=false' \
@@ -548,7 +548,7 @@ the structure IS copied into the library and rewritten Z-up — the response
 **curl**
 
 ```bash
-curl -X POST http://your-backend:port/api/models/register \
+curl -X POST ${BACKEND_URL}/api/models/register \
   -H 'Content-Type: application/json' \
   -d '{"path":"/data/scans/my_scene","convert_y_up":false}'
 ```
@@ -589,7 +589,7 @@ supports HTTP `Range` for resumable downloads.
 **curl**
 
 ```bash
-curl -OJ "http://your-backend:port/api/models/file/scene.ply?path=/data/scans/my_scene"
+curl -OJ "${BACKEND_URL}/api/models/file/scene.ply?path=/data/scans/my_scene"
 ```
 
 ### DELETE /api/models/{name}
@@ -622,7 +622,7 @@ orphans.
 **curl**
 
 ```bash
-curl -X DELETE http://your-backend:port/api/models/scene_a1b2c3d4
+curl -X DELETE ${BACKEND_URL}/api/models/scene_a1b2c3d4
 ```
 
 ---
@@ -655,7 +655,7 @@ List currently-active runs (state `"running"` only). Past runs go through
 **curl**
 
 ```bash
-curl http://your-backend:port/api/runs
+curl ${BACKEND_URL}/api/runs
 ```
 
 ### POST /api/runs
@@ -708,7 +708,7 @@ Start a new sim run, or dry-run-validate one without spawning the wrapper.
 **curl**
 
 ```bash
-curl -X POST http://your-backend:port/api/runs \
+curl -X POST ${BACKEND_URL}/api/runs \
   -H 'Content-Type: application/json' \
   -d @start.json
 ```
@@ -738,7 +738,7 @@ Cancel an active run. Uses the in-process **`run_id`** (not the run name).
 **curl**
 
 ```bash
-curl -X DELETE http://your-backend:port/api/runs/1a2b3c
+curl -X DELETE ${BACKEND_URL}/api/runs/1a2b3c
 ```
 
 ### GET /api/runs/history
@@ -781,7 +781,7 @@ pre-migration data.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/runs/history
+curl ${BACKEND_URL}/api/runs/history
 ```
 
 ### DELETE /api/runs/history/{run_name}
@@ -813,7 +813,7 @@ run that is still active.
 **curl**
 
 ```bash
-curl -X DELETE http://your-backend:port/api/runs/history/cluster_6_15_eq_v3
+curl -X DELETE ${BACKEND_URL}/api/runs/history/cluster_6_15_eq_v3
 ```
 
 ### GET /api/runs/{run_name}/log
@@ -861,7 +861,7 @@ Incremental tail of a run's `run.log`. The frontend polls this every
 **curl**
 
 ```bash
-curl "http://your-backend:port/api/runs/cluster_6_15_eq_v3/log?offset=0"
+curl "${BACKEND_URL}/api/runs/cluster_6_15_eq_v3/log?offset=0"
 ```
 
 ### GET /api/runs/{run_name}/frame/{frame_idx}.ply
@@ -891,7 +891,7 @@ this endpoint serves the full attribute set).
 **curl**
 
 ```bash
-curl -OJ "http://your-backend:port/api/runs/cluster_6_15_eq_v3/frame/0.ply"
+curl -OJ "${BACKEND_URL}/api/runs/cluster_6_15_eq_v3/frame/0.ply"
 ```
 
 ---
@@ -962,7 +962,7 @@ the laptop never learns the server's directory layout.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/sequences
+curl ${BACKEND_URL}/api/sequences
 ```
 
 ### POST /api/sequences/import
@@ -1001,7 +1001,7 @@ Same shape as a single entry from `GET /api/sequences`.
 **curl**
 
 ```bash
-curl -X POST http://your-backend:port/api/sequences/import \
+curl -X POST ${BACKEND_URL}/api/sequences/import \
   -H 'Content-Type: application/json' \
   -d '{"folder_path":"/data/external/my_seq","name":"my_seq"}'
 ```
@@ -1036,7 +1036,7 @@ registered with `source: "import"`, `source_path: "upload:<orig_filename>"`).
 **curl**
 
 ```bash
-curl -X POST http://your-backend:port/api/sequences/upload-npz \
+curl -X POST ${BACKEND_URL}/api/sequences/upload-npz \
   -F 'file=@my_seq.npz' \
   -F 'name=my_seq'
 ```
@@ -1050,7 +1050,7 @@ URL shape.
 **curl**
 
 ```bash
-curl -OJ "http://your-backend:port/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 ```
 
 ### GET /api/sequences/{name}/cache/viser.npz
@@ -1079,7 +1079,7 @@ HTTP `Range` so interrupted downloads resume.
 **curl**
 
 ```bash
-curl -OJ "http://your-backend:port/api/sequences/cluster_6_15_eq_v3/cache/viser.npz"
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/viser.npz"
 ```
 
 ### GET /api/sequences/{name}/cache/frames.bin
@@ -1108,7 +1108,7 @@ fast local streaming.
 **curl**
 
 ```bash
-curl -OJ "http://your-backend:port/api/sequences/cluster_6_15_eq_v3/cache/frames.bin"
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/frames.bin"
 ```
 
 ### DELETE /api/sequences/{name}
@@ -1142,7 +1142,7 @@ touched. For sim-produced sequences (real dirs) the whole entry is
 **curl**
 
 ```bash
-curl -X DELETE http://your-backend:port/api/sequences/cluster_6_15_eq_v3
+curl -X DELETE ${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3
 ```
 
 ---
@@ -1183,7 +1183,7 @@ Boundary-condition type schemas, keyed by BC type.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/schemas/boundaries
+curl ${BACKEND_URL}/api/schemas/boundaries
 ```
 
 ### GET /api/schemas/materials
@@ -1221,7 +1221,7 @@ Per-material default parameters.
 **curl**
 
 ```bash
-curl http://your-backend:port/api/schemas/materials
+curl ${BACKEND_URL}/api/schemas/materials
 ```
 
 ---
@@ -1265,8 +1265,8 @@ ws://your-backend:port/api/stream
 ### 1. Listing recipes and picking one
 
 ```bash
-curl http://your-backend:port/api/recipes
-curl http://your-backend:port/api/recipes/earthquake
+curl ${BACKEND_URL}/api/recipes
+curl ${BACKEND_URL}/api/recipes/earthquake
 ```
 
 The second call returns the full recipe body in `data` — that's what you
@@ -1276,11 +1276,11 @@ pass back as `recipe_data` to `POST /api/runs`.
 
 ```bash
 # 1. Pick a model
-MODEL_PATH=$(curl -s http://your-backend:port/api/models \
+MODEL_PATH=$(curl -s ${BACKEND_URL}/api/models \
   | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['path'])")
 
 # 2. Load a recipe
-RECIPE=$(curl -s http://your-backend:port/api/recipes/earthquake)
+RECIPE=$(curl -s ${BACKEND_URL}/api/recipes/earthquake)
 
 # 3. Build the start payload (recipe_data === recipe.data)
 python3 -c "
@@ -1297,7 +1297,7 @@ print(json.dumps({
 " > start.json
 
 # 4. Submit
-curl -X POST http://your-backend:port/api/runs \
+curl -X POST ${BACKEND_URL}/api/runs \
   -H 'Content-Type: application/json' -d @start.json
 ```
 
@@ -1310,12 +1310,12 @@ frames / history).
 RUN=cluster_6_15_eq_demo
 OFFSET=0
 while true; do
-  RESP=$(curl -s "http://your-backend:port/api/runs/$RUN/log?offset=$OFFSET")
+  RESP=$(curl -s "${BACKEND_URL}/api/runs/$RUN/log?offset=$OFFSET")
   CONTENT=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['content'])")
   OFFSET=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['size'])")
   [ -n "$CONTENT" ] && printf '%s' "$CONTENT"
   # Check if the run has dropped out of the active list
-  ACTIVE=$(curl -s http://your-backend:port/api/runs)
+  ACTIVE=$(curl -s ${BACKEND_URL}/api/runs)
   echo "$ACTIVE" | grep -q "\"name\":\"$RUN\"" || break
   sleep 1
 done
@@ -1330,14 +1330,14 @@ socket.
 After a run finishes, the cache must be built once on the server:
 
 ```bash
-ssh your-server \
-  '$CONDA_ROOT/bin/python $GSFLUENT_PKG_ROOT/tools/batch_convert_to_npz.py cluster_6_15_eq_demo'
+ssh ${GSFLUENT_SSH_HOST} \
+  '${CONDA_ROOT}/bin/python /path/to/gsfluent_pkg/tools/batch_convert_to_npz.py cluster_6_15_eq_demo'
 ```
 
 Then pull it down:
 
 ```bash
-curl -OJ "http://your-backend:port/api/sequences/cluster_6_15_eq_demo/cache/viser.npz"
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/viser.npz"
 ```
 
 `viser_npz_mtime` / `viser_npz_bytes` in `GET /api/sequences` tell the

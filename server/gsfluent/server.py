@@ -27,7 +27,7 @@ def create_app() -> FastAPI:
     # GSFLUENT_EXTRA_CORS_ORIGINS env var (comma-separated) so deploys
     # behind a public-IP port-mapping can let the SPA hit the API
     # directly without a tunnel, e.g.:
-    #   GSFLUENT_EXTRA_CORS_ORIGINS=http://your-backend:port
+    #   GSFLUENT_EXTRA_CORS_ORIGINS=${BACKEND_URL}
     extra = [
         o.strip()
         for o in os.environ.get("GSFLUENT_EXTRA_CORS_ORIGINS", "").split(",")

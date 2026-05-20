@@ -12,17 +12,17 @@
 #                          both bound to 127.0.0.1 (loopback only).
 #   2. vite preview      — :$UI_PORT, serves frontend/dist/ and proxies
 #                          /api/*, /api/stream (WS), and /v1/* at the
-#                          shared backend on your-server.
+#                          shared backend on your server.
 #
 # Strong split: NO process here talks to anything except 127.0.0.1
-# (viser) and the your-server backend at $GSFLUENT_BACKEND_URL. The browser's
-# /api/* fetches go through the vite preview proxy → your-server; the splat
+# (viser) and the your server backend at $GSFLUENT_BACKEND_URL. The browser's
+# /api/* fetches go through the vite preview proxy → your server; the splat
 # iframe + control fetches go straight to 127.0.0.1 (zero WAN hops on
 # the high-bandwidth splat WS — the point of the split).
 #
 # Environment (all have safe defaults):
-#   GSFLUENT_BACKEND_URL   default http://your-backend:port
-#                          shared your-server v2 api (NAT 24701 → 7869)
+#   GSFLUENT_BACKEND_URL   default ${BACKEND_URL}
+#                          shared your server v2 api (NAT 24701 → 7869)
 #   UI_PORT                default 5173
 #   VISER_PORT             default 8091
 #   CONTROL_PORT           default 8092
@@ -33,9 +33,18 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source .env if present (BACKEND_URL etc.). See .env.example at the
+# repo root for the full key set.
+if [ -f "$PKG_ROOT/.env" ]; then
+  set -a
+  . "$PKG_ROOT/.env"
+  set +a
+fi
+
 VENV_PY="$PKG_ROOT/.venv/bin/python"
 
-GSFLUENT_BACKEND_URL="${GSFLUENT_BACKEND_URL:-http://your-backend:port}"
+GSFLUENT_BACKEND_URL="${GSFLUENT_BACKEND_URL:-${BACKEND_URL:-}}"
 UI_PORT="${UI_PORT:-5173}"
 VISER_PORT="${VISER_PORT:-8091}"
 CONTROL_PORT="${CONTROL_PORT:-8092}"

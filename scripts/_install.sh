@@ -6,9 +6,9 @@
 # directly (`bash scripts/_install.sh`) for engineers who want to debug
 # the Python half without touching node.
 #
-# Strong split: only the API stays on your-server. The SPA + viser_headless
+# Strong split: only the API stays on your server. The SPA + viser_headless
 # run on this laptop, talking to the shared backend at
-# http://your-backend:port (NAT-mapped → v2 api on :7869).
+# ${BACKEND_URL} (NAT-mapped → v2 api on :7869).
 #
 # What this does:
 #   1. Creates a Python venv at .venv/  (no sudo, no conda)
@@ -39,6 +39,15 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source .env if present (deployment-local paths + backend URL). See
+# .env.example at the repo root for the full key set.
+if [ -f "$PKG_ROOT/.env" ]; then
+  set -a
+  . "$PKG_ROOT/.env"
+  set +a
+fi
+
 VENV_DIR="$PKG_ROOT/.venv"
 
 note() { echo ">>> $*"; }

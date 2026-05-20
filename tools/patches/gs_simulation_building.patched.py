@@ -1,7 +1,7 @@
 import sys
 
-sys.path.append("$GSFLUENT_SIM_HOME/gaussian-splatting")
-sys.path.append("$GSFLUENT_SIM_HOME")
+sys.path.append("${GSFLUENT_SIM_HOME}/gaussian-splatting")
+sys.path.append("${GSFLUENT_SIM_HOME}")
 
 import argparse
 import math
@@ -624,9 +624,9 @@ if __name__ == "__main__":
     end_frame = 23000000
     delta = 0 
 
-    #     opa_mask = torch.load("$GSFLUENT_SIM_HOME/opcity_zero_mask.pt", weights_only=True).cuda()
-    #     gaussians2 = load_checkpoint("$GSFLUENT_SIM_HOME/model/garden")
-    #     transform_matrix = torch.from_numpy(np.loadtxt("$GSFLUENT_SIM_HOME/model/garden/transform_matrix.txt")).to(device).float()
+    #     opa_mask = torch.load("${GSFLUENT_SIM_HOME}/opcity_zero_mask.pt", weights_only=True).cuda()
+    #     gaussians2 = load_checkpoint("${GSFLUENT_SIM_HOME}/model/garden")
+    #     transform_matrix = torch.from_numpy(np.loadtxt("${GSFLUENT_SIM_HOME}/model/garden/transform_matrix.txt")).to(device).float()
     #     pos2 = gaussians2._xyz.detach()
     #     pos2 = (pos2  @ transform_matrix[:3, :3].T  + transform_matrix[:3, 3])*3
     #     pos2[:, 2] -= 2.6
@@ -978,11 +978,11 @@ if __name__ == "__main__":
                 if  light_flag : 
 
 
-                    command = f'cd $GSFLUENT_SIM_HOME/ && source $CONDA_ROOT/etc/profile.d/conda.sh && conda activate GaussianFluent && python normal_vector_proc_nan.py --npy_path {npy_path} --output_folder {output_folder}'
+                    command = f'cd ${GSFLUENT_SIM_HOME}/ && source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate GaussianFluent && python normal_vector_proc_nan.py --npy_path {npy_path} --output_folder {output_folder}'
                     run_command_realtime(command)
 
 
-                    command = f'cd $GSFLUENT_SIM_HOME/ && source $CONDA_ROOT/etc/profile.d/conda.sh && conda activate GaussianFluent && python phong_model_wm_shs_15.py \
+                    command = f'cd ${GSFLUENT_SIM_HOME}/ && source ${CONDA_ROOT}/etc/profile.d/conda.sh && conda activate GaussianFluent && python phong_model_wm_shs_15.py \
                                 --npy_path {normal_path} --output_folder {output_folder}  --opacity_path {opacity_path} --valid_indice_path {valid_indice_path} \
                                     --shs_path {shs_path} --color_path {color_path} --attenuation_constant {attenuation_constant}'
                     run_command_realtime(command)

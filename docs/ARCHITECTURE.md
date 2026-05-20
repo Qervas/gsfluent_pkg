@@ -1,7 +1,7 @@
 # gsfluent_pkg — Architecture
 
 Status: 2026-05-20. Describes the system as deployed today: a single v1
-backend on your-server, a laptop-local SPA + viser pair on each teammate's
+backend on your server, a laptop-local SPA + viser pair on each teammate's
 machine, and a public NAT port linking the two.
 
 ---
@@ -18,7 +18,7 @@ laptop-side.
             │                                  │
             ▼                                  ▼
 ┌────────────────────────────────────────────────────────────┐
-│  SIM     server (your-server GPU host)                           │
+│  SIM     server (your server GPU host)                           │
 │  GaussianFluent / Warp 0.10 / Taichi 1.5 / A100            │
 │  MPM solver → sim_*.ply (200k particles, Z-up)             │
 └─────────────────────────┬──────────────────────────────────┘
@@ -84,7 +84,7 @@ laptop-side.
   (Z-up→Y-up rotation, launch wrapper). Operates on a copy in
   `work/cache/vkgs_yup/`; never mutates library frames.
 - `recipes/*.json` — physics recipes consumed by the server-side sim.
-- `supervise.sh` — your-server process manager described above.
+- `supervise.sh` — your server process manager described above.
 
 ### `frontend/` — React + Vite + R3F workbench (laptop-local)
 
@@ -122,7 +122,7 @@ laptop-side.
 3. **Every sequence has a `_meta.json`.** Fuse writes it; the library API enforces it. Sequences without one are invalid and the API rejects them.
 4. **Fuse output never gets mutated after writing.** No `hide_static_splats`-style post-process on frame plys. Want to change the output? Re-fuse.
 5. **Viewer caches are derived artifacts.** They live in `work/cache/<viewer>/...` (NOT in `sequences/`). They can be deleted at any time and re-derived from sources.
-6. **Sim runs on your-server.** The laptop has no torch / warp / taichi / CUDA. Anything that requires those goes through the backend on your-server.
+6. **Sim runs on your server.** The laptop has no torch / warp / taichi / CUDA. Anything that requires those goes through the backend on your server.
 
 ---
 
@@ -196,8 +196,8 @@ as sequences. The viewer wrappers know how to derive them.
 │  Browser  ───────► http://localhost:5173/                   │
 │                                                             │
 │  vite preview :5173                                         │
-│    proxy /api/*       ─────────────► your-server :24701           │
-│    proxy /api/stream (WS) ─────────► your-server :24701           │
+│    proxy /api/*       ─────────────► your server :24701           │
+│    proxy /api/stream (WS) ─────────► your server :24701           │
 │    static /           ─────────────► frontend/dist/         │
 │                                                             │
 │  viser_headless                                             │
@@ -208,7 +208,7 @@ as sequences. The viewer wrappers know how to derive them.
 └────────────────────────────┬────────────────────────────────┘
                              │ HTTP (/api/*, /api/stream WS)
                              ▼  (public NAT  24701 → 7869)
-┌─────── your-server GPU host ──────────────────────────────────────┐
+┌─────── your server GPU host ──────────────────────────────────────┐
 │                                                             │
 │  v1 backend  0.0.0.0:7869                                   │
 │    /api/{recipes,models,runs,sequences,schemas}             │
@@ -221,11 +221,11 @@ as sequences. The viewer wrappers know how to derive them.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Launch on your-server: `bash tools/supervise.sh up` (starts and supervises
+Launch on your server: `bash tools/supervise.sh up` (starts and supervises
 v1 backend on `:7869` + viser_headless on loopback `:8091/:8092`).
 Launch on a teammate's laptop: `cd frontend && npm start` (runs
 `scripts/_start.sh`, which brings up viser_headless on the laptop's
-own loopback + vite preview proxying `/api/*` to your-server).
+own loopback + vite preview proxying `/api/*` to your server).
 
 The splat WebSocket stays on the laptop's loopback in both topologies —
 there is no high-bandwidth WAN hop for splat playback.
