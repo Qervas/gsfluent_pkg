@@ -129,6 +129,26 @@ export function ViserSplatScene() {
             body: JSON.stringify({ cell: c, frame: f }),
           };
       fetch(url, opts)
+        .then(async (r) => {
+          // Echo viser's actual frame back into the store so the bar
+          // tracks the splat instead of the React clock. Without this
+          // the bar leads the splat whenever the WS push is slower
+          // than fpsHint × RTT, because PlaybackDriver advances on a
+          // free-running timer but viser only updates per /set.
+          if (!r.ok || c === null) return;
+          try {
+            const body = (await r.json()) as { ok?: boolean; cell?: string; frame?: number };
+            if (body?.ok && typeof body.frame === "number") {
+              const s = useStore.getState().viserState;
+              if (body.frame !== s.frame) {
+                useStore.getState().setViserState({
+                  ...s,
+                  frame: body.frame,
+                });
+              }
+            }
+          } catch { /* malformed response — keep going */ }
+        })
         .catch(() => {
           /* transient network error — drop, next change will retry */
         })

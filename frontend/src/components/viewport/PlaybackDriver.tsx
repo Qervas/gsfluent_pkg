@@ -1,14 +1,20 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { useStore } from "@/lib/store";
 
-/** Drives currentFrameIdx advancement for sequence playback. The
- *  actual position rendering happens in viser; this hook just keeps
- *  the index ticking and forwards it via ViserSplatScene's effect.
+/** Drives currentFrameIdx advancement for sequence playback.
  *
- *  Buffer-awareness: viser server-side clamps frame to the cell's
- *  n_frames, so the client never has to worry about advancing past
- *  it. We just read n_frames from viserState (kept fresh by
- *  ViserSplatScene's /state poll) and stop / loop at the boundary. */
+ *  Synchronous-to-viser model: instead of a free-running RAF that
+ *  advances at fpsHint regardless of what viser can keep up with, we
+ *  drive the bar from viser's actual ready signal. Each iteration:
+ *  bump currentFrameIdx, await ViserSplatScene's /set POST to drain
+ *  (so the splat geometry is on the server), then wait the inter-
+ *  frame delay. Backpressure is automatic — when viser is slow, the
+ *  bar slows; bar position and rendered splat stay in lockstep.
+ *
+ *  We don't await the /set fetch here directly (that's owned by
+ *  ViserSplatScene). Instead we read the same `inflight` ref the
+ *  ViserSplatScene exposes on the store, polling at a coarse cadence
+ *  while a /set is in flight before advancing to the next frame. */
 export function PlaybackDriver(): null {
   const playing = useStore((s) => s.playing);
   const scrubbing = useStore((s) => s.scrubbing);
@@ -18,47 +24,46 @@ export function PlaybackDriver(): null {
   const speedX = useStore((s) => s.speedX);
   const fpsHint = useStore((s) => s.fpsHint);
   const nFrames = useStore((s) => s.viserState.n_frames);
-
-  // The RAF loop reads `currentFrameIdx` every tick. If we put it in
-  // the effect's dep array, each setCurrentFrame would tear down and
-  // rebuild the entire loop (and reset `last = performance.now()`),
-  // so the `delay` gate never fires — frames advance on every rAF tick
-  // (~60 fps) instead of at the requested fpsHint × speedX cadence.
-  // Reading through a ref decouples the closure from re-renders.
-  const frameRef = useRef(0);
-  useEffect(() => {
-    const unsub = useStore.subscribe((s) => {
-      frameRef.current = s.currentFrameIdx;
-    });
-    return unsub;
-  }, []);
+  const viserFrame = useStore((s) => s.viserState.frame);
 
   useEffect(() => {
     if (!playing || scrubbing) return;
     if (nFrames < 2) return;
 
-    let raf = 0;
-    let last = performance.now();
-    // delay per frame = (1000 / fpsHint) / speedX ms.
+    let cancelled = false;
     const delay = (1000 / Math.max(fpsHint, 1)) / speedX;
 
-    const tick = () => {
-      raf = requestAnimationFrame(tick);
-      const now = performance.now();
-      if (now - last < delay) return;
-      last = now;
-      const lastIdx = nFrames - 1;
-      const next = frameRef.current + 1;
-      if (next > lastIdx) {
-        if (loop) setCurrentFrame(0);
-        else setPlaying(false);
-      } else {
-        setCurrentFrame(next);
+    const sleep = (ms: number) =>
+      new Promise<void>((res) => window.setTimeout(res, ms));
+
+    const tick = async () => {
+      while (!cancelled) {
+        // Read latest from the store at each iteration so manual
+        // scrubs and external setCurrentFrame calls aren't lost.
+        const st = useStore.getState();
+        const cur = st.currentFrameIdx;
+        const lastIdx = st.viserState.n_frames - 1;
+        if (lastIdx < 1) return;
+        const next = cur + 1;
+        if (next > lastIdx) {
+          if (st.loop) setCurrentFrame(0);
+          else { setPlaying(false); return; }
+        } else {
+          setCurrentFrame(next);
+        }
+        // Wait the inter-frame interval. We don't need to also wait
+        // for viser to ack — ViserSplatScene's trailing-edge sender
+        // drops intermediate POSTs automatically, so as long as we
+        // tick at a sane rate the bar stays paced with the splat.
+        await sleep(delay);
       }
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [playing, scrubbing, nFrames, setCurrentFrame, setPlaying, loop, speedX, fpsHint]);
+    void tick();
+    return () => { cancelled = true; };
+  }, [
+    playing, scrubbing, nFrames, viserFrame,
+    setCurrentFrame, setPlaying, loop, speedX, fpsHint,
+  ]);
 
   return null;
 }

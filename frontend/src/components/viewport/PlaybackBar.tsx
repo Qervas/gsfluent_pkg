@@ -27,6 +27,13 @@ export function PlaybackBar() {
   const simState = useStore((s) => s.simState);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const nFrames = useStore((s) => s.viserState.n_frames);
+  // The scrubber shows where viser is actually rendering, not where
+  // React intends to be — otherwise the bar leads the splat whenever
+  // /set takes more than 1/fpsHint to land, and the user perceives the
+  // bar and the building as on different clocks. `viserFrame` echoes
+  // back from each /set response in ViserSplatScene; falls back to the
+  // /state poll for the initial paint before the first /set lands.
+  const viserFrame = useStore((s) => s.viserState.frame);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
   const speedX = useStore((s) => s.speedX);
@@ -132,6 +139,11 @@ export function PlaybackBar() {
   if (!isSequence || (totalFrames < 2 && nFrames < 2)) return null;
 
   const isLive = simState === "running";
+  const scrubbing = useStore((s) => s.scrubbing);
+  // During a manual scrub the user owns the slider, so show their
+  // intent (currentFrameIdx). During autoplay show what viser is
+  // actually rendering so the bar matches the splat one-for-one.
+  const displayFrame = scrubbing ? currentFrameIdx : viserFrame;
 
   const onScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = parseInt(e.target.value, 10);
@@ -200,7 +212,7 @@ export function PlaybackBar() {
           min={0}
           max={lastIdx}
           step={1}
-          value={currentFrameIdx}
+          value={displayFrame}
           onChange={onScrubChange}
           onMouseDown={armScrub}
           onMouseUp={releaseScrub}
@@ -214,7 +226,7 @@ export function PlaybackBar() {
 
       {/* Frame counter */}
       <div className="font-mono text-[11px] tabular-nums text-text-secondary whitespace-nowrap">
-        <span className="text-text-primary">{currentFrameIdx}</span>
+        <span className="text-text-primary">{displayFrame}</span>
         <span className="text-text-muted"> / </span>
         <span>{lastIdx}</span>
         {isLive && (
