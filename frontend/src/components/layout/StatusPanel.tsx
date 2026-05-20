@@ -16,6 +16,8 @@ function LiveTicker(): JSX.Element {
   const simLastLogAt = useStore((s) => s.simLastLogAt);
   const simNFrames = useStore((s) => s.simNFrames);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
+  const simState = useStore((s) => s.simState);
+  const simLog = useStore((s) => s.simLog);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 500);
@@ -26,15 +28,26 @@ function LiveTicker(): JSX.Element {
     ageMs < 1000 ? "now" :
     ageMs < 60_000 ? `${Math.round(ageMs / 1000)}s ago` :
     `${Math.round(ageMs / 60_000)}m ago`;
-  const progress = simTotalFrames > 0
+  // simNFrames/simTotalFrames track the MPM-sim tqdm; once that
+  // finishes they sit at 150/150 through fuse + npz. Show them only
+  // while we're still in the simulating stage so the fuse/npz stages
+  // don't appear "frozen at 100%."
+  const tail = simLog.slice(-80).join("\n");
+  const stage = deriveStage(simState, tail);
+  const isSimStage = stage === "simulating" || stage === "fuse drain";
+  const progress = isSimStage && simTotalFrames > 0
     ? `${simNFrames}/${simTotalFrames}`
-    : "starting";
+    : null;
   return (
     <div className="flex items-center gap-2 text-accent">
       <Loader2 size={11} className="animate-spin" />
-      <span>running</span>
-      <span className="text-text-muted">·</span>
-      <span className="text-text-muted">{progress}</span>
+      <span>{stage}</span>
+      {progress && (
+        <>
+          <span className="text-text-muted">·</span>
+          <span className="text-text-muted">{progress}</span>
+        </>
+      )}
       <span className="text-text-muted">·</span>
       <span className="text-text-muted">last log {ageStr}</span>
     </div>
@@ -58,9 +71,18 @@ function LiveTicker(): JSX.Element {
  */
 function deriveStage(state: string, logTail: string): string {
   if (state !== "running") return state;
-  if (logTail.includes("[PhaseA-SUMMARY]")) return "fuse drain";
-  if (logTail.includes("step 2/3") && logTail.includes("fuse")) return "fusing";
-  if (logTail.includes("[PhaseA]") || logTail.includes("step 1/3")) return "simulating";
+  // Order matters — later steps are tagged with text that may also
+  // appear in earlier logs (e.g. "fuse" appears in "drained io
+  // futures" before fuse runs), so check from latest stage backwards.
+  if (logTail.includes("[runner] .npz cache built")) return "done";
+  if (logTail.includes("[npz] writing"))             return "writing npz";
+  if (logTail.includes("[npz] reading"))             return "packing npz";
+  if (logTail.includes("[runner] building .npz"))    return "packing npz";
+  if (logTail.includes("run_sim.sh done:"))          return "packing npz";
+  if (logTail.includes("step 2: fuse"))              return "fusing";
+  if (logTail.includes("[PhaseA-SUMMARY]"))          return "fuse drain";
+  if (logTail.includes("[PhaseA]") || logTail.includes("step 1: MPM"))
+    return "simulating";
   return "starting (kernel JIT)";
 }
 
