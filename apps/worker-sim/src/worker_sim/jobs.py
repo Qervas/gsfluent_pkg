@@ -151,18 +151,24 @@ async def _run_sim_inner(
             log_chunks.append(bytes(log_buffer))
             log_buffer.clear()
 
-    start_frame_count = 0
-
     async def on_frame(idx: int, kind_str: str, data: bytes) -> None:
-        kind = ArtifactKind.cell if kind_str == "cell" else ArtifactKind.preview
-        suffix = ".npz" if kind == ArtifactKind.cell else ".ply"
-        key = f"runs/{run_id}/frame_{idx:04d}{suffix}"
-        await put_object_bytes(BUCKET_RUNS, key, data)
+        # Per-frame artifacts are intermediate. Skip uploading them to
+        # MinIO — the post-sim npz cell (via on_cell) bundles every
+        # frame into one canonical artifact. Keeping the .ply files on
+        # the engine host filesystem so other tools can still read them.
+        return
+
+    async def on_cell(filename: str, data: bytes) -> None:
+        """Whole-sequence npz cell — one artifact, every frame inside."""
+        key = f"runs/{run_id}/{filename}"
+        await put_object_bytes(
+            BUCKET_RUNS, key, data, content_type="application/octet-stream",
+        )
         async with async_sessionmaker(engine_db, expire_on_commit=False)() as s2:
             art = Artifact(
                 run_id=run_id,
-                kind=kind,
-                frame_idx=idx,
+                kind=ArtifactKind.cell,
+                frame_idx=None,  # whole-sequence; no per-frame index
                 minio_path=f"{BUCKET_RUNS}/{key}",
                 size_bytes=len(data),
             )
@@ -171,7 +177,7 @@ async def _run_sim_inner(
             await s2.refresh(art)
             await publish_event(redis, ArtifactCreatedEvent(
                 run_id=run_id, artifact_id=art.id,
-                kind=kind, frame_idx=idx, size_bytes=len(data),
+                kind=ArtifactKind.cell, frame_idx=None, size_bytes=len(data),
             ))
 
     async def should_cancel() -> bool:
@@ -190,6 +196,7 @@ async def _run_sim_inner(
             on_frame=on_frame,
             on_log=on_log,
             should_cancel=should_cancel,
+            on_cell=on_cell,
         )
     except Exception as e:  # noqa: BLE001
         success = False

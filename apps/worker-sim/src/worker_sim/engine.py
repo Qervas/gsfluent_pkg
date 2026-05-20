@@ -54,6 +54,7 @@ CANCEL_INTERVAL_S = 0.5
 
 OnFrame: TypeAlias = Callable[[int, str, bytes], Awaitable[None]]
 OnLog: TypeAlias = Callable[[str, str], Awaitable[None]]
+OnCell: TypeAlias = Callable[[str, bytes], Awaitable[None]]  # filename, bytes
 ShouldCancel: TypeAlias = Callable[[], Awaitable[bool]]
 
 
@@ -215,6 +216,54 @@ async def _cancel_poller(proc: asyncio.subprocess.Process,
     return False
 
 
+async def _convert_to_npz(run_id: uuid.UUID, on_log: OnLog) -> Path | None:
+    """Post-sim: run batch_convert_to_npz.py to produce a single .npz cell
+    that bundles every frame (positions + per-frame rotations + scales +
+    SH + opacity) in numpy's compressed-zip format.
+
+    v1 vocabulary: this is THE canonical artifact for a sequence —
+    one file the frontend downloads once, parses, and animates.
+    The per-frame .ply files in $PKG_ROOT/work/library/.../frames/ are
+    intermediate; we don't upload them to MinIO.
+
+    Returns the resulting .npz path on success, None on failure (logged).
+    """
+    converter = PKG_ROOT / "tools" / "batch_convert_to_npz.py"
+    if not converter.is_file():
+        await on_log("warning", f"npz converter not at {converter}; skipping")
+        return None
+
+    py = os.environ.get(
+        "GSFLUENT_SIM_PYTHON",
+        "python",
+    )
+    await on_log("info", f"npz.convert {converter} {run_id}")
+    proc = await asyncio.create_subprocess_exec(
+        py, str(converter), str(run_id),
+        cwd=str(PKG_ROOT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    assert proc.stdout is not None
+    tail = asyncio.create_task(_tail_stream(proc.stdout, on_log))
+    rc = await proc.wait()
+    tail.cancel()
+    await asyncio.gather(tail, return_exceptions=True)
+    if rc != 0:
+        await on_log("error", f"npz.convert exited rc={rc}")
+        return None
+
+    out = PKG_ROOT / "work" / "cache" / "viser" / f"{run_id}.npz"
+    if not out.is_file():
+        await on_log("error", f"npz.convert succeeded but {out} missing")
+        return None
+    await on_log(
+        "info",
+        f"npz.convert done: {out} ({out.stat().st_size / 1e6:.1f} MB)",
+    )
+    return out
+
+
 async def run_engine(
     run_id: uuid.UUID,
     model_minio_path: str,
@@ -224,6 +273,7 @@ async def run_engine(
     on_frame: OnFrame,
     on_log: OnLog,
     should_cancel: ShouldCancel,
+    on_cell: OnCell | None = None,
 ) -> tuple[bool, str | None]:
     """Run a sim end-to-end. Returns (success, error_summary)."""
     if not SIM_SCRIPT.is_file():
@@ -291,6 +341,20 @@ async def run_engine(
             return False, "cancelled by user"
         if rc != 0:
             return False, f"sim subprocess exited with rc={rc}"
+
+        # Post-sim: convert the per-frame .ply files into a single .npz
+        # cell + upload via on_cell. The .ply frames stay on the engine
+        # host filesystem (other tools may want them); only the .npz
+        # gets stored in MinIO.
+        if on_cell is not None:
+            npz_path = await _convert_to_npz(run_id, on_log)
+            if npz_path is not None:
+                data = await asyncio.to_thread(npz_path.read_bytes)
+                try:
+                    await on_cell(npz_path.name, data)
+                except Exception as e:  # noqa: BLE001
+                    await on_log("error", f"on_cell upload failed: {e!r}")
+
         return True, None
 
     finally:

@@ -685,8 +685,17 @@ def main() -> int:
                         state["frame"] = max(0, n_new - 1)
                     _rebuild_scene_node()
             if body.frame is not None:
-                n = cells[state["cell"]]["frames"].shape[0]
-                state["frame"] = max(0, min(int(body.frame), n - 1))
+                # Frame-only updates are valid even with no cell selected
+                # — the React workbench fires a /set on every store
+                # change, including the first mount when activeCell is
+                # still null. Without this guard, indexing cells[None]
+                # raises KeyError and the response is a noisy 500.
+                cur = state["cell"]
+                if cur is not None and cur in cells:
+                    n = cells[cur]["frames"].shape[0]
+                    state["frame"] = max(0, min(int(body.frame), n - 1))
+                else:
+                    state["frame"] = max(0, int(body.frame))
             return {"ok": True, "cell": state["cell"], "frame": state["frame"]}
 
     @api.get("/state")
