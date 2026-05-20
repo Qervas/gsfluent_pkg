@@ -9,6 +9,7 @@ The frame-serving endpoint is intentionally aliased to the existing one
 in api/runs.py so the frontend WebSocket bootstrap (which hardcodes
 `/api/runs/<name>/frame/0.ply`) keeps working — see `api/runs.py:get_run_frame`.
 """
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -59,6 +60,21 @@ def _sequence_dict(seq: Sequence) -> dict:
     d.setdefault("source", "unknown")
     d.setdefault("source_path", None)
     d.setdefault("model_ref", None)
+    # In-flight sims haven't written their canonical _meta.json yet, so
+    # model_ref is None and the outliner buries them in "Orphan sequences"
+    # mid-run. Pull the parent model out of manifest.json (which IS
+    # written at run start) as a fallback so the user sees the new run
+    # nested under cluster_6_15 the moment it begins.
+    if d.get("model_ref") is None:
+        manifest_path = seq.path / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+                md = manifest.get("model_dir")
+                if isinstance(md, str) and md:
+                    d["model_ref"] = Path(md).name
+            except (json.JSONDecodeError, OSError):
+                pass
     d.setdefault("fps_hint", 24)
     d.setdefault("n_splats", None)
     d.setdefault("coord_convention", "z-up")
