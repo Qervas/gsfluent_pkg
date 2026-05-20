@@ -55,13 +55,15 @@ export function ViserSplatScene() {
     cell: null,
     frame: null,
   });
-  // Drive at most one /set in flight at a time. Playback advances frames
-  // at ~24 fps; if WAN RTT is even 100 ms, naive POSTs queue up faster
-  // than they drain, the browser hits its 6-per-origin fetch cap and
-  // starts returning ERR_INSUFFICIENT_RESOURCES — which then takes the
-  // viser WASM sorter down with it (memory-access OOB) and React unmounts
-  // mid-render (error #300). One in flight, abort+replace on update.
-  const setInflight = useRef<AbortController | null>(null);
+  // Trailing-edge serialization: at most one /set in flight at a time;
+  // newer state replaces whatever's queued. When the in-flight finishes
+  // we fire the queued state (if it still differs from what was sent).
+  // This drops *intermediate* frames the user can't perceive anyway —
+  // viser only renders the latest — while never leaving the bar ahead
+  // of the splats (which is what abort-on-stale was doing, since
+  // aborted /sets never reached viser).
+  const inflight = useRef(false);
+  const pending = useRef<{ cell: string | null; frame: number } | null>(null);
 
   // Sidecar control: forward (cell, frame) on change. We also list
   // available cells once on mount to report mismatches cleanly.
@@ -109,27 +111,39 @@ export function ViserSplatScene() {
       return;
     }
     lastSent.current = { cell, frame };
-    // Abort whatever's still in flight; the previous frame's state is
-    // already stale.
-    setInflight.current?.abort();
-    const ac = new AbortController();
-    setInflight.current = ac;
-    if (cell === null) {
-      fetch(`${controlUrl}/clear`, { method: "POST", signal: ac.signal })
-        .catch(() => {})
-        .finally(() => { if (setInflight.current === ac) setInflight.current = null; });
+    if (inflight.current) {
+      // A /set is in flight; record the latest desired state and let
+      // the in-flight completion handler dispatch it.
+      pending.current = { cell, frame };
       return;
     }
-    fetch(`${controlUrl}/set`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cell, frame }),
-      signal: ac.signal,
-    })
-      .catch(() => {
-        /* aborted or transient network — next state change will retry */
-      })
-      .finally(() => { if (setInflight.current === ac) setInflight.current = null; });
+
+    const send = (c: string | null, f: number) => {
+      inflight.current = true;
+      const url = c === null ? `${controlUrl}/clear` : `${controlUrl}/set`;
+      const opts: RequestInit = c === null
+        ? { method: "POST" }
+        : {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cell: c, frame: f }),
+          };
+      fetch(url, opts)
+        .catch(() => {
+          /* transient network error — drop, next change will retry */
+        })
+        .finally(() => {
+          inflight.current = false;
+          // Flush the latest queued state, if it differs from what we
+          // just sent.
+          const p = pending.current;
+          pending.current = null;
+          if (p && (p.cell !== c || p.frame !== f)) {
+            send(p.cell, p.frame);
+          }
+        });
+    };
+    send(cell, frame);
   }, [controlReachable, controlUrl, wireName, currentFrameIdx]);
 
   // ---- render ----------------------------------------------------------
