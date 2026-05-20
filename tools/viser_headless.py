@@ -698,6 +698,34 @@ def main() -> int:
                     state["frame"] = max(0, int(body.frame))
             return {"ok": True, "cell": state["cell"], "frame": state["frame"]}
 
+    @api.post("/clear")
+    def clear_state() -> dict:
+        """Drop the active scene node so the viewport is empty on next render.
+
+        viser_headless persists scene state across SPA reloads, which is
+        the right default during a sim session (camera + splat survive
+        F5). But when the React app's activeCell is null (no model, no
+        sequence picked) and the user opens the SPA fresh, viser will
+        replay the old splat to the new client — the workbench shows
+        "no model loaded" while the iframe still paints a building.
+
+        POST /clear from the React side breaks that tie: when wireName
+        flips to null the SPA fires this and the next client sees an
+        empty scene.
+        """
+        nonlocal splat
+        with lock:
+            if splat is not None:
+                try:
+                    splat.remove()
+                except Exception:  # noqa: BLE001
+                    pass
+                splat = None
+            state["cell"] = None
+            state["frame"] = 0
+            state["scene_dirty"] = True
+            return {"ok": True}
+
     @api.get("/state")
     def get_state() -> dict:
         with lock:
