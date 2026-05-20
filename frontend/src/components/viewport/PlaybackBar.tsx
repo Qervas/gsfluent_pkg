@@ -44,6 +44,7 @@ export function PlaybackBar() {
   const setLoop = useStore((s) => s.setLoop);
   const setScrubbing = useStore((s) => s.setScrubbing);
   const stepFrame = useStore((s) => s.stepFrame);
+  const scrubbing = useStore((s) => s.scrubbing);
 
   const [speedOpen, setSpeedOpen] = useState(false);
   const speedRef = useRef<HTMLDivElement | null>(null);
@@ -139,7 +140,6 @@ export function PlaybackBar() {
   if (!isSequence || (totalFrames < 2 && nFrames < 2)) return null;
 
   const isLive = simState === "running";
-  const scrubbing = useStore((s) => s.scrubbing);
   // During a manual scrub the user owns the slider, so show their
   // intent (currentFrameIdx). During autoplay show what viser is
   // actually rendering so the bar matches the splat one-for-one.
