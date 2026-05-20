@@ -190,6 +190,43 @@ def main() -> int:
             print(f"  {i+1}/{n_frames}", flush=True)
     print(f"frame read: {time.time() - t0:.1f}s")
 
+    # NaN sanitization. The upstream MPM solver occasionally produces
+    # NaN positions for particles that escape the bounding box (slip
+    # boundary + large substep_dt = numerical blow-up); the K-NN fuse
+    # propagates those NaN to whatever ref splats picked them as a
+    # neighbor. Downstream, the viser WASM splat sorter dereferences
+    # those positions and crashes with "memory access out of bounds",
+    # taking the iframe down. Replace any NaN xyz with the prior
+    # frame's position so the splat stays put — affected splats freeze
+    # in place rather than disappearing or crashing the renderer.
+    nan_mask = np.isnan(frames).any(axis=2)  # (n_frames, n_splats)
+    if nan_mask.any():
+        n_bad = int(nan_mask.sum())
+        print(f"  sanitizing {n_bad} NaN positions (forward-fill from prior frame)…")
+        # Frame 0 has nothing to fall back to; clamp to scene centroid
+        # so the splat doesn't bleed into +inf land. Subsequent frames
+        # carry-forward by walking T in order.
+        if nan_mask[0].any():
+            valid_xyz = frames[0, ~nan_mask[0]]
+            centroid = (valid_xyz.mean(axis=0) if len(valid_xyz)
+                        else np.zeros(3, dtype=np.float32))
+            frames[0, nan_mask[0]] = centroid
+        for t in range(1, n_frames):
+            bad = nan_mask[t]
+            if bad.any():
+                frames[t, bad] = frames[t - 1, bad]
+        # Quats can NaN under the same conditions; carry-forward too.
+        if quats is not None:
+            qnan = np.isnan(quats).any(axis=2)
+            if qnan.any():
+                if qnan[0].any():
+                    # Identity quaternion as a safe zero-rotation default.
+                    quats[0, qnan[0]] = np.array([1, 0, 0, 0], dtype=np.float32)
+                for t in range(1, n_frames):
+                    qbad = qnan[t]
+                    if qbad.any():
+                        quats[t, qbad] = quats[t - 1, qbad]
+
     out_path = args.out or (seq_dir / "viser.npz")
     print(f"writing {out_path}…")
     # Atomic write: stream to `.npz.tmp` then `os.replace` so a SIGINT or
