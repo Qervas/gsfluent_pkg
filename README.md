@@ -1,5 +1,26 @@
 # gsfluent — 部署与使用指南
 
+> **当前部署方式 (2026-05-20 后)：** 后端跑在 your-server
+> (`http://your-backend:port`),前端 + viser 渲染由每位团队成员在
+> 自己的电脑上跑:
+>
+> ```bash
+> cd frontend
+> npm install      # 自动配 venv + pip + node_modules + 构建 dist
+> npm start        # 起 viser_headless + vite preview,监听 :5173
+> ```
+>
+> 浏览器打开 `http://localhost:5173/`。
+>
+> 实现细节在 `scripts/_install.sh` / `scripts/_start.sh`,API 接口
+> 参考在 `docs/API.md` (英文) / `docs/API.zh.md` (中文)。
+>
+> 旧的 SSH-tunnel 部署模式 (`run-server.sh` / `run-client.sh` /
+> `start-gsfluent-server.sh`) 已搬到 `archive/`,下面的旧文档主要
+> 留作历史参考。
+
+---
+
 GaussianFluent 物理仿真的工作台。提供：
 
 - **3DGS 模型管理**（上传、列表、删除）
