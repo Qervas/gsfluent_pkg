@@ -328,8 +328,17 @@ def _history_entry_from_sequence(seq: Sequence) -> dict | None:
     # Carry the new metadata fields too so future Phase-2+ frontend
     # code can read them without bumping the type. Frontend ignores
     # extras today.
+    # Prefer the finished _meta.json's model_ref. Fall back to the
+    # manifest's model_dir (written at run START) so an in-flight run
+    # nests under its parent model in the outliner immediately, instead
+    # of sitting in "Orphan sequences" until completion writes the
+    # canonical _meta.json. Same key shape either way.
     if meta.get("model_ref"):
         out["model_ref"] = meta["model_ref"]
+    else:
+        md = manifest.get("model_dir")
+        if isinstance(md, str) and md:
+            out["model_ref"] = Path(md).name
     if "frame_count" in meta:
         out["frame_count"] = meta["frame_count"]
     elif frame_count:
