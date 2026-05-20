@@ -6,7 +6,6 @@ import { SimulationCard } from "@/components/sim/SimulationCard";
 import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
 import { RecipesModal } from "@/components/recipes/RecipesModal";
-import { SettingsModal } from "@/components/layout/SettingsModal";
 import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import type { SequenceItem, ModelItem } from "@/lib/types";
@@ -144,7 +143,6 @@ export default function App() {
         viewport={<Viewport />}
       />
       <RecipesModal />
-      <SettingsModal />
       <CommandPalette onRun={triggerRun} />
     </>
   );

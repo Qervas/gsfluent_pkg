@@ -1,7 +1,7 @@
 import { useStore } from "@/lib/store";
 import { RunButton } from "@/components/runs/RunButton";
 import { StatusPill } from "@/components/layout/StatusPill";
-import { ChevronRight, Settings as SettingsIcon } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useRecipeDirty } from "@/lib/use-recipe-dirty";
 
 /** Unified top bar (Stage redesign Phase 2). One thin (h-12) row pinned
@@ -67,17 +67,6 @@ export function TopBar() {
       />
 
       <div className="flex-1" />
-
-      <button
-        type="button"
-        onClick={() => useStore.getState().setSettingsOpen(true)}
-        className="w-8 h-8 rounded-md flex items-center justify-center
-                   text-text-secondary hover:text-text-primary hover:bg-elevated/60"
-        title="Settings (backend URL, …)"
-        aria-label="Open settings"
-      >
-        <SettingsIcon size={15} />
-      </button>
 
       <StatusPill />
       <RunButton />

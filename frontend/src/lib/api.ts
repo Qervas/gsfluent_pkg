@@ -9,21 +9,24 @@ import type {
   MaterialDefaults,
   BackendHealth,
 } from "./types";
-import { useStore } from "./store";
 
-/** Prepend the user-configured backend URL to /api/* paths.
+/** Optional build-time override of the API host.
  *
- * Settings modal writes `apiBase` to the store (and localStorage). When
- * set, every /api/* request bypasses the vite proxy and hits the backend
- * directly — needed for runtime swap between local (vite proxy / SSH
- * tunnel) and remote (public-IP port mapping) deploys without a rebuild.
- * When null, paths are left bare so vite's preview/dev proxy still works. */
+ * Unset by default — the SPA fires `/api/*` requests at its own origin
+ * and the vite preview/dev server proxies them to the configured
+ * `GSFLUENT_BACKEND_URL` (set when launching). Override at build time
+ * by setting `VITE_BACKEND_URL=http://host:port` in `.env.local` /
+ * `.env.production`, in which case the bundle hits that host directly
+ * (skipping the proxy — needed for prebuilt static deploys without a
+ * preview server in front). Trailing slash is stripped to match path
+ * concatenation. */
+const BACKEND_URL = ((import.meta.env.VITE_BACKEND_URL as string | undefined) ?? "")
+  .replace(/\/$/, "");
+
 function apiUrl(path: string): string {
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  const base = useStore.getState().apiBase;
-  if (!base) return path;
-  // Both are normalized: base has no trailing slash, path starts with "/".
-  return base + path;
+  if (!BACKEND_URL) return path;
+  return BACKEND_URL + path;
 }
 
 const j = async <T>(r: Response): Promise<T> => {
@@ -34,9 +37,6 @@ const j = async <T>(r: Response): Promise<T> => {
   return r.json();
 };
 
-// Thin wrapper so every call site below pulls apiBase at fetch time.
-// Doing `const f = fetch` would capture the global once; we want each
-// invocation to re-read apiBase since the user can change it at runtime.
 const f: typeof fetch = (input, init) => {
   const url = typeof input === "string" ? apiUrl(input) : input;
   return fetch(url, init);
