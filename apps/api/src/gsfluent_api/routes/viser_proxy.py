@@ -96,13 +96,17 @@ async def _proxy_http(target: str, request: Request) -> Response:
 # ---------- viser SPA (HTTP) ------------------------------------------
 
 
-@router.api_route(
-    "/viser-iframe/{full_path:path}",
-    methods=["GET", "HEAD"],
-    include_in_schema=False,
+# Style overlay we inject into the viser SPA's <head>. Hides Mantine's
+# Paper-root floating panels (the "Connected / Save Canvas / Reset View /
+# Orbit Origin Tool / Dev Settings / Scene tree" side panel) so the
+# customer-facing pitch view is a clean viewport. The selector only
+# matches Mantine Paper containers — buttons, inputs and the rest of
+# viser's UI use different Mantine components and are untouched.
+_VISER_STYLE_OVERLAY = (
+    b"<style>"
+    b".mantine-Paper-root{display:none!important;}"
+    b"</style></head>"
 )
-async def viser_iframe(full_path: str, request: Request) -> Response:
-    return await _proxy_http(f"{VISER_HTTP}/{full_path}", request)
 
 
 @router.api_route(
@@ -111,7 +115,55 @@ async def viser_iframe(full_path: str, request: Request) -> Response:
     include_in_schema=False,
 )
 async def viser_iframe_root(request: Request) -> Response:
-    return await _proxy_http(f"{VISER_HTTP}/", request)
+    """Fetch viser's root HTML, inject the style overlay, return it.
+
+    The HTML is small enough (~2.2 MB, single self-contained file with
+    all JS/CSS inlined) that buffering once is fine; there are no
+    follow-up asset requests. HEAD is passed through unmodified.
+    """
+    if request.method == "HEAD":
+        return await _proxy_http(f"{VISER_HTTP}/", request)
+
+    timeout = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=5.0)
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in _DROP_REQ_HEADERS
+    }
+    # Force identity encoding from viser — we want plain HTML so the
+    # byte-string injection works. viser respects Accept-Encoding and
+    # returns the uncompressed file_cache[] when gzip isn't requested.
+    headers["accept-encoding"] = "identity"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        upstream = await client.get(f"{VISER_HTTP}/", headers=headers)
+        body = upstream.content
+        resp_headers = {
+            k: v for k, v in upstream.headers.items()
+            if k.lower() not in _DROP_RESP_HEADERS
+        }
+    # Inject right before </head>. If we can't find it (viser refactor
+    # could change the markup), just pass the body through unchanged.
+    if b"</head>" in body:
+        body = body.replace(b"</head>", _VISER_STYLE_OVERLAY, 1)
+    resp_headers["content-length"] = str(len(body))
+    return Response(
+        content=body,
+        status_code=upstream.status_code,
+        headers=resp_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+
+# Catch-all for any sub-paths the viser SPA might fetch later (none
+# today — it's a single self-contained HTML file — but registered for
+# forward-compat). MUST appear after the `/viser-iframe/` route above
+# so FastAPI tries the more specific match first.
+@router.api_route(
+    "/viser-iframe/{full_path:path}",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
+async def viser_iframe(full_path: str, request: Request) -> Response:
+    return await _proxy_http(f"{VISER_HTTP}/{full_path}", request)
 
 
 # ---------- viser SPA (WS) --------------------------------------------
