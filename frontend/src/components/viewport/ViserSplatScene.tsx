@@ -88,6 +88,12 @@ export function ViserSplatScene() {
   // Forward state changes. Only POST if (cell, frame) actually changed.
   // `wireName` already carries the `model:` / `sequence:` prefix viser
   // uses to dispatch between .ply (static models) and .npz (sequences).
+  //
+  // When wireName is null the React side wants the viewport empty, but
+  // viser_headless persists its scene state across reconnects — without
+  // an explicit clear, an old splat node sticks around and the iframe
+  // keeps painting it even though the workbench says "no model loaded".
+  // Hit /clear to drop the node.
   useEffect(() => {
     if (!controlReachable) return;
     const cell = wireName;
@@ -96,12 +102,14 @@ export function ViserSplatScene() {
       return;
     }
     lastSent.current = { cell, frame };
-    const payload: { cell?: string; frame?: number } = { frame };
-    if (cell) payload.cell = cell;
+    if (cell === null) {
+      fetch(`${controlUrl}/clear`, { method: "POST" }).catch(() => {});
+      return;
+    }
     fetch(`${controlUrl}/set`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ cell, frame }),
     }).catch(() => {
       /* network blip — next state change will retry; no need to surface */
     });
