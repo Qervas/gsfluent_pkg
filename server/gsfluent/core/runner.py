@@ -53,6 +53,13 @@ SIM_SCRIPT_RUNNER = Path(os.environ.get(
 # After a successful run, optionally rebuild the .npz cache so the
 # laptop sync daemon notices the new sequence. Off by default in tests.
 NPZ_REBUILD_AFTER_RUN = os.environ.get("GSFLUENT_NPZ_REBUILD", "1") == "1"
+# Delete the per-frame sim plys + fused plys after the npz is built.
+# The .npz is the canonical artifact downstream (viser_headless + sync
+# daemon both consume it); the intermediate plys total ~6 GB per run
+# (1.5 GB sim plys + 4.5 GB fused plys) so a few runs eat the disk
+# fast. Default ON; set GSFLUENT_KEEP_PLYS=1 to preserve them (e.g.
+# when iterating on the fuse step or debugging a single frame).
+CLEANUP_INTERMEDIATES = os.environ.get("GSFLUENT_KEEP_PLYS", "0") != "1"
 
 # Phase 1.5: point at the library so manifest.json + run.log + recipe.json
 # land in the same dir as the wrapper's frame outputs
@@ -389,6 +396,51 @@ async def _drain(run: Run, run_dir: Path) -> None:
             _write_sequence_meta(run.name, run_dir)
         except Exception as e:
             _log.warning("post-run _meta.json write failed for %s: %s", run.name, e)
+
+    # Now that npz + _meta are in place, the per-frame plys are dead
+    # weight. Drop them so the next run has disk to land on.
+    if run.state == "done" and CLEANUP_INTERMEDIATES:
+        try:
+            _cleanup_intermediates(run.name, run_dir, log_path)
+        except Exception as e:
+            _log.warning("post-run cleanup failed for %s: %s", run.name, e)
+
+
+def _cleanup_intermediates(run_name: str, run_dir: Path, log_path: Path) -> None:
+    """Delete the per-frame .ply files now that the .npz is built.
+
+    Removes:
+      - <SIM_HOME>/output/<run_name>/   (raw MPM sim plys, ~1.5 GB)
+      - <run_dir>/frames/                (fused per-frame plys, ~4.5 GB)
+
+    Keeps the run dir itself + manifest.json + _meta.json + recipe
+    files so the library entry is still discoverable. Appends a one-
+    line audit to run.log so the WS subscriber sees what was freed.
+    """
+    import shutil
+    bytes_freed = 0
+
+    sim_home = Path(os.environ.get(
+        "GSFLUENT_SIM_HOME", "$GSFLUENT_SIM_HOME",
+    ))
+    sim_output = sim_home / "output" / run_name
+    if sim_output.is_dir():
+        bytes_freed += sum(p.stat().st_size for p in sim_output.rglob("*") if p.is_file())
+        shutil.rmtree(sim_output, ignore_errors=True)
+
+    frames_dir = run_dir / "frames"
+    if frames_dir.is_dir():
+        bytes_freed += sum(p.stat().st_size for p in frames_dir.rglob("*") if p.is_file())
+        shutil.rmtree(frames_dir, ignore_errors=True)
+
+    gb = bytes_freed / (1024 ** 3)
+    msg = f"[cleanup] freed {gb:.2f} GB of intermediate plys for {run_name}\n"
+    try:
+        with open(log_path, "a") as f:
+            f.write(msg)
+    except OSError:
+        pass
+    _log.info(msg.strip())
 
 
 def _write_sequence_meta(run_name: str, run_dir: Path) -> None:
