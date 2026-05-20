@@ -55,6 +55,13 @@ export function ViserSplatScene() {
     cell: null,
     frame: null,
   });
+  // Drive at most one /set in flight at a time. Playback advances frames
+  // at ~24 fps; if WAN RTT is even 100 ms, naive POSTs queue up faster
+  // than they drain, the browser hits its 6-per-origin fetch cap and
+  // starts returning ERR_INSUFFICIENT_RESOURCES — which then takes the
+  // viser WASM sorter down with it (memory-access OOB) and React unmounts
+  // mid-render (error #300). One in flight, abort+replace on update.
+  const setInflight = useRef<AbortController | null>(null);
 
   // Sidecar control: forward (cell, frame) on change. We also list
   // available cells once on mount to report mismatches cleanly.
@@ -102,17 +109,27 @@ export function ViserSplatScene() {
       return;
     }
     lastSent.current = { cell, frame };
+    // Abort whatever's still in flight; the previous frame's state is
+    // already stale.
+    setInflight.current?.abort();
+    const ac = new AbortController();
+    setInflight.current = ac;
     if (cell === null) {
-      fetch(`${controlUrl}/clear`, { method: "POST" }).catch(() => {});
+      fetch(`${controlUrl}/clear`, { method: "POST", signal: ac.signal })
+        .catch(() => {})
+        .finally(() => { if (setInflight.current === ac) setInflight.current = null; });
       return;
     }
     fetch(`${controlUrl}/set`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cell, frame }),
-    }).catch(() => {
-      /* network blip — next state change will retry; no need to surface */
-    });
+      signal: ac.signal,
+    })
+      .catch(() => {
+        /* aborted or transient network — next state change will retry */
+      })
+      .finally(() => { if (setInflight.current === ac) setInflight.current = null; });
   }, [controlReachable, controlUrl, wireName, currentFrameIdx]);
 
   // ---- render ----------------------------------------------------------
