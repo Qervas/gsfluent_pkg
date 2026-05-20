@@ -77,18 +77,6 @@ export type MaterialDefaults = Record<string, Record<string, number>>;
 // reported."
 export type BackendHealth = { status: string; pkg_root: string };
 
-export type SyncStatus = {
-  online: boolean;
-  last_check_unix?: number;
-  last_success_unix?: number;
-  server_url?: string;
-  sequences_seen?: number;
-  files_synced?: number;
-  bytes_downloaded?: number;
-  error?: string | null;
-  per_sequence?: Record<string, Record<string, unknown>>;
-};
-
 export type ViserState = {
   cell: string;
   frame: number;
@@ -105,6 +93,5 @@ export type DiagPart = {
 
 export type DiagSnapshot = {
   backend: DiagPart;
-  sync:    DiagPart & { raw?: SyncStatus };
   viser:   DiagPart & { raw?: ViserState };
 };

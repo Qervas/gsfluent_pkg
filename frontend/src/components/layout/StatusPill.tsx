@@ -25,10 +25,13 @@ export function StatusPill() {
   const diag = useDiag();
   const [open, setOpen] = useState(false);
 
+  // Sync daemon dot is irrelevant in the server-only deployment — everything
+  // (sim, npz cache, viser, UI) runs on the same host, so there's no laptop
+  // download to monitor. Drop it from the pill to stop showing a permanently-
+  // yellow indicator that just confuses the user.
   const parts: { key: string; label: string; part: DiagPart }[] = [
-    { key: "backend", label: "Backend",     part: diag.backend },
-    { key: "sync",    label: "Sync daemon", part: diag.sync    },
-    { key: "viser",   label: "Viser",       part: diag.viser   },
+    { key: "backend", label: "Backend", part: diag.backend },
+    { key: "viser",   label: "Viser",   part: diag.viser   },
   ];
   const anyDown = parts.some((p) => !p.part.ok);
 

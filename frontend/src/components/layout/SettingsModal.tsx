@@ -108,7 +108,7 @@ export function SettingsModal() {
               setDraft(e.target.value);
               setTestState({ kind: "idle" });
             }}
-            placeholder="http://your-backend:port  (leave blank to use vite proxy)"
+            placeholder="http://host:port  (leave blank to use same-origin proxy)"
             className="px-3 h-9 bg-elevated border border-border rounded text-sm
                        text-text-primary placeholder:text-text-muted focus:outline-none
                        focus:border-accent font-mono"
