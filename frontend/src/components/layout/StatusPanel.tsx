@@ -1,8 +1,46 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronUp } from "lucide-react";
+import { ChevronUp, Loader2 } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { useActiveCell } from "@/lib/use-active-cell";
 import { deriveMode, modeAccentClass, modeLabel } from "@/lib/derive-mode";
+
+/** Live tail-of-log indicator while a sim is running.
+ *
+ * Sits as the last line in the console drawer. Shows a spinning icon
+ * + "running" + "Ns since last log line" so the user can tell the
+ * difference between "sim is just chewing on warp-jit / fuse-drain
+ * (no output for ~30s)" and "sim died and the server stopped
+ * streaming." The age ticks every 500 ms purely from React state —
+ * no extra polling. */
+function LiveTicker(): JSX.Element {
+  const simLastLogAt = useStore((s) => s.simLastLogAt);
+  const simNFrames = useStore((s) => s.simNFrames);
+  const simTotalFrames = useStore((s) => s.simTotalFrames);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, []);
+  const ageMs = simLastLogAt ? now - simLastLogAt : 0;
+  const ageStr =
+    ageMs < 1000 ? "now" :
+    ageMs < 60_000 ? `${Math.round(ageMs / 1000)}s ago` :
+    `${Math.round(ageMs / 60_000)}m ago`;
+  const progress = simTotalFrames > 0
+    ? `${simNFrames}/${simTotalFrames}`
+    : "starting";
+  return (
+    <div className="flex items-center gap-2 text-accent">
+      <Loader2 size={11} className="animate-spin" />
+      <span>running</span>
+      <span className="text-text-muted">·</span>
+      <span className="text-text-muted">{progress}</span>
+      <span className="text-text-muted">·</span>
+      <span className="text-text-muted">last log {ageStr}</span>
+    </div>
+  );
+}
+
 
 /** Floating status pill — replaces the fixed bottom StatusStrip.
  *
@@ -176,6 +214,7 @@ export function StatusPanel() {
                 </div>
               ))
             )}
+            {simState === "running" && <LiveTicker />}
           </div>
         </div>
       )}
