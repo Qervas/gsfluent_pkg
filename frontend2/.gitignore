@@ -1,9 +1,0 @@
-node_modules/
-dist/
-.DS_Store
-*.local
-.env
-.env.local
-
-# TanStack Router generates this at build time.
-src/routeTree.gen.ts

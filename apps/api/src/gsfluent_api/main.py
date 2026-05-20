@@ -27,6 +27,7 @@ from .routes.runs import router as runs_router
 from .routes.stream import router as stream_router
 from .routes.system import router as system_router
 from .routes.v1_proxy import router as v1_proxy_router
+from .routes.viser_proxy import router as viser_proxy_router
 from .storage import ensure_buckets
 
 
@@ -81,6 +82,10 @@ app.include_router(stream_router)
 # Reverse-proxy /api/* (and /api/stream WS) to v1 backend on internal
 # port. Registered BEFORE the SPA catchall so /api/* hits the proxy.
 app.include_router(v1_proxy_router)
+# Reverse-proxy /viser-iframe/* (HTTP+WS) + /viser-ctrl/* (HTTP) to
+# viser_headless on the sxyin loopback. Must register before the SPA
+# catchall so /viser-* hits the proxy, not index.html.
+app.include_router(viser_proxy_router)
 
 
 # ---------- SPA serving ---------------------------------------------------
@@ -139,8 +144,10 @@ if (_spa_dir / "index.html").is_file():
     async def spa_fallback(full_path: str) -> Response:
         # /v1/* + /metrics are handled by their routers above. Legacy
         # v1 API paths (/api/*) must 404 here, not fall back to
-        # index.html.
-        if full_path.startswith(("v1/", "api/", "metrics")):
+        # index.html. Same for viser-iframe / viser-ctrl proxies.
+        if full_path.startswith((
+            "v1/", "api/", "metrics", "viser-iframe", "viser-ctrl",
+        )):
             raise HTTPException(404, f"unknown path /{full_path}")
 
         candidate = _spa_dir / full_path
