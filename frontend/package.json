@@ -1,14 +1,23 @@
 {
   "name": "gsfluent-frontend",
+  "description": "GaussianFluent laptop-local SPA + viser launcher. `npm install` bootstraps the Python venv, pip deps, npm deps, and the SPA build; `npm start` brings up viser_headless + vite preview against the shared your-server backend.",
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "start": "bash ../scripts/_start.sh",
+    "install:python": "PYTHON_ONLY=1 bash ../scripts/_install.sh",
+    "clean": "node ./scripts/clean.mjs",
+    "postinstall": "GSFLUENT_SKIP_NPM_INSTALL=1 bash ../scripts/_install.sh"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
