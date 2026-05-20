@@ -262,7 +262,13 @@ export const useStore = create<State>((set) => ({
   playing: true,
   speedX: 1,
   loop: true,
-  fpsHint: 24,
+  // Default playback at 12 fps, not 24. Each frame pushes the full
+  // splat-centers array over the WS (~8 MB for cluster_6_15-class
+  // scenes); 24 fps × 8 MB = ~200 MB/s, which neither the WAN link
+  // nor the in-browser WASM sorter can sustain, so playback stalls
+  // for seconds at a time. 12 fps is roughly the steady-state ceiling
+  // here and stays smooth.
+  fpsHint: 12,
   scrubbing: false,
   sceneScale: 10,
   sceneCenter: [0, 0, 0],
