@@ -29,6 +29,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import numpy as np
 import uvicorn
 import viser
@@ -828,6 +829,60 @@ def main() -> int:
             media_type="application/octet-stream",
             filename=p.name,
         )
+
+    @api.post("/sync_cell")
+    def sync_cell(name: str, url: str) -> dict:
+        """Download an .npz from `url` and mmap it as cell `name`.
+
+        Used by the SPA's on-demand cache flow: when a sequence has no
+        local .npz, the SPA POSTs /api/sequences/{name}/cache/build to
+        the backend to build it server-side, then calls this endpoint
+        with the download URL so the client picks up the artifact and
+        registers the cell. Removes the need for sync_daemon for the
+        single-cell case.
+
+        Path-traversal defense same as /reload: `name` must match
+        _SAFE_NAME and the resolved file must stay under npz_dir.
+        """
+        if not _SAFE_NAME.match(name):
+            return {"ok": False, "error": f"invalid cell name: {name!r}"}
+        npz_path = (npz_root / f"{name}.npz").resolve()
+        try:
+            npz_path.relative_to(npz_root.resolve())
+        except ValueError:
+            return {"ok": False, "error": f"cell path escapes npz_dir: {name!r}"}
+
+        # Stream-download to a `.partial` sibling then atomic-rename, so
+        # an interrupted download doesn't leave a corrupt .npz that
+        # mmap_cell would later choke on.
+        partial = npz_path.with_suffix(".npz.partial")
+        try:
+            with httpx.stream("GET", url, timeout=600.0,
+                              follow_redirects=True) as r:
+                if r.status_code != 200:
+                    return {"ok": False, "error":
+                            f"download failed: HTTP {r.status_code}"}
+                with open(partial, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+            partial.replace(npz_path)
+        except Exception as e:
+            partial.unlink(missing_ok=True)
+            return {"ok": False, "error": f"download failed: {e}"}
+
+        try:
+            new_data = mmap_cell(npz_path)
+        except Exception as e:
+            return {"ok": False, "error": f"mmap failed: {e}"}
+        with lock:
+            was_new = name not in cells
+            cells[name] = new_data
+            if state["cell"] == name:
+                state["scene_dirty"] = True
+                state["pushed_frame"] = -1
+        return {"ok": True, "cell": name, "added": was_new,
+                "bytes": npz_path.stat().st_size,
+                "n_frames": new_data["frames"].shape[0]}
 
     @api.post("/reload")
     def reload_cell(cell: str | None = None) -> dict:

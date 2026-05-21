@@ -10,7 +10,13 @@ in api/runs.py so the frontend WebSocket bootstrap (which hardcodes
 `/api/runs/<name>/frame/0.ply`) keeps working — see `api/runs.py:get_run_frame`.
 """
 import json
+import re
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -366,6 +372,114 @@ def get_viser_cache(name: str):
         media_type="application/octet-stream",
         filename=f"{name}.npz",
     )
+
+
+# ── cache build (on-demand) ─────────────────────────────────────────────────
+# When the client selects a sequence whose viser .npz hasn't been built yet,
+# it POSTs /cache/build to kick off batch_convert_to_npz.py server-side. The
+# old flow was "tell the user to ssh in and run the script themselves",
+# which is hostile UX. Now the backend owns the lifecycle and the client
+# polls /cache/build-status until done, then downloads the artifact.
+#
+# Job state lives in memory only (lost on restart). That's fine because the
+# subprocess writes its output to disk — on restart, the next /cache/build
+# call sees the existing .npz and exits early.
+
+_SEQ_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+_build_jobs: dict[str, dict] = {}
+_build_lock = Lock()
+
+
+def _run_build_subprocess(name: str, job: dict) -> None:
+    """Worker thread: run batch_convert_to_npz.py for one sequence, update `job`."""
+    converter = PKG_ROOT / "server" / "tools" / "batch_convert_to_npz.py"
+    cmd = [sys.executable, str(converter), name]
+    try:
+        # 10-minute cap. Real sequences finish in 30-90s; anything past
+        # 10min means the script is stuck and we'd rather surface that
+        # than block the job dict indefinitely.
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        with _build_lock:
+            job["finished_at"] = time.time()
+            job["stdout_tail"] = (r.stdout or "")[-800:]
+            if r.returncode == 0:
+                job["state"] = "done"
+            else:
+                job["state"] = "error"
+                job["error"] = ((r.stderr or "")[-500:]
+                                or f"subprocess exit {r.returncode}")
+    except subprocess.TimeoutExpired:
+        with _build_lock:
+            job["state"] = "error"
+            job["error"] = "timeout (>10min)"
+            job["finished_at"] = time.time()
+    except Exception as e:
+        with _build_lock:
+            job["state"] = "error"
+            job["error"] = repr(e)
+            job["finished_at"] = time.time()
+
+
+@router.post("/{name}/cache/build")
+def build_viser_cache(name: str) -> dict:
+    """Kick off the viser .npz build for `name` as a background subprocess.
+
+    Idempotent: if a build is already running for this sequence, returns
+    the existing job state without spawning a duplicate. If the .npz
+    already exists on disk, returns `{state: "done"}` immediately.
+
+    Poll `GET /cache/build-status/{name}` for progress.
+    """
+    if not _SEQ_NAME_RE.match(name):
+        raise HTTPException(422, f"invalid sequence name: {name!r}")
+    if not Sequence.exists(name):
+        raise HTTPException(404, f"sequence not found: {name}")
+
+    # Fast path: cache already on disk.
+    if (_VISER_CACHE / f"{name}.npz").is_file():
+        return {"name": name, "state": "done",
+                "note": "cache already exists on disk"}
+
+    with _build_lock:
+        existing = _build_jobs.get(name)
+        if existing and existing.get("state") == "building":
+            return existing
+        job: dict = {
+            "name": name,
+            "state": "building",
+            "started_at": time.time(),
+            "finished_at": None,
+            "stdout_tail": "",
+            "error": None,
+        }
+        _build_jobs[name] = job
+
+    threading.Thread(
+        target=_run_build_subprocess, args=(name, job), daemon=True
+    ).start()
+    return job
+
+
+@router.get("/{name}/cache/build-status")
+def get_viser_cache_build_status(name: str) -> dict:
+    """Poll the build job for `name`.
+
+    States:
+      - `"idle"`     no build has ever been requested in this process
+      - `"building"` subprocess is running
+      - `"done"`     subprocess exited 0, .npz is on disk
+      - `"error"`    subprocess failed; `error` field has the tail of stderr
+    """
+    if not _SEQ_NAME_RE.match(name):
+        raise HTTPException(422, f"invalid sequence name: {name!r}")
+    with _build_lock:
+        job = _build_jobs.get(name)
+        if job is not None:
+            return dict(job)
+    # No job tracked → reflect disk state.
+    if (_VISER_CACHE / f"{name}.npz").is_file():
+        return {"name": name, "state": "done", "note": "cache exists (no job tracked)"}
+    return {"name": name, "state": "idle"}
 
 
 @router.get("/{name}/cache/frames.bin")

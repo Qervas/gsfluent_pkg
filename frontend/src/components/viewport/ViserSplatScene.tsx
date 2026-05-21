@@ -211,14 +211,72 @@ export function ViserSplatScene() {
   const cellMissing =
     serverCells !== null && cellName !== null && !serverCells.includes(cellName);
   // A sim that's mid-flight has the cell selected in the SPA but no
-  // .npz has landed yet — the original "run batch_convert_to_npz" copy
-  // is wrong here; the user just needs to wait. Distinguish so we can
-  // show a friendlier waiting state.
+  // .npz has landed yet — just needs to wait.
   const simState = useStore((s) => s.simState);
   const simIsRunning =
     simState === "running" &&
     cellName !== null &&
     cellName.startsWith("sequence:");
+
+  // ── on-demand cache build ──────────────────────────────────────────────
+  // When the selected cell is a sequence with no local .npz, instead of
+  // telling the user to ssh in and run a Python script (the old UX),
+  // expose a button that drives the full build → sync → reload flow:
+  //
+  //   1. POST /api/sequences/{name}/cache/build    (server-side build)
+  //   2. poll /api/sequences/{name}/cache/build-status until done
+  //   3. POST {viser}/sync_cell?name=…&url=…       (download + mmap)
+  //
+  // sync_cell hits the backend through the vite proxy when the SPA was
+  // built without VITE_BACKEND_URL (the default — local dev / preview),
+  // and direct otherwise.
+  const seqName =
+    cellName?.startsWith("sequence:") ? cellName.slice("sequence:".length) : null;
+  type BuildState = "idle" | "building" | "syncing" | "error";
+  const [buildState, setBuildState] = useState<BuildState>("idle");
+  const [buildError, setBuildError] = useState<string | null>(null);
+
+  async function startBuild(name: string) {
+    const apiBase = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+    const buildBase = apiBase || ""; // empty → relative, proxied by vite
+    setBuildError(null);
+    setBuildState("building");
+    try {
+      const r1 = await fetch(`${buildBase}/api/sequences/${encodeURIComponent(name)}/cache/build`, { method: "POST" });
+      if (!r1.ok) throw new Error(`build kickoff failed: HTTP ${r1.status}`);
+
+      // Poll for completion. 2s tick is fine for builds in the 30-90s range.
+      while (true) {
+        await new Promise((res) => setTimeout(res, 2000));
+        const r2 = await fetch(`${buildBase}/api/sequences/${encodeURIComponent(name)}/cache/build-status`);
+        if (!r2.ok) throw new Error(`status poll failed: HTTP ${r2.status}`);
+        const s = await r2.json();
+        if (s.state === "done") break;
+        if (s.state === "error") throw new Error(s.error || "build failed");
+        // state "building" / "idle" — keep polling.
+      }
+
+      // viser pulls from the backend. Use VITE_BACKEND_URL when set
+      // (direct), otherwise route through the same origin so vite's
+      // proxy handles it.
+      const downloadUrl =
+        (apiBase || window.location.origin) +
+        `/api/sequences/${encodeURIComponent(name)}/cache/viser.npz`;
+      setBuildState("syncing");
+      const r3 = await fetch(
+        `${controlUrl}/sync_cell?name=${encodeURIComponent(name)}&url=${encodeURIComponent(downloadUrl)}`,
+        { method: "POST" },
+      );
+      const d3 = await r3.json();
+      if (!d3.ok) throw new Error(d3.error || "sync_cell failed");
+      // Success: cellMissing will flip false on the next /state poll
+      // (the 500ms tick above), so we don't need to force-refresh here.
+      setBuildState("idle");
+    } catch (e: unknown) {
+      setBuildError(e instanceof Error ? e.message : String(e));
+      setBuildState("error");
+    }
+  }
 
   return (
     <div className="relative h-full w-full bg-canvas">
@@ -229,9 +287,6 @@ export function ViserSplatScene() {
           width: "100%",
           height: "100%",
           border: "none",
-          // tailwind `canvas` (#0a0f1a) — keep iframe background in
-          // lockstep with the R3F Canvas's parent div so toggling
-          // modes doesn't flash a different bg color.
           background: "#0a0f1a",
           display: "block",
         }}
@@ -239,18 +294,53 @@ export function ViserSplatScene() {
         allowFullScreen
       />
       {cellMissing && (
-        // top-[68px] parks the banner below the TopBar so the breadcrumb
-        // doesn't sit on top of it. The running-sim variant is muted
-        // (text-text-muted, no warning border) because waiting is expected.
         simIsRunning ? (
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/85 border border-border text-text-muted text-xs rounded flex items-center gap-2 backdrop-blur">
             <Loader2 size={12} className="animate-spin text-accent" />
             <span>Waiting for first frame from sim…</span>
           </div>
+        ) : seqName ? (
+          <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-3 max-w-[28rem]">
+            {buildState === "idle" && (
+              <>
+                <span>Sequence cache not on this client.</span>
+                <button
+                  type="button"
+                  className="px-2 py-0.5 rounded bg-accent text-canvas hover:opacity-90 text-xs"
+                  onClick={() => startBuild(seqName)}
+                >
+                  Build
+                </button>
+              </>
+            )}
+            {buildState === "building" && (
+              <>
+                <Loader2 size={12} className="animate-spin text-accent" />
+                <span>Building cache on server…</span>
+              </>
+            )}
+            {buildState === "syncing" && (
+              <>
+                <Loader2 size={12} className="animate-spin text-accent" />
+                <span>Downloading cache locally…</span>
+              </>
+            )}
+            {buildState === "error" && (
+              <>
+                <span className="text-warning">{buildError ?? "build failed"}</span>
+                <button
+                  type="button"
+                  className="px-2 py-0.5 rounded bg-elevated text-text-primary hover:opacity-90 text-xs border border-border"
+                  onClick={() => startBuild(seqName)}
+                >
+                  Retry
+                </button>
+              </>
+            )}
+          </div>
         ) : (
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur">
-            Cell <code>{cellName}</code> not in viser cache. Run{" "}
-            <code>python server/tools/batch_convert_to_npz.py {cellName?.replace(/^sequence:/, "")}</code>.
+            Cell <code>{cellName}</code> not loaded.
           </div>
         )
       )}
