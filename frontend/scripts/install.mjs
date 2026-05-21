@@ -70,6 +70,9 @@ run(VENV_PY, ["-m", "pip", "install", "--quiet",
   "uvicorn[standard]>=0.30",
   "httpx>=0.27",
   "eval_type_backport>=0.2",
+  // plyfile: required by viser_headless.mmap_model_cell to parse 3DGS
+  // .ply files. Missing it crashes model loads with parse_failed.
+  "plyfile>=1.0",
 ]);
 
 // Patch viser's bundled shader to remove the lambda2 < 0 cull that

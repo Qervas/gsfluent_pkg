@@ -66,7 +66,7 @@ _VISER_K = 1.0
 # with GSFLUENT_MODEL_CACHE_DIR if the repo lives on a small disk and
 # you'd rather use /tmp or an XDG cache dir.
 _DEFAULT_MODEL_CACHE = (
-    Path(__file__).resolve().parents[1] / "work" / "cache" / "model_files"
+    Path(__file__).resolve().parents[2] / "work" / "cache" / "model_files"
 )
 
 
