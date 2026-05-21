@@ -86,10 +86,15 @@ const { result } = concurrently(
 // ---- wait for ports, open browser -----------------------------------------
 
 if (OPEN_BROWSER) {
+  // HTTP probe instead of raw TCP — vite preview binds IPv6-only by
+  // default on many Linux setups, and tcp:127.0.0.1 misses that. The
+  // HTTP probe goes through the OS resolver and picks whichever
+  // family is up.
   waitOn({
-    resources: [`tcp:127.0.0.1:${UI_PORT}`, `tcp:127.0.0.1:${CONTROL_PORT}`],
+    resources: [`http://localhost:${UI_PORT}/`, `http://127.0.0.1:${CONTROL_PORT}/state`],
     timeout: 15000,
     interval: 200,
+    validateStatus: () => true,
   })
     .then(() => open(`http://localhost:${UI_PORT}/`))
     .catch((err) => console.warn(`WARN: ${err.message} — ports didn't bind, not opening browser`));

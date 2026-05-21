@@ -16,7 +16,7 @@
 //   GSFLUENT_SKIP_NPM_INSTALL  if 1, skip `npm ci` (set by postinstall)
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -95,6 +95,18 @@ if (process.env.PYTHON_ONLY === "1") {
 // placeholder so a fresh install works before any real sequences are
 // synced down. Name starts with `_`, which the backend regex rejects, so
 // it can never collide with a real cell.
+
+// ---- bootstrap .env from .env.example if missing --------------------------
+// Without .env, `npm start` falls back to localhost:8080 and every /api/*
+// call 502s. Copy the template so teammates only have to edit one line
+// (BACKEND_URL) instead of figuring out the full key set.
+
+const ENV_FILE = resolve(PKG_ROOT, ".env");
+const ENV_EXAMPLE = resolve(PKG_ROOT, ".env.example");
+if (!existsSync(ENV_FILE) && existsSync(ENV_EXAMPLE)) {
+  copyFileSync(ENV_EXAMPLE, ENV_FILE);
+  note(`bootstrapped .env from .env.example — edit ${ENV_FILE} and set BACKEND_URL`);
+}
 
 mkdirSync(VISER_NPZ_DIR, { recursive: true });
 const hasNpz = readdirSync(VISER_NPZ_DIR).some((f) => f.endsWith(".npz"));
