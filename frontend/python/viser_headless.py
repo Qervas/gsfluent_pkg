@@ -439,7 +439,16 @@ def main() -> int:
         print(f"ERROR: every .npz in {npz_root} was malformed")
         return 2
 
-    def resolve_cell_lazily(name: str) -> bool:
+    def _set_loading(name: str | None, phase: str | None, error: str | None = None) -> None:
+        """Brief-locked update to state["loading"] so concurrent /state polls
+        can read in-flight progress. Pass (None, None) to clear."""
+        with lock:
+            if name is None:
+                state["loading"] = None
+            else:
+                state["loading"] = {"name": name, "phase": phase, "error": error}
+
+    def resolve_cell_lazily(name: str) -> tuple[bool, str | None]:
         """If `name` is not yet a loaded cell, try to load it.
 
         Resolution order:
@@ -447,15 +456,21 @@ def main() -> int:
           2. sequence:<seqName> → look for <seqName>.npz under npz_root
           3. bare <name>        → try sequence first, then model (transition fallback)
 
-        Returns True if the cell is now in `cells`, False otherwise.
+        Returns (ok, error). `error` is a short tag from the set:
+          - "not_found"    backend doesn't know this model
+          - "fetch_failed" network / HTTP error fetching the .ply
+          - "parse_failed" ply or npz parse failed
+          - "io_failed"    other I/O error
         Updates `cells` in place. Idempotent — a re-call with an
-        already-loaded name is a no-op.
+        already-loaded name is a no-op. Posts intermediate phases via
+        _set_loading so the SPA can show progress.
         """
         import urllib.request, json as _json
         if name in cells:
-            return True
+            return True, None
 
-        def _try_model(model_name: str) -> bool:
+        def _try_model(model_name: str) -> tuple[bool, str | None]:
+            _set_loading(name, "fetching")
             try:
                 with urllib.request.urlopen(
                     f"{args.server.rstrip('/')}/api/models",
@@ -464,40 +479,45 @@ def main() -> int:
                     listing = _json.loads(r.read())
             except Exception as e:
                 print(f"  resolve {name}: failed to list models: {e}")
-                return False
+                return False, "fetch_failed"
             entry = next((m for m in listing if m["name"] == model_name), None)
             if entry is None:
-                return False
+                return False, "not_found"
             try:
                 local_ply = fetch_model_ply(args.server, entry["path"])
             except Exception as e:
                 print(f"  resolve {name}: model fetch failed: {e}")
-                return False
+                return False, "fetch_failed"
+            _set_loading(name, "parsing")
             try:
                 cells[name] = mmap_model_cell(local_ply)
                 print(f"  loaded model cell {name} (from {local_ply})")
-                return True
+                return True, None
             except Exception as e:
                 print(f"  resolve {name}: ply parse failed: {e}")
-                return False
+                return False, "parse_failed"
 
-        def _try_sequence(seq_name: str) -> bool:
+        def _try_sequence(seq_name: str) -> tuple[bool, str | None]:
             p = npz_root / f"{seq_name}.npz"
             if not p.is_file():
-                return False
+                return False, "not_found"
+            _set_loading(name, "parsing")
             try:
                 cells[name] = mmap_cell(p)
                 print(f"  loaded sequence cell {name} from {p}")
-                return True
+                return True, None
             except Exception as e:
                 print(f"  resolve {name}: npz mmap failed: {e}")
-                return False
+                return False, "parse_failed"
 
         if name.startswith("model:"):
             return _try_model(name[len("model:"):])
         if name.startswith("sequence:"):
             return _try_sequence(name[len("sequence:"):])
-        return _try_sequence(name) or _try_model(name)
+        ok, err = _try_sequence(name)
+        if ok:
+            return ok, err
+        return _try_model(name)
 
     # --- viser scene -----------------------------------------------------
     server = viser.ViserServer(host=args.bind, port=args.viser_port)
@@ -611,6 +631,11 @@ def main() -> int:
         # If True, the next render-loop tick should also push grid/gizmo
         # repositioning + a fresh initial_camera. Set on cell-swap.
         "scene_dirty": True,
+        # In-flight lazy-resolution progress. None when idle, else a
+        # {"name": "model:foo", "phase": "fetching|parsing", "error": null}
+        # dict. The SPA polls /state every 500ms and surfaces this as a
+        # status overlay so loads of large 3DGS models don't look frozen.
+        "loading": None,
     }
     lock = threading.Lock()
 
@@ -694,14 +719,23 @@ def main() -> int:
 
     @api.post("/set")
     def set_state(body: SetBody) -> dict:
+        # Slow-path: cell needs lazy resolution. Don't hold the lock
+        # during the network fetch + mmap or every /state poll blocks
+        # for the duration of the load (30-90s for a real .ply). We
+        # set state["loading"] before/during so SPA polls show
+        # phase progress, then re-acquire briefly to commit the cell.
+        if body.cell is not None and body.cell not in cells:
+            ok, err = resolve_cell_lazily(body.cell)
+            if not ok:
+                _set_loading(body.cell, "error", err)
+                return {"ok": False, "error": err or "unknown_cell",
+                        "cell": body.cell, "cells": list(cells)}
+            _set_loading(None, None)
+
         with lock:
             if body.cell is not None:
-                if body.cell not in cells:
-                    # Try lazy resolution (model:/sequence: prefix, or
-                    # bare-name fallback during the transition phase).
-                    if not resolve_cell_lazily(body.cell):
-                        return {"ok": False, "error": f"unknown cell: {body.cell}",
-                                "cells": list(cells)}
+                # By the time we reach here, the cell is guaranteed to
+                # be in `cells` (or it's a no-op when already-active).
                 if body.cell != state["cell"]:
                     state["cell"] = body.cell
                     state["scene_dirty"] = True   # grid + camera resize next tick
@@ -759,6 +793,7 @@ def main() -> int:
     def get_state() -> dict:
         with lock:
             cell = state["cell"]
+            loading = state.get("loading")
             # cell may be None at startup (no auto-load). The frontend
             # treats null as "viewport empty, waiting for outliner pick".
             if cell is None or cell not in cells:
@@ -768,6 +803,7 @@ def main() -> int:
                     "n_frames": 0,
                     "cells": list(cells),
                     "bbox": None,
+                    "loading": loading,
                 }
             cur_c = cells[cell]
             return {
@@ -775,6 +811,7 @@ def main() -> int:
                 "frame": state["frame"],
                 "n_frames": cur_c["frames"].shape[0],
                 "cells": list(cells),
+                "loading": loading,
                 "bbox": {
                     "lo": cur_c["bbox_lo"].tolist(),
                     "hi": cur_c["bbox_hi"].tolist(),

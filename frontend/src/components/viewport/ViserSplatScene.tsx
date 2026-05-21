@@ -69,6 +69,12 @@ export function ViserSplatScene() {
   // available cells once on mount to report mismatches cleanly.
   const [serverCells, setServerCells] = useState<string[] | null>(null);
   const [controlReachable, setControlReachable] = useState<boolean | null>(null);
+  // In-flight cell resolution on viser's side (model fetch / mmap).
+  // Mirrored from /state.loading so the SPA can show phase progress
+  // while /set is blocked waiting for resolve_cell_lazily.
+  const [loading, setLoading] = useState<{
+    name: string; phase: string; error: string | null;
+  } | null>(null);
 
   const setViserState = useStore((s) => s.setViserState);
   useEffect(() => {
@@ -80,6 +86,7 @@ export function ViserSplatScene() {
         if (cancelled) return;
         setControlReachable(true);
         setServerCells(d.cells ?? []);
+        setLoading(d.loading ?? null);
         setViserState({
           cell: d.cell ?? null,
           frame: d.frame ?? 0,
@@ -278,6 +285,37 @@ export function ViserSplatScene() {
     }
   }
 
+  // TODO(human): tune the labels + error→message mapping below.
+  //
+  // These are the strings teammates see when loading a 3DGS model. Tradeoffs:
+  //
+  // - Tone: "Fetching model…" vs "Pulling model from server…" vs
+  //         "Downloading…". Pick the voice that matches the rest of the
+  //         workbench. Currently the workbench uses sparse, technical copy
+  //         ("Building cache on server…", "Waiting for first frame from sim…").
+  // - Length: shorter scans faster in peripheral vision; longer gives more
+  //           info when the user is staring at the spinner wondering why.
+  // - Error UX: backend emits 4 short tags. Map them to messages your
+  //             teammates will know how to act on (retry vs file a bug vs
+  //             check the backend is up).
+  //
+  // 5–10 lines total. Return null from progressLabel to suppress the pill
+  // entirely on a given phase (e.g. if you want "parsing" to be silent
+  // because it's only a few seconds).
+  function progressLabel(phase: string, name: string): string | null {
+    // EXAMPLE — replace with your preferred voice:
+    if (phase === "fetching") return `Fetching ${name.replace(/^model:/, "")}…`;
+    if (phase === "parsing") return "Parsing splats…";
+    return null;
+  }
+  function errorLabel(tag: string | null): string {
+    // EXAMPLE — replace with your preferred messages:
+    if (tag === "not_found") return "Model not found on backend.";
+    if (tag === "fetch_failed") return "Couldn't fetch model from backend.";
+    if (tag === "parse_failed") return "Model loaded but couldn't be parsed.";
+    return "Load failed.";
+  }
+
   return (
     <div className="relative h-full w-full bg-canvas">
       <iframe
@@ -293,7 +331,18 @@ export function ViserSplatScene() {
         sandbox="allow-scripts allow-same-origin allow-pointer-lock"
         allowFullScreen
       />
-      {cellMissing && (
+      {loading && loading.phase !== "error" && progressLabel(loading.phase, loading.name) && (
+        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-2">
+          <Loader2 size={12} className="animate-spin text-accent" />
+          <span>{progressLabel(loading.phase, loading.name)}</span>
+        </div>
+      )}
+      {loading && loading.phase === "error" && (
+        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur">
+          {errorLabel(loading.error)}
+        </div>
+      )}
+      {cellMissing && !loading && (
         simIsRunning ? (
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/85 border border-border text-text-muted text-xs rounded flex items-center gap-2 backdrop-blur">
             <Loader2 size={12} className="animate-spin text-accent" />
