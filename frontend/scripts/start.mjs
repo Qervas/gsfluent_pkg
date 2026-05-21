@@ -67,7 +67,16 @@ const { result } = concurrently(
   [
     {
       name: "viser",
-      command: `"${VENV_PY}" "${VISER_SCRIPT}" --npz_dir "${VISER_NPZ_DIR}" --viser_port ${VISER_PORT} --control_port ${CONTROL_PORT}`,
+      // --server is required: viser_headless fetches model .ply files
+      // from the backend on model-cell resolution, and downloads npz
+      // caches via the new /sync_cell endpoint. Default in the script
+      // is http://localhost:8080, which doesn't match this deployment.
+      command:
+        `"${VENV_PY}" "${VISER_SCRIPT}"` +
+        ` --npz_dir "${VISER_NPZ_DIR}"` +
+        ` --viser_port ${VISER_PORT}` +
+        ` --control_port ${CONTROL_PORT}` +
+        (BACKEND_URL ? ` --server "${BACKEND_URL}"` : ""),
     },
     {
       name: "vite",
