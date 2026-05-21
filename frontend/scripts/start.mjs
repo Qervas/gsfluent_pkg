@@ -77,7 +77,7 @@ const { result } = concurrently(
     },
   ],
   {
-    killOthers: ["failure", "success"],
+    killOthersOn: ["failure", "success"],
     prefixColors: ["cyan", "magenta"],
     restartTries: 0,
   },
