@@ -9,10 +9,10 @@ sim wrapper. Lets us find broken recipes / mismatched pairings in
 seconds instead of waiting for a real sim crash.
 
 Usage:
-    python tools/check_recipe_compat.py
-    python tools/check_recipe_compat.py --server http://localhost:8080
-    python tools/check_recipe_compat.py --models cluster_6_15 --recipes jelly,metal
-    python tools/check_recipe_compat.py --json    # machine-readable output
+    python server/tools/check_recipe_compat.py
+    python server/tools/check_recipe_compat.py --server http://localhost:8080
+    python server/tools/check_recipe_compat.py --models cluster_6_15 --recipes jelly,metal
+    python server/tools/check_recipe_compat.py --json    # machine-readable output
 
 Defaults to the workbench's local tunnel at http://localhost:8080.
 """

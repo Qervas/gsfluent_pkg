@@ -27,7 +27,7 @@ We auto-pick the schema:
                                               fuse mode)
 
 Usage:
-    python tools/sequence_to_viser_npz.py <sequence_name>
+    python server/tools/sequence_to_viser_npz.py <sequence_name>
 """
 from __future__ import annotations
 

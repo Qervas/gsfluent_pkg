@@ -5,7 +5,7 @@
  * pill can render without further logic.
  *
  * sync_daemon used to be a third leg of this hook (back when the SPA
- * ran on the laptop and downloaded npz cells from the server). The
+ * ran on the client and downloaded npz cells from the server). The
  * server-only deployment doesn't have a sync daemon — everything is
  * on one host — so that leg was removed.
  */

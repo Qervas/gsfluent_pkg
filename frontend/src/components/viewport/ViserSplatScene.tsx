@@ -192,12 +192,12 @@ export function ViserSplatScene() {
           <div className="mb-2 text-text-primary">Splat viewer not running.</div>
           <div className="text-xs">Control API not reachable at <code>{controlUrl}</code>.</div>
           <pre className="mt-3 p-2 bg-elevated rounded text-left text-xs whitespace-pre-wrap">
-{`python tools/viser_headless.py \\
+{`python frontend/python/viser_headless.py \\
   --npz_dir work/cache/viser \\
   --viser_port 8091 --control_port 8092`}
           </pre>
           <div className="text-xs mt-3">
-            If the cache is empty: <code>python tools/batch_convert_to_npz.py</code> first.
+            If the cache is empty: <code>python server/tools/batch_convert_to_npz.py</code> first.
           </div>
         </div>
       </div>
@@ -250,7 +250,7 @@ export function ViserSplatScene() {
         ) : (
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur">
             Cell <code>{cellName}</code> not in viser cache. Run{" "}
-            <code>python tools/batch_convert_to_npz.py {cellName?.replace(/^sequence:/, "")}</code>.
+            <code>python server/tools/batch_convert_to_npz.py {cellName?.replace(/^sequence:/, "")}</code>.
           </div>
         )
       )}

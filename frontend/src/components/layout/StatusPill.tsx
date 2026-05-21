@@ -11,7 +11,7 @@ import type { DiagPart } from "@/lib/types";
 /** Three-dot diagnostics pill for the top bar.
  *
  * One dot per moving part of the split-topology stack: server backend
- * (reached via the vite proxy), the laptop sync_daemon (via
+ * (reached via the vite proxy), the client sync_daemon (via
  * viser_headless's pass-through), and viser_headless itself. Green
  * means the last poll succeeded; red means the last poll failed or
  * the component reports offline. Hover for one-line details per part.
@@ -26,7 +26,7 @@ export function StatusPill() {
   const [open, setOpen] = useState(false);
 
   // Sync daemon dot is irrelevant in the server-only deployment — everything
-  // (sim, npz cache, viser, UI) runs on the same host, so there's no laptop
+  // (sim, npz cache, viser, UI) runs on the same host, so no client/server
   // download to monitor. Drop it from the pill to stop showing a permanently-
   // yellow indicator that just confuses the user.
   const parts: { key: string; label: string; part: DiagPart }[] = [

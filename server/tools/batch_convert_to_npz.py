@@ -12,9 +12,9 @@ detects them and triggers a rebuild even when the file mtime alone
 wouldn't.
 
 Usage:
-    python tools/batch_convert_to_npz.py            # all sequences, skip up-to-date
-    python tools/batch_convert_to_npz.py --force    # rebuild everything
-    python tools/batch_convert_to_npz.py <seq>      # one sequence only
+    python server/tools/batch_convert_to_npz.py            # all sequences, skip up-to-date
+    python server/tools/batch_convert_to_npz.py --force    # rebuild everything
+    python server/tools/batch_convert_to_npz.py <seq>      # one sequence only
 """
 from __future__ import annotations
 

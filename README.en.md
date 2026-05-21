@@ -1,10 +1,10 @@
 # gsfluent
 
-GaussianFluent physics simulation workbench, split between server and laptop.
+GaussianFluent physics simulation workbench, split between server and client.
 
-The backend + GPU simulation runs on your server; the frontend + viser splat
-renderer runs on each teammate's own laptop. The backend is exposed to
-the team through a public NAT port; splat traffic stays on the laptop's
+The backend + GPU simulation runs on your server; the SPA + viser splat
+renderer runs on each teammate's own machine. The backend is exposed
+to the team through a public NAT port; splat traffic stays on the client's
 loopback and never touches the network.
 
 Chinese version: [README.md](README.md).
@@ -13,7 +13,7 @@ Chinese version: [README.md](README.md).
 
 ## Quick start (teammate)
 
-Requires Python 3.10+ and Node 18+ on the laptop. No conda, no sudo.
+Requires Python 3.10+ and Node 18+ locally. No conda, no sudo.
 
 ```bash
 git clone <repo> gsfluent_pkg
@@ -25,13 +25,14 @@ npm start        # launches viser_headless + vite preview
 The browser opens `http://localhost:5173/` automatically. Ctrl-C tears
 the whole stack down.
 
-`npm install` runs `scripts/_install.sh`: it creates `.venv/` at
-the repo root, pip-installs `viser`, `fastapi`, `uvicorn`, `httpx`,
-`eval_type_backport`, then runs `npm ci` + `vite build`. `npm start`
-runs `scripts/_start.sh`, which launches both local services and
-proxies `/api/*` to the your server backend.
+`npm install` triggers `frontend/scripts/install.mjs` via postinstall:
+it creates `.venv/` at the repo root, pip-installs `viser`, `fastapi`,
+`uvicorn`, `httpx`, `eval_type_backport`, then runs `vite build`.
+`npm start` runs `frontend/scripts/start.mjs`, which uses `concurrently`
+to launch viser_headless + vite preview under a shared Ctrl-C.
 
-Default backend is `${BACKEND_URL}`. To override:
+Default backend comes from `BACKEND_URL` in `.env`. To override per
+invocation:
 
 ```bash
 GSFLUENT_BACKEND_URL=http://your.host:port npm start
@@ -42,13 +43,13 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 ## Architecture
 
 ```
-┌─────── Teammate laptop ────────────────────┐
+┌─────── Teammate client ────────────────────┐
 │                                            │
 │  Browser  →  http://localhost:5173/        │
 │              (vite preview serves dist/)   │
 │                                            │
 │  vite preview :5173                        │
-│   ├─ /api/*  → proxy → your server :24701        │
+│   ├─ /api/*  → proxy → server :24701       │
 │   └─ /       → frontend/dist/              │
 │                                            │
 │  viser_headless                            │
@@ -58,7 +59,7 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 └────────────────┬───────────────────────────┘
                  │ HTTP /api/*  (public NAT)
                  ▼
-┌─────── your server GPU host ─────────────────────┐
+┌─────── GPU server ─────────────────────────┐
 │                                            │
 │  Public ingress  your-backend:port         │
 │                  │ (NAT)                   │
@@ -75,47 +76,53 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 └────────────────────────────────────────────┘
 ```
 
-The splat WebSocket stays on laptop loopback — no public bandwidth used
-for splat playback. Simulation results are stored as PLY frame sequences
-on your server and pulled on demand over the REST API.
+The splat WebSocket stays on client loopback — no public bandwidth
+used for splat playback. Simulation results live as PLY frame sequences
+on the server and the frontend pulls them on demand over the REST API.
 
 ---
 
-## Server admin (your server)
+## Server admin
 
-Backend processes are supervised by `tools/supervise.sh`. On your server:
+The backend process is supervised by `server/supervise.sh`, run on the
+GPU host:
 
 ```bash
-bash tools/supervise.sh up      # start viser_headless + v1 backend with auto-restart
-bash tools/supervise.sh status  # show current PIDs
-bash tools/supervise.sh stop    # take everything down
+bash server/supervise.sh up      # start v1 backend with auto-restart
+bash server/supervise.sh status  # show current PID
+bash server/supervise.sh stop    # take it down
 ```
 
 Bindings:
 
-| Process         | Listens on                | Public mapping                |
-|-----------------|---------------------------|-------------------------------|
-| v1 backend      | `0.0.0.0:7869`            | `your-backend:port` (NAT)     |
-| viser_headless  | `127.0.0.1:8091` / `:8092` | not exposed (your server loopback) |
+| Process     | Listens on        | Public mapping              |
+|-------------|-------------------|-----------------------------|
+| v1 backend  | `0.0.0.0:7869`    | `your-backend:port` (NAT)   |
 
-Logs land in `/path/to/gsfluent_pkg/work/logs/{v1,viser_headless,supervisor}.log`.
+Post-sim utilities (ply → npz cache, frames.bin packing) live in
+`server/tools/` and are run by hand over ssh as needed.
 
-The sim Python interpreter is hard-coded near the top of `supervise.sh` —
-adjust it there if the path moves.
+Logs land in `/path/to/gsfluent_pkg/work/logs/{v1,supervisor}.log`.
+
+The Python interpreters are configured via `.env`
+(`GSFLUENT_API_PYTHON`, `GSFLUENT_SIM_PYTHON`).
 
 ---
 
 ## Repo layout
 
-| Path          | Purpose                                                                |
-|---------------|------------------------------------------------------------------------|
-| `frontend/`   | React + Vite SPA. `npm install` / `npm start` entry points.            |
-| `server/`     | FastAPI v1 backend. Runs on your server. REST routes + runner.               |
-| `tools/`      | Sim wrappers, PLY → npz converters, `viser_headless.py`, `supervise.sh`. |
-| `scripts/`    | Laptop launchers `_install.sh` / `_start.sh` (called via npm).         |
-| `docs/`       | API reference, architecture doc, patch notes.                          |
-| `patches/`    | Upstream viser rendering patches (no-cull, point precision).           |
-| `work/`       | Runtime data: `library/sequences/<run>/`, `cache/viser/*.npz`, …       |
+| Path                  | Purpose                                                                 |
+|-----------------------|-------------------------------------------------------------------------|
+| `frontend/`           | React + Vite SPA. `npm install` / `npm start` entry points.             |
+| `frontend/scripts/`   | Node launchers: `install.mjs`, `start.mjs`, `clean.mjs`.                |
+| `frontend/python/`    | Client-side Python: `viser_headless.py`, `sync_daemon.py`, `vkgs_play.py`. |
+| `frontend/patches/`   | Upstream viser rendering patches (no-cull, point precision).            |
+| `server/`             | FastAPI v1 backend. REST routes + runner live under `gsfluent/`.        |
+| `server/tools/`       | Sim wrapper (`run_sim.sh`), PLY → npz converters, fuse, migration.      |
+| `server/recipes/`     | Built-in simulation recipe JSONs.                                       |
+| `server/patches/`     | Upstream GaussianFluent sim patches.                                    |
+| `docs/`               | API reference, architecture doc.                                        |
+| `work/`               | Runtime data (gitignored): `library/sequences/<run>/`, `cache/viser/*.npz`. |
 
 ---
 
@@ -126,9 +133,9 @@ The backend exposes 31 REST endpoints + 1 WebSocket route:
 - English: [`docs/API.md`](docs/API.md)
 - Chinese: [`docs/API.zh.md`](docs/API.zh.md)
 
-Overview: `/api/health`, `/api/recipes`, `/api/models`, `/api/sequences`,
-`/api/runs`, `/api/runs/{name}/log`, `/api/stream` (WS), and more. No
-auth — access is gated by IP reachability only.
+Main endpoints: `/api/health`, `/api/recipes`, `/api/models`,
+`/api/sequences`, `/api/runs`, `/api/runs/{name}/log`, `/api/stream` (WS),
+and more. No auth — access is gated by IP reachability only.
 
 Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -139,7 +146,7 @@ Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 | Symptom                                | One-line fix                                                                |
 |----------------------------------------|-----------------------------------------------------------------------------|
 | SPA won't open / `:5173` error         | Port in use — check `lsof -i :5173`, or `UI_PORT=5174 npm start`            |
-| Splat viewport stays blank             | viser not up — `curl http://127.0.0.1:8092/state`; on your server run `supervise.sh status` |
-| All `/api/*` calls 502 / refused       | your server backend is down — on your server run `bash tools/supervise.sh status`       |
+| Splat viewport stays blank             | viser not up — `curl http://127.0.0.1:8092/state`                           |
+| All `/api/*` calls 502 / refused       | Server backend is down — on the server run `bash server/supervise.sh status` |
 | Sim errors right after submission      | `curl <backend>/api/runs/<name>/log?offset=0` to see sim stdout             |
-| Local `.venv/` is broken        | `rm -rf .venv/ frontend/dist/ && cd frontend && npm install`         |
+| Local `.venv/` is broken               | `rm -rf .venv/ frontend/dist/ && cd frontend && npm install`                |

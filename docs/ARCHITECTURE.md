@@ -1,7 +1,7 @@
 # gsfluent_pkg — Architecture
 
 Status: 2026-05-20. Describes the system as deployed today: a single v1
-backend on your server, a laptop-local SPA + viser pair on each teammate's
+backend on your server, a client-local SPA + viser pair on each teammate's
 machine, and a public NAT port linking the two.
 
 ---
@@ -11,7 +11,7 @@ machine, and a public NAT port linking the two.
 A pipeline from a trained 3DGS scene + a physics recipe to an animated
 3DGS sequence that scrubs interactively in the browser. The MPM solver
 is server-side (GPU); the viewer (viser splat renderer + React SPA) is
-laptop-side.
+client-side.
 
 ```
 3DGS reference (.ply, trained)         physics recipe (json)
@@ -24,7 +24,7 @@ laptop-side.
 └─────────────────────────┬──────────────────────────────────┘
                           ▼
 ┌────────────────────────────────────────────────────────────┐
-│  FUSE    tools/fuse_to_full_ply.py                         │
+│  FUSE    server/tools/fuse_to_full_ply.py                         │
 │  K-NN-weighted skinning, per-frame Kabsch rotation         │
 │  sim_*.ply + reference 3DGS → frame_*.ply (Z-up, full SH)  │
 └─────────────────────────┬──────────────────────────────────┘
@@ -38,7 +38,7 @@ laptop-side.
 ┌─────────────────────┐    ┌────────────────────┐
 │  WEB                │    │  VKGS              │
 │  React workbench    │    │  Native Vulkan     │
-│  (laptop-local)     │    │  (sibling repo,    │
+│  (client-local)     │    │  (sibling repo,    │
 │  • Points (R3F+WS)  │    │   not in use today)│
 │  • Splats (viser)   │    │                    │
 │  • Z-up, raw frames │    │                    │
@@ -60,36 +60,48 @@ laptop-side.
   always wins on prefix conflict.
 - **Owns**: the library API surface, the WS frame pump, the runner that
   spawns sim subprocesses.
-- **Does NOT own**: viewer rendering (laptop-side), per-cell viser
-  caches (built by `tools/sequence_to_viser_npz.py`, served by
-  `tools/viser_headless.py`).
-- Process management: `tools/supervise.sh up|stop|status` — a small
+- **Does NOT own**: viewer rendering (client-side), per-cell viser
+  caches (built by `server/tools/sequence_to_viser_npz.py`, served by
+  `frontend/python/viser_headless.py`).
+- Process management: `server/supervise.sh up|stop|status` — a small
   shell supervisor (no systemd, no docker) that respawns the backend
-  and viser_headless if they die.
+  if it dies.
 
-### `tools/` — pipeline glue
+### `server/tools/` — server-side pipeline glue
 
 - `fuse_to_full_ply.py` — sim_*.ply + reference 3DGS → frame_*.ply.
   K-NN skinning and per-frame Kabsch rotation behind flags.
 - `pack_sequence.py` — frame_*.ply → `frames.bin` (GSSQ int16-quantized
-  xyz). Read by `core/frame_stream.py:PackedReader` for the Points-mode
-  WS stream. ~30× smaller on disk than per-frame plies.
+  xyz). Read by `gsfluent/core/frame_stream.py:PackedReader` for the
+  Points-mode WS stream. ~30× smaller on disk than per-frame plies.
 - `sequence_to_viser_npz.py`, `batch_convert_to_npz.py` — build the
-  per-sequence `.npz` files in `work/cache/viser/` that
+  per-sequence `.npz` files in `work/cache/viser/` that the client's
   `viser_headless.py` mmaps for Splats-mode playback.
+- `run_sim.sh` — sim launcher invoked by the v1 backend's runner.
+- `migrate_to_library.py`, `check_recipe_compat.py` — one-shot utilities.
+
+### `server/recipes/`, `server/patches/`, `server/supervise.sh`
+
+- `recipes/*.json` — physics recipes consumed by the server-side sim.
+- `patches/gs_simulation_building.patched.py` — patched copy of the
+  upstream GaussianFluent sim file.
+- `supervise.sh` — backend process manager described above.
+
+### `frontend/python/` — client-side Python utilities
+
 - `viser_headless.py` — viser splat renderer on `:8091` + FastAPI
   control sidecar on `:8092`. The SPA drives sequence / frame / camera
   via the control API; viser handles WebGL rendering.
+- `sync_daemon.py` — mirrors the server's sequence library + npz cache
+  onto the local machine. The SPA's outliner walks the local copy.
 - `vkgs_play.py` — viewer-specific adapter for the vkgs native renderer
   (Z-up→Y-up rotation, launch wrapper). Operates on a copy in
   `work/cache/vkgs_yup/`; never mutates library frames.
-- `recipes/*.json` — physics recipes consumed by the server-side sim.
-- `supervise.sh` — your server process manager described above.
 
-### `frontend/` — React + Vite + R3F workbench (laptop-local)
+### `frontend/` — React + Vite + R3F workbench (client-local)
 
 - Built once via `vite build` and served by `vite preview` on the
-  laptop. Read-only against the backend over `/api/*`.
+  client. Read-only against the backend over `/api/*`.
 - **Build-time env** (frontend/.env.production):
   - `VITE_VISER_URL=http://127.0.0.1:8091/` — splat WS endpoint
     (trailing slash matters; viser strips it to build its WS URL)
@@ -110,7 +122,7 @@ laptop-side.
 
 - Native Vulkan splat renderer at `~/Desktop/work/vk_gaussian_splatting/`,
   with a `--frames_dir` animation patch (236 fps validated).
-- **Not currently in use** — viser is the renderer for the laptop SPA.
+- **Not currently in use** — viser is the renderer for the client SPA.
   Kept available for native-playback demos.
 
 ---
@@ -122,7 +134,7 @@ laptop-side.
 3. **Every sequence has a `_meta.json`.** Fuse writes it; the library API enforces it. Sequences without one are invalid and the API rejects them.
 4. **Fuse output never gets mutated after writing.** No `hide_static_splats`-style post-process on frame plys. Want to change the output? Re-fuse.
 5. **Viewer caches are derived artifacts.** They live in `work/cache/<viewer>/...` (NOT in `sequences/`). They can be deleted at any time and re-derived from sources.
-6. **Sim runs on your server.** The laptop has no torch / warp / taichi / CUDA. Anything that requires those goes through the backend on your server.
+6. **Sim runs on your server.** The client has no torch / warp / taichi / CUDA. Anything that requires those goes through the backend on your server.
 
 ---
 
@@ -191,7 +203,7 @@ as sequences. The viewer wrappers know how to derive them.
 ## Runtime topology
 
 ```
-┌─────── Teammate laptop ─────────────────────────────────────┐
+┌─────── Teammate client ─────────────────────────────────────┐
 │                                                             │
 │  Browser  ───────► http://localhost:5173/                   │
 │                                                             │
@@ -221,13 +233,13 @@ as sequences. The viewer wrappers know how to derive them.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Launch on your server: `bash tools/supervise.sh up` (starts and supervises
+Launch on your server: `bash server/supervise.sh up` (starts and supervises
 v1 backend on `:7869` + viser_headless on loopback `:8091/:8092`).
-Launch on a teammate's laptop: `cd frontend && npm start` (runs
-`scripts/_start.sh`, which brings up viser_headless on the laptop's
+Launch on a teammate's client: `cd frontend && npm start` (runs
+`frontend/scripts/start.mjs`, which brings up viser_headless on the client's
 own loopback + vite preview proxying `/api/*` to your server).
 
-The splat WebSocket stays on the laptop's loopback in both topologies —
+The splat WebSocket stays on the client's loopback in both topologies —
 there is no high-bandwidth WAN hop for splat playback.
 
 ---
@@ -236,12 +248,12 @@ there is no high-bandwidth WAN hop for splat playback.
 
 | Adding... | Goes in... |
 |---|---|
-| A new sim recipe | `tools/recipes/<name>.json`; consumed server-side |
-| A new fuse strategy (K-NN variant, MLS, ...) | `tools/fuse_to_full_ply.py` as a flag, OR a sibling `tools/fuse_<name>.py` |
+| A new sim recipe | `server/recipes/<name>.json`; consumed server-side |
+| A new fuse strategy (K-NN variant, MLS, ...) | `server/tools/fuse_to_full_ply.py` as a flag, OR a sibling `server/tools/fuse_<name>.py` |
 | A viewer-specific transform | The viewer's wrapper (`vkgs_play.py` for vkgs; `viser_headless.py` for splat). NEVER mutate library frames. |
 | A new backend endpoint | `server/gsfluent/api/<route>.py` |
 | A web-side renderer mode | `frontend/src/components/viewport/<NewMode>.tsx` |
-| A one-shot migration | `tools/_oneshot/<date>_<purpose>.py`, not flat in `tools/` |
+| A one-shot migration | `server/tools/_oneshot/<date>_<purpose>.py`, not flat in `server/tools/` |
 
 ---
 
@@ -259,7 +271,7 @@ current backend:
 
 These are sim-side changes; the API contract above is expected to stay
 stable. New recipe fields (damage params, implicit-step config) will
-land additively in `tools/recipes/*.json`.
+land additively in `server/recipes/*.json`.
 
 ---
 

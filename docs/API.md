@@ -181,7 +181,7 @@ curl ${BACKEND_URL}/api/system
 
 A recipe is a JSON config that drives one sim run (sim_area, n_grid,
 material parameters, boundary conditions, etc.). Built-in recipes ship in
-the repo at `tools/recipes/*.json` and are read-only. User-saved recipes
+the repo at `server/recipes/*.json` and are read-only. User-saved recipes
 live in `work/_user_recipes/`. Names must match `^[A-Za-z0-9_\-]+$`.
 
 ### GET /api/recipes
@@ -957,7 +957,7 @@ List every sequence in the library, newest first by `created_at`.
 | `cache.frames_bin_bytes` | int\|null | Size of `frames.bin`. |
 
 The server filesystem path (`path` key) is stripped before responding so
-the laptop never learns the server's directory layout.
+the client never learns the server's directory layout.
 
 **curl**
 
@@ -1009,7 +1009,7 @@ curl -X POST ${BACKEND_URL}/api/sequences/import \
 ### POST /api/sequences/upload-npz
 
 Upload a pre-built playback `.npz` cache (as produced by
-`tools/batch_convert_to_npz.py`) and register it as a sequence in the
+`server/tools/batch_convert_to_npz.py`) and register it as a sequence in the
 library. Streams to disk; never holds the whole file in memory.
 
 **Request body** (`multipart/form-data`)
@@ -1056,7 +1056,7 @@ curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 ### GET /api/sequences/{name}/cache/viser.npz
 
 Serve the `.npz` viser cache as a downloadable artifact. Used by the
-laptop sync daemon to mirror server-side caches. `FileResponse` supports
+client sync daemon to mirror server-side caches. `FileResponse` supports
 HTTP `Range` so interrupted downloads resume.
 
 **Path params**
@@ -1074,7 +1074,7 @@ HTTP `Range` so interrupted downloads resume.
 | Code | Cause |
 | --- | --- |
 | 400 | Resolved path escapes the cache root (defensive). |
-| 404 | Sequence not found, or the `.npz` cache has not been built yet (run `tools/batch_convert_to_npz.py <name>` on the server). |
+| 404 | Sequence not found, or the `.npz` cache has not been built yet (run `server/tools/batch_convert_to_npz.py <name>` on the server). |
 
 **curl**
 
@@ -1085,7 +1085,7 @@ curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/viser.npz"
 ### GET /api/sequences/{name}/cache/frames.bin
 
 Serve the GSSQ-packed `frames.bin` (int16-quantized xyz per frame, output
-of `tools/pack_sequence.py`). Used by the laptop Points-mode WS server for
+of `server/tools/pack_sequence.py`). Used by the client Points-mode WS server for
 fast local streaming.
 
 **Path params**
@@ -1103,7 +1103,7 @@ fast local streaming.
 | Code | Cause |
 | --- | --- |
 | 400 | Resolved path escapes the library root. |
-| 404 | Sequence not found, or `frames.bin` has not been built yet (run `tools/pack_sequence.py <name>` on the server). |
+| 404 | Sequence not found, or `frames.bin` has not been built yet (run `server/tools/pack_sequence.py <name>` on the server). |
 
 **curl**
 
@@ -1331,7 +1331,7 @@ After a run finishes, the cache must be built once on the server:
 
 ```bash
 ssh ${GSFLUENT_SSH_HOST} \
-  '${CONDA_ROOT}/bin/python /path/to/gsfluent_pkg/tools/batch_convert_to_npz.py cluster_6_15_eq_demo'
+  '${CONDA_ROOT}/bin/python /path/to/gsfluent_pkg/server/tools/batch_convert_to_npz.py cluster_6_15_eq_demo'
 ```
 
 Then pull it down:
@@ -1341,5 +1341,5 @@ curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/viser.npz"
 ```
 
 `viser_npz_mtime` / `viser_npz_bytes` in `GET /api/sequences` tell the
-laptop sync daemon whether its local copy is stale without having to HEAD
+client sync daemon whether its local copy is stale without having to HEAD
 the file. The download supports HTTP `Range` for resume.

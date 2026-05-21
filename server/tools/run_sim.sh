@@ -4,7 +4,7 @@
 # Runs two stages and exits 0 only if both succeed:
 #   1. The canonical MPM sim (`gs_simulation_building.py`)
 #      → simulation_ply/iteration_*.ply in $SIM_OUTPUT_DIR
-#   2. Fuse                              (`tools/fuse_to_full_ply.py`)
+#   2. Fuse                              (`server/tools/fuse_to_full_ply.py`)
 #      → frame_*.ply in work/library/sequences/<run>/frames/
 #
 # CLI (matches what runner.py spawns):
@@ -179,7 +179,7 @@ fi
 echo ""
 echo "=== step 2: fuse to frame_*.ply ==="
 cd "$PKG_ROOT"
-"$SIM_PY" "$PKG_ROOT/tools/fuse_to_full_ply.py" \
+"$SIM_PY" "$PKG_ROOT/server/tools/fuse_to_full_ply.py" \
     --reference_ply "$REFERENCE_PLY" \
     --sim_dir       "$SIM_PLY_DIR" \
     --out_dir       "$FUSED_DIR" \

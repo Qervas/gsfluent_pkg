@@ -11,9 +11,9 @@ converted sequence is dumped into a `<seq>_yup_for_vkgs/` sibling dir
 (idempotent — skipped on re-run) and vkgs is launched against that.
 
 Usage:
-    python tools/vkgs_play.py <sequence>
-    python tools/vkgs_play.py --source-up y <sequence>   # force, ignore meta
-    python tools/vkgs_play.py --no-launch <sequence>     # convert only
+    python frontend/python/vkgs_play.py <sequence>
+    python frontend/python/vkgs_play.py --source-up y <sequence>   # force, ignore meta
+    python frontend/python/vkgs_play.py --no-launch <sequence>     # convert only
 """
 from __future__ import annotations
 

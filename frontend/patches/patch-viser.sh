@@ -6,7 +6,7 @@
 # and a `weightedDeterminant<0.25` perf cull). On 3DGS reconstructions
 # with many anisotropic / low-opacity splats, those produce visible
 # region-shaped "winking" as the camera orbits. The patch in
-# patches/viser-no-cull.patch comments both out — see that file for
+# frontend/patches/viser-no-cull.patch comments both out — see that file for
 # the full rationale.
 #
 # Why it needs a script: viser ships a pre-built client bundle.
@@ -18,8 +18,8 @@
 # `uv sync`.
 #
 # Usage:
-#   ./tools/patch-viser.sh                  # auto-detect venv
-#   VIRTUAL_ENV=/path/to/.venv ./tools/patch-viser.sh
+#   ./frontend/patches/patch-viser.sh                  # auto-detect venv
+#   VIRTUAL_ENV=/path/to/.venv ./frontend/patches/patch-viser.sh
 #
 # Pre-reqs: patch, node, npm — same set setup-client.sh already
 # requires.
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PATCH_FILE="$PKG_ROOT/patches/viser-no-cull.patch"
+PATCH_FILE="$PKG_ROOT/frontend/patches/viser-no-cull.patch"
 
 note() { echo ">>> patch-viser: $*"; }
 err()  { echo "ERROR: patch-viser: $*" >&2; exit 1; }

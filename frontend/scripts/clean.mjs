@@ -4,7 +4,7 @@
 // Nukes everything `npm install` + `npm start` leave behind, so a
 // teammate can redo the whole bootstrap from a clean slate:
 //
-//   - .venv/        (pkg root)   pip venv from scripts/_install.sh
+//   - .venv/        (pkg root)   pip venv from frontend/scripts/install.mjs
 //   - frontend/dist/                    vite build output
 //   - frontend/node_modules/.vite/      vite's preview/dev cache
 //   - frontend/tsconfig*.tsbuildinfo    tsc -b incremental state
@@ -54,7 +54,7 @@ for (const p of targets) {
 // that a previous `npm start` may have orphaned. Patterns are hardcoded
 // constants (no user-supplied input — execFileSync, not exec).
 const patterns = [
-  "tools/viser_headless.py",
+  "python/viser_headless.py",
   "vite preview --port",
 ];
 for (const pat of patterns) {

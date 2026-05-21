@@ -2,7 +2,7 @@
 
 This module is the single source of truth for the new layout introduced by
 the 2026-05-09 sequence-workflow spec. Both endpoints (api/models.py,
-api/runs.py) and the migration script (tools/migrate_to_library.py) go
+api/runs.py) and the migration script (server/tools/migrate_to_library.py) go
 through `Model` / `Sequence` rather than poking the filesystem directly.
 
 Layout (all paths Z-up by convention; conversion happens at import time):

@@ -1,6 +1,6 @@
 """Reads and writes recipe JSONs from disk.
 
-Built-in recipes live at <pkg_root>/tools/recipes/<name>.json (read-only).
+Built-in recipes live at <pkg_root>/server/recipes/<name>.json (read-only).
 User saves go to <pkg_root>/work/_user_recipes/<name>.json.
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ..server import PKG_ROOT
 
-RECIPES_DIR = PKG_ROOT / "tools" / "recipes"
+RECIPES_DIR = PKG_ROOT / "server" / "recipes"
 USER_RECIPES_DIR = PKG_ROOT / "work" / "_user_recipes"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")

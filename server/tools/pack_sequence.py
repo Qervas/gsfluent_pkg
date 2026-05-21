@@ -24,8 +24,8 @@ Dequantization (reader-side):
 Precision: on a 1 m extent, int16 → 15 μm. Sub-mm for everything we sim.
 
 Usage:
-    python tools/pack_sequence.py <sequence_name>
-    python tools/pack_sequence.py --check <sequence_name>   # round-trip diff
+    python server/tools/pack_sequence.py <sequence_name>
+    python server/tools/pack_sequence.py --check <sequence_name>   # round-trip diff
 
 Output:
     work/library/sequences/<name>/frames.bin

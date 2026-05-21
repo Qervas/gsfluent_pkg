@@ -30,10 +30,10 @@ from .runs import get_run_frame as _get_run_frame
 router = APIRouter(prefix="/api/sequences", tags=["sequences"])
 
 # Where derived caches live. The viser .npz cache is built by
-# `tools/batch_convert_to_npz.py` and consumed by `tools/viser_headless.py`.
+# `server/tools/batch_convert_to_npz.py` and consumed by `frontend/python/viser_headless.py`.
 # Under the split-topology deployment, the server holds the canonical
-# copy and laptop-side `tools/sync_daemon.py` mirrors files here onto
-# the laptop's local cache.
+# copy and client-side `frontend/python/sync_daemon.py` mirrors files here onto
+# the client's local cache.
 _VISER_CACHE = PKG_ROOT / "work" / "cache" / "viser"
 
 
@@ -52,7 +52,7 @@ def _sequence_dict(seq: Sequence) -> dict:
     # `meta_dict()` injects the absolute server filesystem path
     # (e.g. <sequences-root>/foo/) into every payload.
     # The React workbench doesn't consume it; under split-topology the
-    # laptop has no use for the server's local path either. Stripping
+    # client has no use for the server's local path either. Stripping
     # it keeps the API surface from leaking server directory layout.
     d.pop("path", None)
     # Default-fill the fields the frontend SequenceItem type expects, so
@@ -96,10 +96,10 @@ def _sequence_dict(seq: Sequence) -> dict:
                       for r in runner.list_runs())
         if is_live:
             d["frame_count"] = seq.frame_count()
-    # Cache descriptor: lets the laptop sync daemon detect staleness
+    # Cache descriptor: lets the client sync daemon detect staleness
     # without having to download anything to check. Both files are
     # optional — viser.npz only exists after batch_convert_to_npz.py
-    # has run; frames.bin only exists after tools/pack_sequence.py has
+    # has run; frames.bin only exists after server/tools/pack_sequence.py has
     # run. Missing → field stays null and the daemon skips that file.
     d["cache"] = {
         "viser_npz_mtime":  _stat_mtime(_VISER_CACHE / f"{seq.name}.npz"),
@@ -112,7 +112,7 @@ def _sequence_dict(seq: Sequence) -> dict:
 
 def _stat_mtime(p: Path) -> Optional[float]:
     """`p.stat().st_mtime` or None if the file doesn't exist. Used by the
-    sequence-list payload so the laptop sync daemon can compare against
+    sequence-list payload so the client sync daemon can compare against
     its local copy without a full HEAD round-trip per file."""
     try:
         return p.stat().st_mtime
@@ -211,7 +211,7 @@ async def upload_npz(
     name: str | None = Form(None, description="Sequence name (defaults to basename without .npz)"),
 ):
     """Accept a drag-dropped .npz from the workbench and register it as
-    a Sequence in the library — the laptop-local sibling of POST
+    a Sequence in the library — the client-local sibling of POST
     /api/models/upload but for sequence playback caches instead of
     .ply models. After this returns, the new sequence shows up in
     /api/sequences and is mmap'd by viser_headless on its next /reload.
@@ -335,8 +335,8 @@ async def get_frame(name: str, frame_idx: int):
 def get_viser_cache(name: str):
     """Serve the .npz viser cache file as a downloadable artifact.
 
-    Used by the laptop sync daemon (`tools/sync_daemon.py`) to mirror the
-    server's cache onto the laptop, where `tools/viser_headless.py`
+    Used by the client sync daemon (`frontend/python/sync_daemon.py`) to mirror the
+    server's cache onto the client, where `frontend/python/viser_headless.py`
     mmaps it for Splats-mode playback. The split-topology rationale:
     pushing per-frame xyz over WAN at 30 fps is ~2 Gbps (683k splats ×
     12 B × 30) — infeasible. A one-time .npz download (~1-2 GB) then
@@ -352,7 +352,7 @@ def get_viser_cache(name: str):
         raise HTTPException(
             404,
             f"viser cache not built for sequence '{name}'. "
-            "Run `python tools/batch_convert_to_npz.py {name}` on the server.",
+            "Run `python server/tools/batch_convert_to_npz.py {name}` on the server.",
         )
     # Path-traversal defense: confirm the resolved path is inside the cache.
     target = path.resolve()
@@ -372,8 +372,8 @@ def get_viser_cache(name: str):
 def get_frames_bin_cache(name: str):
     """Serve the GSSQ-packed frames.bin (int16-quantized xyz per frame).
 
-    Mirror of `tools/pack_sequence.py`'s output, used by the laptop
-    Points-mode WS server (`tools/local_stream.py`) for fast local
+    Mirror of `server/tools/pack_sequence.py`'s output, used by the client
+    Points-mode WS server (`frontend/python/local_stream.py`) for fast local
     streaming without per-frame ply reads. Same range-resume semantics
     as the viser cache endpoint."""
     if not Sequence.exists(name):
@@ -383,7 +383,7 @@ def get_frames_bin_cache(name: str):
         raise HTTPException(
             404,
             f"frames.bin not built for sequence '{name}'. "
-            f"Run `python tools/pack_sequence.py {name}` on the server.",
+            f"Run `python server/tools/pack_sequence.py {name}` on the server.",
         )
     target = path.resolve()
     seq_root = lib.SEQUENCES_DIR.resolve()

@@ -18,7 +18,7 @@ the actual GPU upload happens on viser's render thread on its next tick.
 Latency is whatever viser's WS push + browser render takes (~1 frame).
 
 Usage:
-    python tools/viser_headless.py --npz_dir work/cache/viser
+    python frontend/python/viser_headless.py --npz_dir work/cache/viser
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from pydantic import BaseModel
 
 # Strict-allowlist regex for any user-supplied identifier that becomes
 # part of a filesystem path. Library sequence names already pass through
-# this on the server side; we enforce again here because the laptop
+# this on the server side; we enforce again here because the client
 # might be talking to a hostile or buggy server. Reject anything with
 # `..`, `/`, spaces, or shell metas.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -53,7 +53,7 @@ _ACCENT_RGB    = (34, 211, 238)   # tailwind `accent`     #22d3ee
 
 # No-op constant left in place during a transition: the K scale-up
 # used to happen here, but it's now done upstream in
-# `tools/fuse_to_full_ply.py` (or `tools/sequence_to_viser_npz.py`)
+# `frontend/python/fuse_to_full_ply.py` (or `frontend/python/sequence_to_viser_npz.py`)
 # so the per-frame plys/npzs already arrive in source-world
 # coordinates. Setting K=1 means viser_headless renders whatever is
 # in the .npz without rewriting it.
@@ -207,7 +207,7 @@ def mmap_model_cell(ply_path: Path) -> dict:
     # outliers (whose covariance survives fp16) render — visually a
     # field of vertical streaks instead of proper Gaussian blobs.
     # 7.81e-3 world units is sub-pixel on any practical scene. Mirrors
-    # the clamp tools/sequence_to_viser_npz.py applies for sim outputs.
+    # the clamp server/tools/sequence_to_viser_npz.py applies for sim outputs.
     _FP16_COV_FLOOR_SQRT = np.float32(np.sqrt(6.1e-5))
     np.maximum(scales, _FP16_COV_FLOOR_SQRT, out=scales)
     quats_raw = np.stack(
@@ -254,7 +254,7 @@ def _quats_to_R(quats: np.ndarray) -> np.ndarray:
 
     Inputs are expected unit-normalized (sequence_to_viser_npz.py
     normalizes when writing v2). Matches the math in
-    `tools/sequence_to_viser_npz.py:_quat_to_R` so v2 cov reconstruction
+    `frontend/python/sequence_to_viser_npz.py:_quat_to_R` so v2 cov reconstruction
     is bit-identical to the v1 static cov when applied to frame 0."""
     qw = quats[:, 0]; qx = quats[:, 1]; qy = quats[:, 2]; qz = quats[:, 3]
     n = qw.shape[0]
@@ -382,7 +382,7 @@ def main() -> int:
                         "Default: http://localhost:8080 (the SSH tunnel "
                         "target run-client.sh sets up).")
     p.add_argument("--sync_status_file", type=Path, default=None,
-                   help="Path to tools/sync_daemon.py's status JSON. Default: "
+                   help="Path to frontend/python/sync_daemon.py's status JSON. Default: "
                         "$XDG_RUNTIME_DIR/gsfluent_sync_status.json (matches the "
                         "daemon's own default). Surfaced verbatim through "
                         "GET /sync-status for the workbench's diagnostics pill.")
@@ -782,7 +782,7 @@ def main() -> int:
 
     @api.get("/sync-status")
     def sync_status() -> dict:
-        """Return tools/sync_daemon.py's most recent status snapshot.
+        """Return frontend/python/sync_daemon.py's most recent status snapshot.
 
         The daemon writes this JSON every tick. We pass it through verbatim
         so the workbench's diagnostics pill can render "online?" + last sync
@@ -800,20 +800,20 @@ def main() -> int:
 
     @api.get("/read-local")
     def read_local(path: str):
-        """Stream a .ply file from the laptop's filesystem to the
+        """Stream a .ply file from the client's filesystem to the
         workbench. The SPA can't read local files except via the
         drag-drop FileReader path; this endpoint lets a user instead
         paste a filesystem path and have the workbench load it.
 
         The SPA then re-uploads the bytes via /api/models/upload, so
-        the server (which never sees the laptop's filesystem) ends up
+        the server (which never sees the client's filesystem) ends up
         with a normal model registration. We're only the file-reader
         leg of the trip.
 
         Security: only .ply files, and only files actually on disk —
         path traversal is harmless because we always resolve and then
         stat the result. A malicious caller could enumerate which .ply
-        paths exist on the laptop, but viser_headless binds 0.0.0.0
+        paths exist on the client, but viser_headless binds 0.0.0.0
         already (same threat surface), and the response is just bytes
         of files the user owns.
         """
@@ -833,7 +833,7 @@ def main() -> int:
     def reload_cell(cell: str | None = None) -> dict:
         """Re-mmap a cell's .npz from disk.
 
-        Called by tools/sync_daemon.py after it downloads a fresh copy.
+        Called by frontend/python/sync_daemon.py after it downloads a fresh copy.
         If `cell` matches a currently-loaded one, the new mmap replaces
         the old; if it's a previously-unknown name, the cell is added
         and becomes available via POST /set.

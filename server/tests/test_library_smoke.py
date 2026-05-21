@@ -13,7 +13,7 @@ from gsfluent.core.library import LIBRARY_ROOT, Model, Sequence
 pytestmark = pytest.mark.skipif(
     not LIBRARY_ROOT.is_dir(),
     reason=(
-        "library/ not populated — run `python tools/migrate_to_library.py` "
+        "library/ not populated — run `python server/tools/migrate_to_library.py` "
         "first if you want this smoke test to run"
     ),
 )

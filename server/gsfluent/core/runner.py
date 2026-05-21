@@ -2,17 +2,17 @@
 
 Under the split-topology deployment, this runs on the GPU server
 next to the canonical sim core. One Run = one subprocess spawn of a shell
-wrapper (`tools/run_sim.sh` by default) that orchestrates:
+wrapper (`server/tools/run_sim.sh` by default) that orchestrates:
     1. The canonical MPM sim (`gs_simulation_building.py`)
-    2. The fuse step (`tools/fuse_to_full_ply.py`)
+    2. The fuse step (`server/tools/fuse_to_full_ply.py`)
 After the run exits cleanly, runner.py kicks off `batch_convert_to_npz.py`
-to rebuild the .npz cache so the laptop sync daemon picks it up.
+to rebuild the .npz cache so the client sync daemon picks it up.
 
 The wrapper path + interpreter are env-overridable so the runner doesn't
 hardcode the server's directory layout:
 
     GSFLUENT_SIM_SCRIPT_RUNNER  path to the shell wrapper invoked per run
-                                (default: <PKG_ROOT>/tools/run_sim.sh)
+                                (default: <PKG_ROOT>/server/tools/run_sim.sh)
     GSFLUENT_NPZ_REBUILD        if "1" (default), trigger .npz build after
                                 run completion. Set to "0" if you'd rather
                                 build manually.
@@ -48,10 +48,10 @@ _log = logging.getLogger(__name__)
 # at a server-specific wrapper without code changes.
 SIM_SCRIPT_RUNNER = Path(os.environ.get(
     "GSFLUENT_SIM_SCRIPT_RUNNER",
-    str(PKG_ROOT / "tools" / "run_sim.sh"),
+    str(PKG_ROOT / "server" / "tools" / "run_sim.sh"),
 ))
 # After a successful run, optionally rebuild the .npz cache so the
-# laptop sync daemon notices the new sequence. Off by default in tests.
+# client sync daemon notices the new sequence. Off by default in tests.
 NPZ_REBUILD_AFTER_RUN = os.environ.get("GSFLUENT_NPZ_REBUILD", "1") == "1"
 # Delete the per-frame sim plys + fused plys after the npz is built.
 # The .npz is the canonical artifact downstream (viser_headless + sync
@@ -288,7 +288,7 @@ async def start_run(
     if not SIM_SCRIPT_RUNNER.is_file():
         raise FileNotFoundError(
             f"sim wrapper not found: {SIM_SCRIPT_RUNNER}. "
-            "Adapt tools/run_sim.sh to your server, or set "
+            "Adapt server/tools/run_sim.sh to your server, or set "
             "$GSFLUENT_SIM_SCRIPT_RUNNER to point at your wrapper."
         )
 
@@ -373,7 +373,7 @@ async def _drain(run: Run, run_dir: Path) -> None:
         finished_at=time.time(),
     )
 
-    # On a successful run, rebuild the .npz cache so the laptop sync
+    # On a successful run, rebuild the .npz cache so the client sync
     # daemon notices the new sequence on its next poll. We invoke
     # batch_convert_to_npz.py as a separate subprocess (rather than
     # importing it) so any plyfile / numpy work it does runs in its own
@@ -386,7 +386,7 @@ async def _drain(run: Run, run_dir: Path) -> None:
             _log.warning("post-run .npz rebuild failed for %s: %s", run.name, e)
 
     # Write _meta.json for the freshly-produced library sequence. Without
-    # this the laptop's /api/sequences sees a dir with no metadata and
+    # this the client's /api/sequences sees a dir with no metadata and
     # surfaces it as source="unknown" — and the sync daemon has nothing
     # canonical to mirror. Done unconditionally on success so the entry
     # is well-formed even if the .npz rebuild failed (manual rebuild
@@ -449,7 +449,7 @@ def _write_sequence_meta(run_name: str, run_dir: Path) -> None:
     Pulls `model_dir` back out of `manifest.json` (saved at start_run)
     and reads frame_0000.ply for n_splats + bbox_initial. Frame count is
     a directory walk of `frames/`. Source path is hostname-qualified so
-    the laptop can later distinguish "produced on the sim server" from a
+    the client can later distinguish "produced on the sim server" from a
     locally-imported sequence with the same name."""
     import socket
     frames_dir = run_dir / "frames"
@@ -483,13 +483,13 @@ def _write_sequence_meta(run_name: str, run_dir: Path) -> None:
 
 
 async def _rebuild_npz(run_name: str, run_dir: Path, log_path: Path) -> None:
-    """Invoke `tools/batch_convert_to_npz.py <run_name>` as a subprocess.
+    """Invoke `server/tools/batch_convert_to_npz.py <run_name>` as a subprocess.
 
     Output is appended to the same run.log so a WS subscriber sees the
     cache build progress as part of the run timeline. We don't fail the
     run if the rebuild fails — the sequence still exists on disk, just
     isn't viser-playable until the cache is built manually."""
-    converter = PKG_ROOT / "tools" / "batch_convert_to_npz.py"
+    converter = PKG_ROOT / "server" / "tools" / "batch_convert_to_npz.py"
     if not converter.is_file():
         return
     cmd = [sys.executable, str(converter), run_name]

@@ -8,7 +8,7 @@ Each frame_*.ply file is a full 3DGS reconstruction at one timestep:
 
 Coordinate convention: all stored frames are Z-up at rest (workbench
 invariant — see `core/coord_convert.py` for the import-time rotation
-and `tools/fuse_to_full_ply.py` for the sim-time rotation). The
+and `server/tools/fuse_to_full_ply.py` for the sim-time rotation). The
 display pipeline therefore reads positions and quaternions through
 without any further rotation; the React Three Fiber scene is also
 Z-up, so the bytes that go on the wire match the bytes on disk.
@@ -18,7 +18,7 @@ Two on-disk formats for the per-frame xyz stream:
   Slow (~150 MB per ply for 683k splats), simple, what the fuse
   pipeline emits by default.
 - PACKED: a single `frames.bin` next to the `frames/` dir, written
-  by `tools/pack_sequence.py`. int16-quantized xyz per frame, one
+  by `server/tools/pack_sequence.py`. int16-quantized xyz per frame, one
   global bbox, header described in `pack_sequence.py`. ~30× smaller
   than the legacy layout on disk; sub-mm precision.
 
@@ -93,7 +93,7 @@ def parse_static_attrs(ply_path: Path) -> dict | None:
 
 # -------------------------------------------------------------------- packed
 #
-# `frames.bin` format (see tools/pack_sequence.py for the full spec):
+# `frames.bin` format (see server/tools/pack_sequence.py for the full spec):
 #
 #   offset  size  field
 #   ------  ----  --------------------------------------------------

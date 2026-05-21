@@ -1,8 +1,8 @@
-"""Laptop-side sync daemon.
+"""Client-side sync daemon.
 
 Mirrors the server's per-sequence caches (`viser.npz` for Splats mode,
 `frames.bin` for Points mode) plus the per-sequence `_meta.json` so the
-laptop's outliner surfaces sim runs produced on the server without a
+client's outliner surfaces sim runs produced on the server without a
 manual stub. See ../docs/ARCHITECTURE.md for the split-topology
 rationale — short version: pushing per-frame xyz over WAN at 30 fps is
 ~2 Gbps, hopeless. A one-time .npz download per sequence then local
@@ -11,7 +11,7 @@ playback is the only path that scales.
 Loop, every `--interval` seconds:
     1. GET ${GSFLUENT_SERVER}/api/sequences
     2. For each sequence: write `<library>/<name>/_meta.json` from the
-       response (atomic, compare-and-skip if unchanged) so the laptop's
+       response (atomic, compare-and-skip if unchanged) so the client's
        /api/sequences walk surfaces the run with proper source / model
        / bbox metadata.
     3. If server's cache mtime > local file's mtime (or local file is
@@ -31,7 +31,7 @@ Failure modes:
       next viser_headless start will mmap the latest local file anyway.
 
 Usage:
-    python tools/sync_daemon.py \\
+    python frontend/python/sync_daemon.py \\
         --server http://<server-host>:8080 \\
         --cache-root work/cache \\
         --viser-control http://localhost:8092 \\
@@ -56,7 +56,7 @@ from typing import Optional
 # Allowlist regex for sequence names received from the server. We don't
 # trust the server unconditionally — a compromised or buggy backend
 # could try to write `name="../../.ssh/authorized_keys"` and we'd
-# happily write its bytes to the laptop. Library sequence names already
+# happily write its bytes to the client. Library sequence names already
 # pass through the same regex on the server side; this enforces it on
 # the wire, too.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -241,7 +241,7 @@ def _mirror_meta(seq_dict: dict, library_root: Path) -> bool:
     contents changed), False if the local copy already matched or the
     server response was strictly less informative than the local file.
 
-    The library walk on the laptop's /api/sequences requires the
+    The library walk on the client's /api/sequences requires the
     `<name>/` directory to exist for the sequence to surface — we
     create it if missing so the .npz arriving in cache/viser/ becomes
     discoverable without a separate `migrate` step.
@@ -268,7 +268,7 @@ def _mirror_meta(seq_dict: dict, library_root: Path) -> bool:
     seq_dir = library_root / name
     meta_path = seq_dir / "_meta.json"
     if payload.get("source") == "unknown" and meta_path.is_file():
-        # Server has nothing real to say; preserve whatever the laptop
+        # Server has nothing real to say; preserve whatever the client
         # already knows (could be a curated hand-written meta).
         return False
 
@@ -302,7 +302,7 @@ def _needs_sync(server_mtime: Optional[float], server_bytes: Optional[int],
     - We use bytes as a secondary sanity check — if local matches server
       mtime but bytes differ, force a re-sync.
 
-    Comparing mtimes across a server↔laptop boundary is iffy (clock skew,
+    Comparing mtimes across a server↔client boundary is iffy (clock skew,
     fs precision). We accept a 1-second slop so identical files don't
     re-download on every poll just because of fs timestamp rounding."""
     if server_mtime is None:
@@ -373,7 +373,7 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
         # ---- _meta.json -----------------------------------------------
         # Mirror first so the seq dir + meta exist before the .npz
         # arrives in the parallel cache tree. /api/sequences on the
-        # laptop walks library_root to surface entries; without this
+        # client walks library_root to surface entries; without this
         # the .npz lands in cache/viser/ unreachable from the outliner.
         try:
             wrote = _mirror_meta(s, library_root)
@@ -477,7 +477,7 @@ def main() -> int:
                     help="Local library sequences root "
                          "(default: <cache-root>/../library/sequences). "
                          "Where per-sequence _meta.json files are mirrored "
-                         "so the laptop's /api/sequences walk picks them up.")
+                         "so the client's /api/sequences walk picks them up.")
     ap.add_argument("--viser-control",
                     default=os.environ.get("VISER_CONTROL_URL", "http://localhost:8092"),
                     help="Viser headless control URL for /reload notifications")

@@ -2,7 +2,7 @@
 """Migrate the old work/ layout to work/library/{models,sequences}/.
 
 Usage:
-    python tools/migrate_to_library.py [--dry-run]
+    python server/tools/migrate_to_library.py [--dry-run]
 
 Idempotent: re-running after a partial migration only moves the entries
 that haven't moved yet. An existing target dir is treated as already
@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Optional
 
 # Make `gsfluent` importable when the script runs from a checkout without
-# pip install (we're in tools/, server/ holds the package).
+# pip install (we're in server/tools/, parent server/ holds the package).
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "server") not in sys.path:
     sys.path.insert(0, str(ROOT / "server"))
