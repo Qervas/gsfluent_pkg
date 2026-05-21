@@ -285,36 +285,71 @@ export function ViserSplatScene() {
     }
   }
 
-  // TODO(human): tune the labels + error→message mapping below.
-  //
-  // These are the strings teammates see when loading a 3DGS model. Tradeoffs:
-  //
-  // - Tone: "Fetching model…" vs "Pulling model from server…" vs
-  //         "Downloading…". Pick the voice that matches the rest of the
-  //         workbench. Currently the workbench uses sparse, technical copy
-  //         ("Building cache on server…", "Waiting for first frame from sim…").
-  // - Length: shorter scans faster in peripheral vision; longer gives more
-  //           info when the user is staring at the spinner wondering why.
-  // - Error UX: backend emits 4 short tags. Map them to messages your
-  //             teammates will know how to act on (retry vs file a bug vs
-  //             check the backend is up).
-  //
-  // 5–10 lines total. Return null from progressLabel to suppress the pill
-  // entirely on a given phase (e.g. if you want "parsing" to be silent
-  // because it's only a few seconds).
+  // When viser reports a sequence-cell as not_found, that means the .npz
+  // isn't in this client's local cache yet. The fix is the Build flow
+  // (server-side cache build + client-side download via /sync_cell). Auto-
+  // trigger it here so the user doesn't have to click — they'll see the
+  // buildState progress pill take over from the viser error.
+  useEffect(() => {
+    if (
+      loading?.phase === "error" &&
+      loading?.error === "not_found" &&
+      loading.name.startsWith("sequence:") &&
+      buildState === "idle"
+    ) {
+      const seq = loading.name.slice("sequence:".length);
+      startBuild(seq);
+    }
+    // startBuild is defined per-render but is a stable closure over the
+    // refs it touches; pulling it into deps would make this fire on every
+    // poll. Intentionally omitted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading?.name, loading?.phase, loading?.error, buildState]);
+
+  // Labels for the upper-left progress / error pill. Pulled out so the
+  // mapping is editable in one spot without touching the rendering JSX.
   function progressLabel(phase: string, name: string): string | null {
-    // EXAMPLE — replace with your preferred voice:
-    if (phase === "fetching") return `Fetching ${name.replace(/^model:/, "")}…`;
-    if (phase === "parsing") return "Parsing splats…";
+    const bare = name.replace(/^(model:|sequence:)/, "");
+    if (phase === "fetching") return `Fetching ${bare}…`;
+    if (phase === "parsing")  return "Parsing splats…";
     return null;
   }
-  function errorLabel(tag: string | null): string {
-    // EXAMPLE — replace with your preferred messages:
-    if (tag === "not_found") return "Model not found on backend.";
-    if (tag === "fetch_failed") return "Couldn't fetch model from backend.";
-    if (tag === "parse_failed") return "Model loaded but couldn't be parsed.";
+  function errorLabel(tag: string | null, name: string): string {
+    const kind = name.startsWith("sequence:") ? "sequence" : "model";
+    if (tag === "not_found")    return `${kind === "model" ? "Model" : "Sequence"} not found on backend.`;
+    if (tag === "fetch_failed") return `Couldn't fetch ${kind} from backend.`;
+    if (tag === "parse_failed") return `${kind === "model" ? "Model" : "Sequence"} loaded but couldn't be parsed.`;
     return "Load failed.";
   }
+
+  // ── unified progress pill: pick which source to surface ──────────────────
+  // buildState (SPA-side build flow) wins over viser's loading state when
+  // active, because the build flow is the recovery path for the most
+  // common viser error (sequence not_found). Renders ONE pill, not two.
+  type Pill = { tone: "info" | "error"; text: string } | null;
+  const buildLabel: Record<BuildState, string | null> = {
+    idle: null,
+    building: "Building cache on server…",
+    syncing: "Downloading cache locally…",
+    error: buildError ?? "Build failed.",
+  };
+  const buildPill: Pill = buildState === "idle"
+    ? null
+    : buildState === "error"
+      ? { tone: "error", text: buildError ?? "Build failed." }
+      : { tone: "info", text: buildLabel[buildState]! };
+  const loadingIsAutoRecovering =
+    loading?.phase === "error" &&
+    loading?.error === "not_found" &&
+    loading?.name?.startsWith("sequence:");
+  const viserPill: Pill = !loading || loadingIsAutoRecovering
+    ? null
+    : loading.phase === "error"
+      ? { tone: "error", text: errorLabel(loading.error, loading.name) }
+      : (progressLabel(loading.phase, loading.name)
+          ? { tone: "info", text: progressLabel(loading.phase, loading.name)! }
+          : null);
+  const pill: Pill = buildPill ?? viserPill;
 
   return (
     <div className="relative h-full w-full bg-canvas">
@@ -331,18 +366,27 @@ export function ViserSplatScene() {
         sandbox="allow-scripts allow-same-origin allow-pointer-lock"
         allowFullScreen
       />
-      {loading && loading.phase !== "error" && progressLabel(loading.phase, loading.name) && (
-        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-2">
+      {pill && pill.tone === "info" && (
+        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-2 z-10">
           <Loader2 size={12} className="animate-spin text-accent" />
-          <span>{progressLabel(loading.phase, loading.name)}</span>
+          <span>{pill.text}</span>
         </div>
       )}
-      {loading && loading.phase === "error" && (
-        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur">
-          {errorLabel(loading.error)}
+      {pill && pill.tone === "error" && (
+        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur z-10 flex items-center gap-3">
+          <span>{pill.text}</span>
+          {buildState === "error" && seqName && (
+            <button
+              type="button"
+              className="px-2 py-0.5 rounded bg-elevated text-text-primary hover:opacity-90 text-xs border border-border"
+              onClick={() => startBuild(seqName)}
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
-      {cellMissing && !loading && (
+      {cellMissing && !loading && !pill && (
         simIsRunning ? (
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/85 border border-border text-text-muted text-xs rounded flex items-center gap-2 backdrop-blur">
             <Loader2 size={12} className="animate-spin text-accent" />
