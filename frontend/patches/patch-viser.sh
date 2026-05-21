@@ -21,28 +21,25 @@
 #   ./frontend/patches/patch-viser.sh                  # auto-detect venv
 #   VIRTUAL_ENV=/path/to/.venv ./frontend/patches/patch-viser.sh
 #
-# Pre-reqs: patch, node, npm — same set setup-client.sh already
-# requires.
+# Pre-reqs: patch, node, npm.
 
 set -euo pipefail
 
-PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PATCH_FILE="$PKG_ROOT/frontend/patches/viser-no-cull.patch"
+# Locate the repo root (script lives at frontend/patches/, so `..\..`).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PKG_ROOT="$(cd "$HERE/../.." && pwd)"
+PATCH_FILE="$HERE/viser-no-cull.patch"
 
 note() { echo ">>> patch-viser: $*"; }
 err()  { echo "ERROR: patch-viser: $*" >&2; exit 1; }
 
 [[ -f "$PATCH_FILE" ]] || err "patch file not found: $PATCH_FILE"
 
-# Find the installed viser client dir. Prefer the uv-managed venv at
-# server/.venv (matches setup-client.sh), fall back to a python -c
-# probe so users with a system-pip install also work.
+# Find the installed viser client dir. The client-local install puts
+# its venv at <repo>/.venv (created by frontend/scripts/install.mjs).
 VISER_CLIENT=""
-if [[ -d "$PKG_ROOT/server/.venv" ]]; then
-    # Glob the python3.x dir so we don't break when uv resolves to a
-    # different Python version on a fresh machine (pyproject pins
-    # >=3.10, not 3.12 specifically).
-    for candidate in "$PKG_ROOT/server/.venv"/lib/python3.*/site-packages/viser/client; do
+if [[ -d "$PKG_ROOT/.venv" ]]; then
+    for candidate in "$PKG_ROOT/.venv"/lib/python3.*/site-packages/viser/client; do
         if [[ -d "$candidate" ]]; then
             VISER_CLIENT="$candidate"
             break
@@ -70,9 +67,9 @@ note "viser client at $VISER_CLIENT"
 # `--dry-run` lets us check if the patch would apply cleanly. If the
 # patch is already applied, --dry-run reports "Reversed (or previously
 # applied) patch detected" and we skip the real apply step.
-if patch --dry-run -p2 -d "$(dirname "$SHADER")" -i "$PATCH_FILE" >/dev/null 2>&1; then
+if patch --dry-run -p1 -d "$(dirname "$SHADER")" -i "$PATCH_FILE" >/dev/null 2>&1; then
     note "applying source patch"
-    patch -p2 -d "$(dirname "$SHADER")" -i "$PATCH_FILE"
+    patch -p1 -d "$(dirname "$SHADER")" -i "$PATCH_FILE"
 elif grep -q "Local patch (gsfluent)" "$SHADER"; then
     note "patch already applied to source — skipping"
 else

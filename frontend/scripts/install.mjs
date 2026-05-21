@@ -72,6 +72,17 @@ run(VENV_PY, ["-m", "pip", "install", "--quiet",
   "eval_type_backport>=0.2",
 ]);
 
+// Patch viser's bundled shader to remove the lambda2 < 0 cull that
+// produces visible horizontal-line / region-shaped artifacts on
+// anisotropic 3DGS splats. Idempotent — re-running detects the patch
+// is already applied and exits early. Without this, freshly-installed
+// viser shows visual garbage on every realistic 3DGS scene.
+const PATCH_SCRIPT = resolve(FRONTEND_DIR, "patches/patch-viser.sh");
+if (existsSync(PATCH_SCRIPT)) {
+  note("patching viser shader (one-time per install, ~30s)");
+  run("bash", [PATCH_SCRIPT]);
+}
+
 // ---- 3/4: SPA build --------------------------------------------------------
 
 if (process.env.PYTHON_ONLY === "1") {
