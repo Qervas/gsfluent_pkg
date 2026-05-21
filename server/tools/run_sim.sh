@@ -53,7 +53,7 @@ for v in MODEL_DIR CONFIG PARTICLES OUTPUT; do
 done
 
 # ---------- resolve paths ----------------------------------------------------
-PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SIM_HOME="${GSFLUENT_SIM_HOME:-}"
 SIM_PY="${GSFLUENT_SIM_PYTHON:-python}"
 
