@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "work" / "library" / "sequences"
 CACHE = REPO / "work" / "cache" / "viser"
 CONVERTER = Path(__file__).parent / "sequence_to_viser_npz.py"

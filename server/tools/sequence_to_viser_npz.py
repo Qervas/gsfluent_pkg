@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 from plyfile import PlyData
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "work" / "library" / "sequences"
 SH_C0 = 0.28209479177387814
 

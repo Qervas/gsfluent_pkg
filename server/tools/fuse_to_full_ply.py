@@ -37,7 +37,7 @@ from scipy.spatial import cKDTree
 
 # Make `gsfluent` importable when this script runs from a checkout without
 # pip install. Mirrors the pattern in server/tools/migrate_to_library.py.
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "server") not in sys.path:
     sys.path.insert(0, str(_ROOT / "server"))
 

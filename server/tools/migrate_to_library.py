@@ -45,7 +45,7 @@ from typing import Optional
 
 # Make `gsfluent` importable when the script runs from a checkout without
 # pip install (we're in server/tools/, parent server/ holds the package).
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "server") not in sys.path:
     sys.path.insert(0, str(ROOT / "server"))
 

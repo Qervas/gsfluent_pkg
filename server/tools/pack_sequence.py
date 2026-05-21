@@ -46,7 +46,7 @@ MAGIC = b"GSSQ"
 VERSION = 1
 HEADER_SIZE = 4 + 4 + 4 + 4 + 6 * 4  # = 40 bytes
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "work" / "library" / "sequences"
 
 
