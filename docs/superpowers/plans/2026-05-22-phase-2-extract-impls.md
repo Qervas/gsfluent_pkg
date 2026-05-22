@@ -2704,6 +2704,40 @@ def _make_fake_sim(path: Path) -> None:
     path.chmod(0o755)
 
 
+# Phase 2 collaborators that the shim accepts but does not yet dispatch through
+# (the shim still delegates to core.runner module functions). Phase 3 swaps the
+# delegation for direct ownership, at which point these stubs get replaced by
+# the real concretes wired in composition.py.
+class _NullEmitter:
+    def emit(self, event: str, **context) -> None: pass
+    def child(self, **context): return self
+
+
+class _StubSim:
+    """Placeholder SimulationEngine — never invoked by the Phase 2 shim."""
+    async def run(self, *a, **kw):  # pragma: no cover - shim never calls
+        raise NotImplementedError("Phase 3 replaces the shim with direct sim dispatch")
+
+
+class _StubFuser:
+    """Placeholder Fuser — never invoked by the Phase 2 shim."""
+    def fuse_sequence_dir(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError
+
+
+class _StubCodec:
+    """Placeholder CacheCodec — never invoked by the Phase 2 shim."""
+    media_type = "application/octet-stream"
+    def encode_sequence_dir(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError
+
+
+class _StubStorage:
+    """Placeholder Storage — never invoked by the Phase 2 shim."""
+    async def put(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError
+
+
 @pytest.fixture
 def state_store(tmp_path: Path) -> RunStateStore:
     return RunStateStore(state_dir=tmp_path / "state" / "runs")
@@ -2720,7 +2754,16 @@ def run_mgr(tmp_path: Path, state_store: RunStateStore, monkeypatch) -> AsyncioR
     monkeypatch.setattr(runner, "FUSED_DIR", tmp_path / "fused")
     monkeypatch.setattr(runner, "NPZ_REBUILD_AFTER_RUN", False)
     runner._RUNS.clear()
-    return AsyncioRunManager(state_store=state_store)
+    return AsyncioRunManager(
+        sim_engine=_StubSim(),
+        fuser=_StubFuser(),
+        cache_codec=_StubCodec(),
+        storage=_StubStorage(),
+        obs=_NullEmitter(),
+        state_store=state_store,
+        wall_time_cap_sec=3600,
+        particle_count_cap=500_000,
+    )
 
 
 def test_run_manager_satisfies_protocol(run_mgr: AsyncioRunManager) -> None:
@@ -3148,8 +3191,28 @@ def real_run_mgr(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "NPZ_REBUILD_AFTER_RUN", False)
     runner._RUNS.clear()
 
+    # Phase 2 stubs for collaborators the shim accepts but does not yet
+    # dispatch through. Defined inline so this conformance test stays
+    # self-contained and independent of any single concrete impl.
+    class _NullEmitter:
+        def emit(self, event: str, **context) -> None: pass
+        def child(self, **context): return self
+    class _Stub:
+        def __getattr__(self, name):
+            async def _aio(*a, **kw): raise NotImplementedError
+            return _aio
+
     store = RunStateStore(state_dir=tmp_path / "state" / "runs")
-    return AsyncioRunManager(state_store=store)
+    return AsyncioRunManager(
+        sim_engine=_Stub(),
+        fuser=_Stub(),
+        cache_codec=_Stub(),
+        storage=_Stub(),
+        obs=_NullEmitter(),
+        state_store=store,
+        wall_time_cap_sec=3600,
+        particle_count_cap=500_000,
+    )
 
 
 def test_real_run_mgr_satisfies_protocol(real_run_mgr) -> None:
@@ -3269,7 +3332,28 @@ def build_app(cfg: AppConfig) -> FastAPI:
     cache_codec: CacheCodec = GSQCodec()
     fuser: Fuser = KNNKabschFuser(k=8)
     state_store = RunStateStore(state_dir=cfg.work_dir / "_state" / "runs")
-    run_mgr: RunManager = AsyncioRunManager(state_store=state_store)
+
+    # Phase 2 shim placeholder: MPMSimulationEngine lands in Phase 3 and
+    # replaces this. The Phase 2 shim delegates to core.runner module
+    # functions and never dispatches through `sim_engine`, so a placeholder
+    # that raises on use is the safest fail-loud Phase 3-trigger.
+    class _DeferredSimEngine:
+        async def run(self, *a, **kw):
+            raise NotImplementedError(
+                "Phase 3 wires MPMSimulationEngine here; Phase 2's shim still "
+                "delegates to core.runner module functions and must not call this."
+            )
+
+    run_mgr: RunManager = AsyncioRunManager(
+        sim_engine=_DeferredSimEngine(),
+        fuser=fuser,
+        cache_codec=cache_codec,
+        storage=storage,
+        obs=obs,
+        state_store=state_store,
+        wall_time_cap_sec=cfg.caps.wall_time_sec,
+        particle_count_cap=cfg.caps.particle_count,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
