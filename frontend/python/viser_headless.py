@@ -1043,6 +1043,14 @@ def main() -> int:
                 n_loaded = 0
                 bbox_min = bbox_max = span = None
 
+                # Cells are keyed by their wire-format name
+                # ("sequence:<stem>" / "model:<stem>") in the boot scanner +
+                # /set callers. The SPA's /sync_cell call passes the bare
+                # stem (no prefix), so we prefix here so /set's lookup
+                # succeeds. Models would never come through this path,
+                # so "sequence:" is always correct.
+                cell_key = name if ":" in name else f"sequence:{name}"
+
                 def commit_cell():
                     """Publish current state under the lock + nudge render."""
                     cell = _build_gsq_cell_dict(
@@ -1050,8 +1058,8 @@ def main() -> int:
                         scales_f16, bbox_min, bbox_max, n_loaded=n_loaded,
                     )
                     with lock:
-                        cells[name] = cell
-                        if state["cell"] == name:
+                        cells[cell_key] = cell
+                        if state["cell"] == cell_key:
                             state["scene_dirty"] = True
                             state["pushed_frame"] = -1
 
@@ -1080,7 +1088,7 @@ def main() -> int:
                                     dtype=np.float32,
                                 )
                                 quat_backing[..., 0] = 1.0  # identity rotation default
-                                _set_loading(name, "streaming")
+                                _set_loading(cell_key, "streaming")
 
                         # Phase 2: static block.
                         if (header_parsed is not None and not static_decoded
@@ -1124,13 +1132,13 @@ def main() -> int:
                 except Exception as e:
                     pf.close()
                     partial.unlink(missing_ok=True)
-                    _set_loading(name, "error", "stream_failed")
+                    _set_loading(cell_key, "error", "stream_failed")
                     return {"ok": False, "error": f"stream failed: {e}"}
 
             partial.replace(dest)
 
             if header_parsed is None or not static_decoded or n_loaded == 0:
-                _set_loading(name, "error", "stream_failed")
+                _set_loading(cell_key, "error", "stream_failed")
                 return {"ok": False, "error":
                         f"incomplete .gsq: parsed_header={header_parsed is not None}, "
                         f"static={static_decoded}, frames={n_loaded}"}
