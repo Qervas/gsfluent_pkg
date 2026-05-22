@@ -121,6 +121,57 @@ The Python interpreters are configured via `.env`
 
 ---
 
+## Cap configuration (runaway-recipe defence)
+
+The backend validates every incoming recipe against caps at the API
+boundary. Violations return 422 without spawning any subprocess.
+Defaults are in `server/gsfluent/core/limits.py:DEFAULT_*`; override via
+env vars:
+
+| Env var                           | Default     | Meaning                                      |
+|-----------------------------------|-------------|----------------------------------------------|
+| `GSFLUENT_MAX_PARTICLE_COUNT`     | `500000`    | Max particles per submitted recipe           |
+| `GSFLUENT_MAX_WALL_TIME_SEC`      | `3600`      | Max sim wall-time (PG-killed on overrun)     |
+| `GSFLUENT_MAX_RECIPE_BYTES`       | `16384`     | Max recipe JSON size (DoS guard)             |
+
+A cap-violation response:
+
+```json
+{
+  "error": {
+    "kind": "cap_exceeded.particle_count",
+    "message": "Particle count 800000 exceeds limit 500000",
+    "details": { "requested": 800000, "limit": 500000 },
+    "trace_id": "01H8K2P..."
+  }
+}
+```
+
+---
+
+## Component layout
+
+The backend is split into six layers, each a `typing.Protocol` interface
+plus a current concrete implementation, wired in
+`server/gsfluent/composition.py`:
+
+| Layer | Protocol                                    | Current impl                                  |
+|-------|---------------------------------------------|-----------------------------------------------|
+| L0    | (HTTP)                                      | `server/gsfluent/api/*.py`                    |
+| L1    | `protocols/runs.py:RunManager`              | `core/run_manager.py:AsyncioRunManager`       |
+| L2    | `protocols/sim.py:SimulationEngine`         | `core/sim_engines/mpm.py:MPMSimulationEngine` |
+| L3    | `protocols/fuse.py:Fuser`                   | `core/fusers/knn_kabsch.py:KNNKabschFuser`    |
+| L4    | `protocols/cache.py:CacheCodec`             | `core/codecs/gsq.py:GSQCodec`                 |
+| L5    | `protocols/storage.py:Storage`              | `storage/filesystem.py:FilesystemStorage`     |
+| L6    | `protocols/observability.py:EventEmitter`   | `observability/jsonlog.py:StdlibJSONEmitter`  |
+
+Every Protocol has a conformance suite
+(`server/tests/protocols/test_*_conformance.py`); swapping an
+implementation only requires re-running the suite against the new impl.
+Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
 ## Repo layout
 
 | Path                  | Purpose                                                                 |
@@ -129,10 +180,11 @@ The Python interpreters are configured via `.env`
 | `frontend/scripts/`   | Node launchers: `install.mjs`, `start.mjs`, `clean.mjs`.                |
 | `frontend/python/`    | Client-side Python: `viser_headless.py`, `sync_daemon.py`, `vkgs_play.py`. |
 | `frontend/patches/`   | Upstream viser rendering patches (no-cull, point precision).            |
-| `server/`             | FastAPI v1 backend. REST routes + runner live under `gsfluent/`.        |
-| `server/tools/`       | Sim wrapper (`run_sim.sh`), PLY → gsq converter (`pack_splats.py`), fuse, migration.      |
+| `server/`             | FastAPI v1 backend. Six-Protocol layout + composition root under `gsfluent/`. |
+| `server/tools/`       | Sim wrapper (`run_sim.sh`, now a ~20-line conda-activate shim) and CLI wrappers around `core/` impls. |
 | `server/recipes/`     | Built-in simulation recipe JSONs.                                       |
 | `server/patches/`     | Upstream GaussianFluent sim patches.                                    |
+| `deploy/`             | systemd units (`gsfluent-backend.service` + `gsfluent-backend.dev.service`) and deploy guide (`README.md`). |
 | `docs/`               | API reference, architecture doc.                                        |
 | `work/`               | Runtime data (gitignored): `library/sequences/<run>/`, `cache/viser/*.gsq`. |
 

@@ -113,6 +113,53 @@ Python 解释器在 `.env` 里通过 `GSFLUENT_API_PYTHON` / `GSFLUENT_SIM_PYTHO
 
 ---
 
+## 限额配置(防止跑飞)
+
+后端在 API 边界对 recipe 做 cap 校验,违规直接 422 拒绝,不会拉起子进程。
+默认值在 `server/gsfluent/core/limits.py:DEFAULT_*`,可通过环境变量改写:
+
+| 环境变量                          | 默认值      | 含义                                 |
+|-----------------------------------|-------------|--------------------------------------|
+| `GSFLUENT_MAX_PARTICLE_COUNT`     | `500000`    | recipe 单次允许的最大粒子数          |
+| `GSFLUENT_MAX_WALL_TIME_SEC`      | `3600`      | sim 最长 wall-time 秒数(超时 PG-kill)|
+| `GSFLUENT_MAX_RECIPE_BYTES`       | `16384`     | recipe JSON 体积上限(防 DoS)       |
+
+cap 触发返回的错误结构:
+
+```json
+{
+  "error": {
+    "kind": "cap_exceeded.particle_count",
+    "message": "Particle count 800000 exceeds limit 500000",
+    "details": { "requested": 800000, "limit": 500000 },
+    "trace_id": "01H8K2P..."
+  }
+}
+```
+
+---
+
+## 组件分层
+
+后端按六层 Protocol 切分,每层一个 `typing.Protocol` 接口 + 一个
+当前的具体实现,在 `server/gsfluent/composition.py` 一次性接装:
+
+| 层 | Protocol                                    | 当前实现                                       |
+|----|---------------------------------------------|------------------------------------------------|
+| L0 | (HTTP)                                      | `server/gsfluent/api/*.py`                     |
+| L1 | `protocols/runs.py:RunManager`              | `core/run_manager.py:AsyncioRunManager`        |
+| L2 | `protocols/sim.py:SimulationEngine`         | `core/sim_engines/mpm.py:MPMSimulationEngine`  |
+| L3 | `protocols/fuse.py:Fuser`                   | `core/fusers/knn_kabsch.py:KNNKabschFuser`     |
+| L4 | `protocols/cache.py:CacheCodec`             | `core/codecs/gsq.py:GSQCodec`                  |
+| L5 | `protocols/storage.py:Storage`              | `storage/filesystem.py:FilesystemStorage`      |
+| L6 | `protocols/observability.py:EventEmitter`   | `observability/jsonlog.py:StdlibJSONEmitter`   |
+
+每个 Protocol 有一套 conformance 测试(`server/tests/protocols/test_*_conformance.py`),
+任何新实现替换进来时跑一次就能确认契约。详细架构说明见
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+---
+
 ## 仓库结构
 
 | 路径                | 作用                                                                 |
@@ -121,10 +168,11 @@ Python 解释器在 `.env` 里通过 `GSFLUENT_API_PYTHON` / `GSFLUENT_SIM_PYTHO
 | `frontend/scripts/` | Node 启动脚本 `install.mjs` / `start.mjs` / `clean.mjs`。            |
 | `frontend/python/`  | 客户端跑的 Python:`viser_headless.py`、`sync_daemon.py`、`vkgs_play.py`。 |
 | `frontend/patches/` | 上游 viser 包的渲染补丁(no-cull、point precision)。                |
-| `server/`           | FastAPI v1 backend,只在服务器跑。REST 路由 + runner 在 `gsfluent/`。 |
-| `server/tools/`     | 仿真包装(`run_sim.sh`)、PLY → gsq 转换(`pack_splats.py`)、fuse、迁移等服务端脚本。   |
+| `server/`           | FastAPI v1 backend,只在服务器跑。六层 Protocol + composition root 在 `gsfluent/`。 |
+| `server/tools/`     | 仿真包装薄壳(`run_sim.sh` 现在 ≈20 行 conda-activate),其余 PLY/打包脚本是 `core/` 实现的 CLI 包装。 |
 | `server/recipes/`   | 内置仿真 recipe JSON。                                               |
 | `server/patches/`   | 上游 GaussianFluent 仿真补丁。                                       |
+| `deploy/`           | systemd unit (`gsfluent-backend.service` + `gsfluent-backend.dev.service`) 和部署手册 (`README.md`)。 |
 | `docs/`             | API 参考、架构文档。                                                 |
 | `work/`             | 运行时数据(已 gitignore):`library/sequences/<run>/`、`cache/viser/*.gsq`。 |
 
