@@ -17,8 +17,8 @@
 //   VISER_NPZ_DIR          default <repo>/work/cache/viser
 //   OPEN_BROWSER           default 1 (0 disables auto-open)
 
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import concurrently from "concurrently";
@@ -46,15 +46,49 @@ if (!existsSync(VENV_PY)) {
   console.error(`ERROR: ${VENV_PY} not found.\n\nRun \`npm install\` first; it creates the venv + builds the SPA.`);
   process.exit(1);
 }
-if (!existsSync(resolve(FRONTEND_DIR, "dist/index.html"))) {
-  console.error("ERROR: frontend/dist/index.html missing.\n\nRun `npm install` first, or `npm run build` to rebuild.");
-  process.exit(1);
-}
 if (!existsSync(VISER_SCRIPT)) {
   console.error(`ERROR: ${VISER_SCRIPT} missing — wrong working tree?`);
   process.exit(1);
 }
 mkdirSync(VISER_NPZ_DIR, { recursive: true });
+
+// ---- rebuild dist if any source file is newer than the last build ----------
+// Without this, `git pull && npm start` silently serves a stale bundle —
+// the SPA's auto-trigger / pill / etc. only exists in source, not in dist/.
+// Set SKIP_BUILD=1 to bypass (e.g. when iterating on viser_headless only).
+
+function srcIsNewerThanDist() {
+  const distHtml = resolve(FRONTEND_DIR, "dist/index.html");
+  if (!existsSync(distHtml)) return true;
+  const distMtime = statSync(distHtml).mtimeMs;
+  // Walk frontend/src/ and frontend/index.html — the inputs to vite build.
+  // node_modules + dist are excluded automatically since we cap depth.
+  const r = spawnSync(
+    "find",
+    [
+      resolve(FRONTEND_DIR, "src"),
+      resolve(FRONTEND_DIR, "index.html"),
+      "-type", "f",
+      "-newer", distHtml,
+      "-print", "-quit",
+    ],
+    { encoding: "utf8" },
+  );
+  return (r.stdout || "").length > 0;
+}
+
+if (process.env.SKIP_BUILD !== "1" && srcIsNewerThanDist()) {
+  console.log(">>> dist is stale — rebuilding (set SKIP_BUILD=1 to skip)");
+  const b = spawnSync("npm", ["run", "build"], { cwd: FRONTEND_DIR, stdio: "inherit" });
+  if (b.status !== 0) {
+    console.error("ERROR: vite build failed. Fix the errors above and re-run.");
+    process.exit(1);
+  }
+  console.log(">>> dist rebuilt\n");
+} else if (!existsSync(resolve(FRONTEND_DIR, "dist/index.html"))) {
+  console.error("ERROR: frontend/dist/index.html missing. Run `npm install` to bootstrap.");
+  process.exit(1);
+}
 
 console.log(`>>> backend:         ${BACKEND_URL || "(unset)"}`);
 console.log(`>>> SPA:             http://localhost:${UI_PORT}/`);
