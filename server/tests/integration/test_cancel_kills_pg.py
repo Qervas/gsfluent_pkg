@@ -39,6 +39,21 @@ def _pg_alive(pgid: int) -> bool:
         return False
 
 
+async def _wait_pg_dead(pgid: int, *, timeout_sec: float = 1.0) -> bool:
+    """Poll _pg_alive(pgid) until it goes False or timeout.
+
+    After escalate_kill_pg() returns, the main proc is reaped but other
+    PG members may still be in the kernel's exit queue for a few ms.
+    This poller avoids the flaky immediate-assert pattern.
+    """
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not _pg_alive(pgid):
+            return True
+        await asyncio.sleep(0.02)
+    return not _pg_alive(pgid)
+
+
 @pytest.mark.asyncio
 async def test_cancel_sends_sigterm_to_process_group(
     tmp_path: Path,
@@ -77,7 +92,7 @@ async def test_cancel_sends_sigterm_to_process_group(
     await escalate_kill_pg(proc=proc, pgid=pgid, grace_sec=2.0)
 
     assert proc.returncode is not None, "proc did not exit"
-    assert not _pg_alive(pgid), "PG still alive after escalate_kill_pg"
+    assert await _wait_pg_dead(pgid), "PG still alive after escalate_kill_pg"
 
 
 @pytest.mark.asyncio
@@ -115,4 +130,4 @@ async def test_escalate_kill_pg_terminates_pg_with_sigterm(
     assert proc.returncode in (-signal.SIGTERM, 143), (
         f"expected -SIGTERM or 143, got {proc.returncode}"
     )
-    assert not _pg_alive(pgid)
+    assert await _wait_pg_dead(pgid)
