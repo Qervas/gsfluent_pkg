@@ -110,6 +110,8 @@ def _sequence_dict(seq: Sequence) -> dict:
     d["cache"] = {
         "viser_npz_mtime":  _stat_mtime(_VISER_CACHE / f"{seq.name}.npz"),
         "viser_npz_bytes":  _stat_size(_VISER_CACHE / f"{seq.name}.npz"),
+        "splats_gsq_mtime": _stat_mtime(_VISER_CACHE / f"{seq.name}.gsq"),
+        "splats_gsq_bytes": _stat_size(_VISER_CACHE / f"{seq.name}.gsq"),
         "frames_bin_mtime": _stat_mtime(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
         "frames_bin_bytes": _stat_size(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
     }
@@ -337,6 +339,43 @@ async def get_frame(name: str, frame_idx: int):
     return await _get_run_frame(name, frame_idx)
 
 
+@router.get("/{name}/cache/splats.gsq")
+def get_splats_gsq(name: str):
+    """Serve the .gsq visual-lossless streamable cache.
+
+    Produced by `server/tools/pack_splats.py` as a smaller, byte-range
+    addressable alternative to the .npz cache. Typical size: 0.4-1 GB
+    vs 2.9 GB for the npz on the same sequence (~3-7× smaller). Same
+    Range support semantics as the npz endpoint — FileResponse handles
+    it natively.
+
+    Falls through to 404 with a build hint if the .gsq doesn't exist
+    yet. The client is expected to fall back to viser.npz in that case
+    (the older path the build flow already produces).
+    """
+    if not Sequence.exists(name):
+        raise HTTPException(404, f"sequence not found: {name}")
+    path = _VISER_CACHE / f"{name}.gsq"
+    if not path.is_file():
+        raise HTTPException(
+            404,
+            f".gsq not built for '{name}'. Run "
+            f"`python server/tools/pack_splats.py {name}` on the server, "
+            f"or fall back to /api/sequences/{name}/cache/viser.npz.",
+        )
+    target = path.resolve()
+    cache_root = _VISER_CACHE.resolve()
+    try:
+        target.relative_to(cache_root)
+    except ValueError:
+        raise HTTPException(400, f"refusing to serve outside cache: {name}")
+    return FileResponse(
+        target,
+        media_type="application/octet-stream",
+        filename=f"{name}.gsq",
+    )
+
+
 @router.get("/{name}/cache/viser.npz")
 def get_viser_cache(name: str):
     """Serve the .npz viser cache file as a downloadable artifact.
@@ -391,27 +430,51 @@ _build_lock = Lock()
 
 
 def _run_build_subprocess(name: str, job: dict) -> None:
-    """Worker thread: run batch_convert_to_npz.py for one sequence, update `job`."""
-    converter = PKG_ROOT / "server" / "tools" / "batch_convert_to_npz.py"
-    cmd = [sys.executable, str(converter), name]
+    """Worker thread: build .npz then .gsq for one sequence, update `job`.
+
+    Two steps because pack_splats.py reads the .npz that batch_convert
+    just produced. Failure of step 2 doesn't fail the job — the .npz
+    is the safety net; the client just won't get the smaller artifact.
+    """
+    npz_tool = PKG_ROOT / "server" / "tools" / "batch_convert_to_npz.py"
+    gsq_tool = PKG_ROOT / "server" / "tools" / "pack_splats.py"
+
     try:
-        # 10-minute cap. Real sequences finish in 30-90s; anything past
-        # 10min means the script is stuck and we'd rather surface that
-        # than block the job dict indefinitely.
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # Step 1: build the .npz (legacy path; required for client fallback).
+        r = subprocess.run(
+            [sys.executable, str(npz_tool), name],
+            capture_output=True, text=True, timeout=600,
+        )
+        if r.returncode != 0:
+            with _build_lock:
+                job["state"] = "error"
+                job["stdout_tail"] = (r.stdout or "")[-800:]
+                job["error"] = ((r.stderr or "")[-500:]
+                                or f"npz build exit {r.returncode}")
+                job["finished_at"] = time.time()
+            return
+
+        # Step 2: build the .gsq (smaller, streamable). Best-effort.
+        r2 = subprocess.run(
+            [sys.executable, str(gsq_tool), name],
+            capture_output=True, text=True, timeout=300,
+        )
         with _build_lock:
             job["finished_at"] = time.time()
-            job["stdout_tail"] = (r.stdout or "")[-800:]
-            if r.returncode == 0:
+            job["stdout_tail"] = ((r.stdout or "") + "\n--- pack_splats ---\n"
+                                  + (r2.stdout or ""))[-1500:]
+            if r2.returncode != 0:
+                # npz exists, only gsq failed → still usable
                 job["state"] = "done"
+                job["error"] = "gsq build failed (npz is fine): " + \
+                               (r2.stderr or "")[-300:]
             else:
-                job["state"] = "error"
-                job["error"] = ((r.stderr or "")[-500:]
-                                or f"subprocess exit {r.returncode}")
+                job["state"] = "done"
+
     except subprocess.TimeoutExpired:
         with _build_lock:
             job["state"] = "error"
-            job["error"] = "timeout (>10min)"
+            job["error"] = "timeout"
             job["finished_at"] = time.time()
     except Exception as e:
         with _build_lock:

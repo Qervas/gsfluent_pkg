@@ -108,6 +108,97 @@ def fetch_model_ply(server_base: str, model_path_on_server: str) -> Path:
     return local_path
 
 
+def load_cell_gsq(gsq_path: Path) -> dict:
+    """Decode a .gsq file into the same dict shape mmap_cell produces.
+
+    .gsq is the visual-lossless streamable format produced by
+    server/tools/pack_splats.py. See that file's docstring for the
+    on-disk layout. This loader is the synchronous all-at-once
+    counterpart — decompresses every frame upfront and returns a v2
+    cell dict. A streaming variant that lets viser play frames as
+    they arrive is a separate routine; this one matches the existing
+    mmap_cell contract so the render loop doesn't need to change.
+
+    Memory budget: dequantized frames are float32 (T,N,3) ≈ 1.2 GB for
+    a 151×683k sequence. That's only marginally more than mmap_cell's
+    mmap-backed view, so the page cache absorbs most of it on Linux.
+    """
+    import struct as _struct
+    import zstandard as _zstd
+
+    with open(gsq_path, "rb") as f:
+        head = f.read(80)
+        if head[:4] != b"GSQ1":
+            raise ValueError(f"not a .gsq: magic={head[:4]!r}")
+        (version, n_splats, n_frames) = _struct.unpack_from("<III", head, 4)
+        if version != 1:
+            raise ValueError(f"unsupported .gsq version {version}")
+        (fps_hint,) = _struct.unpack_from("<f", head, 16)
+        bbox_min = np.frombuffer(head[20:32], dtype=np.float32)
+        bbox_max = np.frombuffer(head[32:44], dtype=np.float32)
+        (static_offset, static_size) = _struct.unpack_from("<QI", head, 44)
+
+        # Read frame index table.
+        idx_raw = f.read(n_frames * 16)
+        frame_index = []
+        for i in range(n_frames):
+            off, sz, _r = _struct.unpack_from("<QII", idx_raw, i * 16)
+            frame_index.append((off, sz))
+
+        # Static block: rgb f16 ×3, opacity u8 ×1, scales f16 ×3.
+        f.seek(static_offset)
+        static_blob = _zstd.ZstdDecompressor().decompress(f.read(static_size))
+        off = 0
+        rgb_bytes = n_splats * 3 * 2  # f16
+        rgb_f16 = np.frombuffer(static_blob[off : off + rgb_bytes], dtype=np.float16).reshape(n_splats, 3)
+        off += rgb_bytes
+        opacity_u8 = np.frombuffer(static_blob[off : off + n_splats], dtype=np.uint8).reshape(n_splats)
+        off += n_splats
+        scales_f16 = np.frombuffer(static_blob[off : off + n_splats * 3 * 2], dtype=np.float16).reshape(n_splats, 3)
+
+        # Decompress each frame chunk.
+        dctx = _zstd.ZstdDecompressor()
+        xyz_per_frame = np.empty((n_frames, n_splats, 3), dtype=np.float32)
+        quat_per_frame = np.empty((n_frames, n_splats, 4), dtype=np.float32)
+        span = (bbox_max - bbox_min).astype(np.float32)
+        span[span == 0] = 1.0
+        for t, (off, sz) in enumerate(frame_index):
+            f.seek(off)
+            blob = dctx.decompress(f.read(sz))
+            xyz_i16 = np.frombuffer(blob[: n_splats * 3 * 2], dtype=np.int16).reshape(n_splats, 3)
+            quat_i16 = np.frombuffer(
+                blob[n_splats * 3 * 2 : n_splats * 3 * 2 * 2], dtype=np.int16,
+            ).reshape(n_splats, 3)
+            # Dequantize xyz: int16 +32768 normalizes to [0,65535], scale to span.
+            xyz_per_frame[t] = bbox_min + (xyz_i16.astype(np.float32) + 32768.0) / 65535.0 * span
+            # Recover qw from qx,qy,qz. We dropped qw sign at encode; viser
+            # uses cov = R·S·Sᵀ·Rᵀ which is invariant under q→-q, so it
+            # doesn't matter for rendering.
+            qxyz = quat_i16.astype(np.float32) / 32767.0
+            qw = np.sqrt(np.clip(1.0 - (qxyz * qxyz).sum(axis=1), 0.0, 1.0))
+            quat_per_frame[t, :, 0] = qw
+            quat_per_frame[t, :, 1:4] = qxyz
+
+    # Match mmap_cell's v2 dict shape, including the same bbox derivation
+    # (frame-0 × K, plus floor_z from the global frame-z min).
+    frames_scaled_0 = xyz_per_frame[0] * _VISER_K
+    bbox_lo = frames_scaled_0.min(axis=0).astype(np.float32)
+    bbox_hi = frames_scaled_0.max(axis=0).astype(np.float32)
+    bbox_lo[2] = float(xyz_per_frame[..., 2].min() * _VISER_K)
+    K2 = _VISER_K * _VISER_K
+    scales_f32 = scales_f16.astype(np.float32)
+    return {
+        "version": 2,
+        "frames": xyz_per_frame,                          # (T,N,3) f32
+        "quats": quat_per_frame,                          # (T,N,4) f32
+        "scales_sq": (scales_f32 * scales_f32) * K2,
+        "rgb": rgb_f16.astype(np.float32),                # (N,3) f32
+        "opacity": (opacity_u8.astype(np.float32) / 255.0).reshape(-1, 1),
+        "bbox_lo": bbox_lo,
+        "bbox_hi": bbox_hi,
+    }
+
+
 def mmap_cell(npz_path: Path) -> dict:
     """Mmap a sequence .npz and pre-compute its bbox.
 
@@ -408,14 +499,22 @@ def main() -> int:
         args.sync_status_file = Path(_xdg) / "gsfluent_sync_status.json"
 
     npz_root = Path(args.npz_dir)
+    # Boot-time scan: prefer .gsq over .npz when both exist (smaller +
+    # faster to load). Sequences with only one of the two still load.
     npz_paths = sorted(npz_root.glob("*.npz"))
-    if not npz_paths:
-        print(f"ERROR: no .npz in {npz_root}")
+    gsq_paths = sorted(npz_root.glob("*.gsq"))
+    cell_paths: dict[str, Path] = {}
+    for p in npz_paths:
+        cell_paths[p.stem] = p
+    for p in gsq_paths:
+        cell_paths[p.stem] = p  # .gsq wins if both present
+    if not cell_paths:
+        print(f"ERROR: no .npz or .gsq in {npz_root}")
         return 2
 
-    print(f"mmap-loading {len(npz_paths)} cells from {npz_root}...")
+    print(f"mmap-loading {len(cell_paths)} cells from {npz_root}...")
     cells: dict[str, dict] = {}
-    for path in npz_paths:
+    for stem, path in sorted(cell_paths.items()):
         # Key cells by their wire-format name (`sequence:<stem>`) so they
         # match what the React workbench sends. Without this, pre-mmap'd
         # cells live under bare names while lazy-loaded ones live under
@@ -423,20 +522,21 @@ def main() -> int:
         # cells as "not in viser cache" because it only knows the wire
         # form. Models go through resolve_cell_lazily on demand and
         # already land under `model:<name>`, so we don't add any here.
-        key = f"sequence:{path.stem}"
+        key = f"sequence:{stem}"
         try:
-            cells[key] = mmap_cell(path)
+            cells[key] = (load_cell_gsq(path) if path.suffix == ".gsq"
+                          else mmap_cell(path))
         except (KeyError, ValueError, OSError) as e:
-            # A single malformed .npz (missing cov / quats / scales /
-            # truncated archive) shouldn't kill the whole renderer.
-            # Skip it with a warning so the remaining cells still load.
+            # A single malformed cell file (missing key / truncated /
+            # bad zstd) shouldn't kill the whole renderer. Skip with
+            # a warning so the remaining cells still load.
             print(f"  {key}: SKIPPED — {type(e).__name__}: {e}")
             continue
         c = cells[key]
-        print(f"  {key}: {c['frames'].shape}  "
+        print(f"  {key}: {c['frames'].shape}  ({path.suffix})  "
               f"bbox=({c['bbox_lo']}, {c['bbox_hi']})")
     if not cells:
-        print(f"ERROR: every .npz in {npz_root} was malformed")
+        print(f"ERROR: every cell file in {npz_root} was malformed")
         return 2
 
     def _set_loading(name: str | None, phase: str | None, error: str | None = None) -> None:
@@ -498,12 +598,18 @@ def main() -> int:
                 return False, "parse_failed"
 
         def _try_sequence(seq_name: str) -> tuple[bool, str | None]:
-            p = npz_root / f"{seq_name}.npz"
-            if not p.is_file():
+            gsq = npz_root / f"{seq_name}.gsq"
+            npz = npz_root / f"{seq_name}.npz"
+            # .gsq wins when both exist (smaller + visually identical).
+            if gsq.is_file():
+                p, loader = gsq, load_cell_gsq
+            elif npz.is_file():
+                p, loader = npz, mmap_cell
+            else:
                 return False, "not_found"
             _set_loading(name, "parsing")
             try:
-                cells[name] = mmap_cell(p)
+                cells[name] = loader(p)
                 print(f"  loaded sequence cell {name} from {p}")
                 return True, None
             except Exception as e:
@@ -869,10 +975,15 @@ def main() -> int:
 
     @api.post("/sync_cell")
     def sync_cell(name: str, url: str) -> dict:
-        """Download an .npz from `url` and mmap it as cell `name`.
+        """Download a cell artifact from `url` and load it as cell `name`.
+
+        Accepts both .npz and .gsq URLs — picked by suffix on the URL.
+        Save path mirrors the suffix so the same path also works for the
+        boot-time scanner and the lazy resolver (both already understand
+        either extension).
 
         Used by the SPA's on-demand cache flow: when a sequence has no
-        local .npz, the SPA POSTs /api/sequences/{name}/cache/build to
+        local copy, the SPA POSTs /api/sequences/{name}/cache/build to
         the backend to build it server-side, then calls this endpoint
         with the download URL so the client picks up the artifact and
         registers the cell. Removes the need for sync_daemon for the
@@ -883,18 +994,22 @@ def main() -> int:
         """
         if not _SAFE_NAME.match(name):
             return {"ok": False, "error": f"invalid cell name: {name!r}"}
-        npz_path = (npz_root / f"{name}.npz").resolve()
+        # Choose suffix from URL (strip query); default to .npz.
+        u = url.split("?", 1)[0].rstrip("/").lower()
+        suffix = ".gsq" if u.endswith(".gsq") else ".npz"
+        loader = load_cell_gsq if suffix == ".gsq" else mmap_cell
+        dest = (npz_root / f"{name}{suffix}").resolve()
         try:
-            npz_path.relative_to(npz_root.resolve())
+            dest.relative_to(npz_root.resolve())
         except ValueError:
             return {"ok": False, "error": f"cell path escapes npz_dir: {name!r}"}
 
         # Stream-download to a `.partial` sibling then atomic-rename, so
-        # an interrupted download doesn't leave a corrupt .npz that
-        # mmap_cell would later choke on. trust_env=False so a user-set
+        # an interrupted download doesn't leave a corrupt file that the
+        # loader would later choke on. trust_env=False so a user-set
         # http_proxy (ClashX / corp proxy) doesn't try to route a
         # localhost-bound URL through the proxy and 502.
-        partial = npz_path.with_suffix(".npz.partial")
+        partial = dest.with_suffix(f"{suffix}.partial")
         try:
             with httpx.stream("GET", url, timeout=600.0,
                               follow_redirects=True, trust_env=False) as r:
@@ -904,15 +1019,15 @@ def main() -> int:
                 with open(partial, "wb") as f:
                     for chunk in r.iter_bytes(chunk_size=1024 * 1024):
                         f.write(chunk)
-            partial.replace(npz_path)
+            partial.replace(dest)
         except Exception as e:
             partial.unlink(missing_ok=True)
             return {"ok": False, "error": f"download failed: {e}"}
 
         try:
-            new_data = mmap_cell(npz_path)
+            new_data = loader(dest)
         except Exception as e:
-            return {"ok": False, "error": f"mmap failed: {e}"}
+            return {"ok": False, "error": f"load failed: {e}"}
         with lock:
             was_new = name not in cells
             cells[name] = new_data

@@ -263,15 +263,19 @@ export function ViserSplatScene() {
         // state "building" / "idle" — keep polling.
       }
 
-      // viser pulls from the backend. Use VITE_BACKEND_URL when set
-      // (direct), otherwise route through the same origin so vite's
-      // proxy handles it.
-      const downloadUrl =
-        (apiBase || window.location.origin) +
-        `/api/sequences/${encodeURIComponent(name)}/cache/viser.npz`;
+      // Pick which artifact to download: prefer the smaller .gsq if
+      // the backend built it. Fall back to the .npz on 404 (older
+      // builds, build flow regression, etc.). Both decoders live in
+      // viser_headless and are picked by URL suffix in /sync_cell.
+      const origin = apiBase || window.location.origin;
+      const seqEnc = encodeURIComponent(name);
+      const gsqUrl = `${origin}/api/sequences/${seqEnc}/cache/splats.gsq`;
+      const npzUrl = `${origin}/api/sequences/${seqEnc}/cache/viser.npz`;
+      const head = await fetch(gsqUrl, { method: "HEAD" }).catch(() => null);
+      const downloadUrl = head && head.ok ? gsqUrl : npzUrl;
       setBuildState("syncing");
       const r3 = await fetch(
-        `${controlUrl}/sync_cell?name=${encodeURIComponent(name)}&url=${encodeURIComponent(downloadUrl)}`,
+        `${controlUrl}/sync_cell?name=${seqEnc}&url=${encodeURIComponent(downloadUrl)}`,
         { method: "POST" },
       );
       const d3 = await r3.json();

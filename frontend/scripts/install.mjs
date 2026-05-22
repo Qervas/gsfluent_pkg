@@ -73,6 +73,9 @@ run(VENV_PY, ["-m", "pip", "install", "--quiet",
   // plyfile: required by viser_headless.mmap_model_cell to parse 3DGS
   // .ply files. Missing it crashes model loads with parse_failed.
   "plyfile>=1.0",
+  // zstandard: decoder for the .gsq streamable splat format
+  // (server/tools/pack_splats.py emits zstd-compressed per-frame chunks).
+  "zstandard>=0.22",
 ]);
 
 // Patch viser's bundled shader to remove the lambda2 < 0 cull that
