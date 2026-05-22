@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, TypeVar
 
 from gsfluent.core import runner as _runner
+from gsfluent.core.recovery import RecoveryDecision, classify_recovery
 from gsfluent.core.state import (
     RunStateRecord,
     RunStateStore,
@@ -230,6 +231,12 @@ class AsyncioRunManager:
         self._procs: dict[RunId, asyncio.subprocess.Process] = {}
         self._futures: dict[RunId, asyncio.Future[None]] = {}
         self._tasks: dict[RunId, asyncio.Task[None]] = {}
+        self._pgids: dict[RunId, int] = {}
+        # Runs the boot-recovery pass found still alive (PG owned by an
+        # old backend instance). We track the IDs so /api/runs/<id> can
+        # surface them, even though we cannot send signals through the
+        # asyncio Process handle (we don't own it after restart).
+        self._reattached: set[RunId] = set()
         self._wall_time_cap_sec = wall_time_cap_sec
         self._particle_count_cap = particle_count_cap
         # Phase 2 keeps the legacy state_store alias for back-compat with the
@@ -312,48 +319,82 @@ class AsyncioRunManager:
         return _empty()
 
     async def recover_on_boot(self) -> RecoveryReport:
-        """Scan state dir; reconcile in-flight runs with live PIDs.
+        """Scan state dir, classify each non-terminal run, persist outcomes.
 
-        Phase 2 scope: only mark orphans (PID dead or PID+starttime mismatch)
-        as INTERRUPTED. No live-PID reattachment yet — the legacy runner's
-        in-memory _RUNS registry does not survive process restart, so a
-        running PID we don't own can't be controlled via the shim. Phase 4
-        adds true reattachment.
+        Implements spec Flow C. Uses core.recovery.classify_recovery as
+        the pure decision rule (3 branches: TERMINAL_ALREADY / REATTACH /
+        INTERRUPT) so the policy is unit-tested without spawning processes.
+
+        Returns RecoveryReport summarizing counts. Also emits per-run
+        events (boot.run.reattached / boot.run.interrupted) and a final
+        boot.recovery_complete event so the operator sees recovery
+        outcome in journalctl.
+
+        REATTACH semantics in Phase 4: re-load the in-memory record so
+        /api/runs/<id> reports its real state. Full subprocess pipe
+        reattachment is out of scope - with KillMode=mixed the typical
+        restart leaves no live PG to reattach; the rare case where the
+        sim is still alive simply runs to completion under its own PG
+        and writes frames to disk as normal.
         """
         reattached = 0
         interrupted = 0
         terminal_already = 0
+
         for rec in self._state_store.scan():
-            if rec.is_terminal():
+            decision = classify_recovery(rec)
+
+            if decision is RecoveryDecision.TERMINAL_ALREADY:
                 terminal_already += 1
                 continue
-            # Phase 2: any non-terminal state with no live PID becomes interrupted.
-            alive = False
-            if rec.pid is not None and rec.pid_starttime is not None:
-                alive = is_pid_alive_with_starttime(rec.pid, rec.pid_starttime)
-            if alive:
-                # Phase 2 cannot reattach (legacy runner doesn't expose a
-                # reattach hook). Leave the state file untouched and tally
-                # under interrupted so the operator sees the boundary case;
-                # Phase 4 will replace this branch with a true reattach.
-                interrupted += 1
-                self._state_store.write(rec.transition(
-                    state=RunState.INTERRUPTED,
-                    error={"kind": "internal.backend_restarted",
-                           "message": "live PID found but Phase 2 cannot reattach"},
-                ))
-            else:
-                interrupted += 1
-                self._state_store.write(rec.transition(
-                    state=RunState.INTERRUPTED,
-                    error={"kind": "internal.backend_restarted",
-                           "message": "no live PID match"},
-                ))
-        return RecoveryReport(
+
+            if decision is RecoveryDecision.REATTACH:
+                reattached += 1
+                # Phase 4 re-attach: register the run in the in-memory map
+                # so /api/runs/<id> can surface its state. The original
+                # watcher task is gone (we restarted), so we cannot pipe
+                # sim stdout anymore - but the subprocess is still running
+                # under its original PG and will write frames to disk on
+                # its own.
+                self._reattached.add(rec.id)
+                self._obs.emit(
+                    "boot.run.reattached",
+                    run_id=rec.id,
+                    pid=rec.pid,
+                    pgid=rec.pgid,
+                    state=rec.state.value,
+                )
+                continue
+
+            # INTERRUPT: mark interrupted and persist.
+            interrupted += 1
+            updated = rec.transition(
+                state=RunState.INTERRUPTED,
+                error={
+                    "kind": "internal.backend_restarted",
+                    "message": "Run was interrupted by a backend restart; please re-submit",
+                },
+            )
+            self._state_store.write(updated)
+            self._obs.emit(
+                "boot.run.interrupted",
+                run_id=rec.id,
+                previous_state=rec.state.value,
+                pid=rec.pid,
+            )
+
+        report = RecoveryReport(
             reattached=reattached,
             interrupted=interrupted,
             terminal_already=terminal_already,
         )
+        self._obs.emit(
+            "boot.recovery_complete",
+            reattached=reattached,
+            interrupted=interrupted,
+            terminal_already=terminal_already,
+        )
+        return report
 
     async def wait_for(self, run_id: RunId) -> RunStatus:
         """Block until the run reaches a terminal state, then return final status.
