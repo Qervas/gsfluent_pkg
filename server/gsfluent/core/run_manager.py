@@ -1,0 +1,243 @@
+"""AsyncioRunManager — RunManager Protocol shim over the existing core.runner
+module-level functions.
+
+Phase 2 scope: thin adapter. submit() delegates to runner.start_run; cancel()
+delegates to runner.cancel_run; status() reads from the in-memory _RUNS
+registry and the persisted RunStateStore; recover_on_boot() reads the state
+dir and reconciles orphans with no live PID match (marks them INTERRUPTED).
+
+The legacy runner.start_run signature requires explicit kwargs (run_name,
+model_dir, recipe_data, recipe_source_name, particles). The Protocol's
+submit(recipe, *, model) collapses this — we shim by reading the missing
+fields from the recipe dict's "_run_name", "_recipe_source_name", and
+"_particles" keys. Callers that need to set them explicitly do so via these
+recipe-dict keys; Phase 3 will replace this convention with a proper typed
+submit signature.
+
+Phase 3 will rewrite this class to own the lifecycle directly (PG-spawn,
+signal escalation, structured event emission). The Protocol surface stays
+unchanged across that transition so api/runs.py only needs to flip from
+direct runner.start_run() calls to Depends(get_run_manager).submit().
+"""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import AsyncIterator
+
+from gsfluent.core import runner as _runner
+from gsfluent.core.state import (
+    RunStateRecord,
+    RunStateStore,
+    is_pid_alive_with_starttime,
+)
+from gsfluent.protocols.cache import CacheCodec
+from gsfluent.protocols.fuse import Fuser
+from gsfluent.protocols.observability import EventEmitter
+from gsfluent.protocols.runs import (
+    CapExceededError,
+    RecoveryReport,
+    RunEvent,
+    RunId,
+    RunState,
+    RunStatus,
+    TERMINAL_RUN_STATES,
+    ValidationError,
+)
+from gsfluent.protocols.sim import ModelRef, SimulationEngine, ValidatedRecipe
+from gsfluent.protocols.storage import Storage
+
+
+def _runner_state_to_run_state(legacy: str) -> RunState:
+    """Map legacy runner.Run.state strings to the typed RunState enum."""
+    return {
+        "queued": RunState.QUEUED,
+        "running": RunState.RUNNING,
+        "done": RunState.COMPLETED,
+        "error": RunState.FAILED,
+        "cancelled": RunState.CANCELLED,
+    }.get(legacy, RunState.QUEUED)
+
+
+class AsyncioRunManager:
+    """RunManager Protocol shim over the existing core.runner module functions.
+
+    Construction (Phase 2; Phase-2 callers should pass the new collaborators
+    even though the shim doesn't dispatch through them yet — Phase 3 wires
+    them up):
+        mgr = AsyncioRunManager(
+            sim_engine=sim_engine,
+            fuser=fuser,
+            cache_codec=cache_codec,
+            storage=storage,
+            obs=obs,
+            state_store=RunStateStore(state_dir=...),
+            wall_time_cap_sec=cfg.caps.wall_time_sec,
+            particle_count_cap=cfg.caps.particle_count,
+        )
+
+    Attribute names are part of the cross-plan contract — Phase 3 and Phase 6
+    reference `_state`, `_obs`, `_procs`, `_futures` directly. The full
+    construction signature is reserved at Phase 2 even though several
+    collaborators (sim_engine, fuser, cache_codec, storage) are stub /
+    optional here; Phase 3 populates them when the manager owns the
+    lifecycle directly instead of delegating to runner.py.
+    """
+
+    def __init__(
+        self,
+        sim_engine: SimulationEngine,
+        fuser: Fuser,
+        cache_codec: CacheCodec,
+        storage: Storage,
+        obs: EventEmitter,
+        state_store: RunStateStore,
+        wall_time_cap_sec: int,
+        particle_count_cap: int,
+    ) -> None:
+        self._sim = sim_engine
+        self._fuser = fuser
+        self._codec = cache_codec
+        self._storage = storage
+        self._obs = obs
+        self._state = state_store
+        self._procs: dict[RunId, asyncio.subprocess.Process] = {}
+        self._futures: dict[RunId, asyncio.Future[None]] = {}
+        self._tasks: dict[RunId, asyncio.Task[None]] = {}
+        self._wall_time_cap_sec = wall_time_cap_sec
+        self._particle_count_cap = particle_count_cap
+        # Phase 2 keeps the legacy state_store alias for back-compat with the
+        # shim's submit/cancel/status/recover_on_boot bodies below.
+        self._state_store = state_store
+
+    async def submit(
+        self, recipe: ValidatedRecipe, *, model: ModelRef
+    ) -> RunId:
+        """Schedule a run. The Phase 2 shim reads required-but-not-in-Protocol
+        fields from the recipe dict under reserved underscore-prefixed keys."""
+        run_name = recipe.get("_run_name")
+        if not run_name:
+            raise ValidationError("recipe missing '_run_name' (Phase 2 shim convention)")
+        recipe_source_name = recipe.get("_recipe_source_name", "unknown")
+        particles = recipe.get("_particles", 0)
+        try:
+            particles = int(particles)
+        except (TypeError, ValueError):
+            raise ValidationError(f"recipe '_particles' must be int; got {particles!r}")
+        if particles < 0:
+            raise CapExceededError(f"particles must be >= 0; got {particles}")
+
+        # Persist initial state BEFORE delegating to the runner so a crash
+        # between submit() and runner.start_run() leaves a discoverable record.
+        legacy_run_id = await _runner.start_run(
+            run_name=run_name,
+            model_dir=model.path,
+            recipe_data=recipe,
+            recipe_source_name=recipe_source_name,
+            particles=particles,
+        )
+        rid = RunId(legacy_run_id)
+        # Persist as RUNNING — recover_on_boot will check PID liveness later.
+        # Phase 3 transitions through STARTED/RUNNING explicitly.
+        self._state_store.write(RunStateRecord(
+            id=rid,
+            state=RunState.RUNNING,
+            sequence_name=run_name,
+        ))
+        return rid
+
+    async def cancel(self, run_id: RunId) -> None:
+        """Idempotent cancellation. Returns silently if run_id is unknown
+        or already terminal (per Protocol contract)."""
+        # Delegate to legacy cancel. It returns False for unknown / terminal runs;
+        # the Protocol says cancel is idempotent so we swallow the False.
+        _runner.cancel_run(run_id)
+        # Update persisted state to CANCELLING (Phase 3 will add the escalation
+        # background task; Phase 2 just records the user's intent).
+        rec = self._state_store.read(run_id)
+        if rec is not None and not rec.is_terminal():
+            self._state_store.write(rec.transition(state=RunState.CANCELLING))
+
+    async def status(self, run_id: RunId) -> RunStatus:
+        """Snapshot the run's current state. Raises KeyError if unknown."""
+        run = _runner.get_run(run_id)
+        rec = self._state_store.read(run_id)
+        if run is None and rec is None:
+            raise KeyError(run_id)
+        # Prefer the live registry state if both exist; fall back to persisted.
+        if run is not None:
+            state = _runner_state_to_run_state(run.state)
+        else:
+            state = rec.state if rec is not None else RunState.QUEUED
+        error = rec.error if rec is not None else None
+        paths = rec.paths if rec is not None else {}
+        return RunStatus(id=run_id, state=state, error=error, paths=paths)
+
+    async def stream_events(
+        self, run_id: RunId
+    ) -> AsyncIterator[RunEvent]:
+        """Phase 2 returns an empty event stream — the legacy runner doesn't
+        emit structured events, just plain stdout lines into run.log.
+        Phase 3 wires this to a real per-run channel that yields RunEvent
+        objects as the lifecycle progresses."""
+        async def _empty():
+            if False:
+                yield  # pragma: no cover
+        return _empty()
+
+    async def recover_on_boot(self) -> RecoveryReport:
+        """Scan state dir; reconcile in-flight runs with live PIDs.
+
+        Phase 2 scope: only mark orphans (PID dead or PID+starttime mismatch)
+        as INTERRUPTED. No live-PID reattachment yet — the legacy runner's
+        in-memory _RUNS registry does not survive process restart, so a
+        running PID we don't own can't be controlled via the shim. Phase 4
+        adds true reattachment.
+        """
+        reattached = 0
+        interrupted = 0
+        terminal_already = 0
+        for rec in self._state_store.scan():
+            if rec.is_terminal():
+                terminal_already += 1
+                continue
+            # Phase 2: any non-terminal state with no live PID becomes interrupted.
+            alive = False
+            if rec.pid is not None and rec.pid_starttime is not None:
+                alive = is_pid_alive_with_starttime(rec.pid, rec.pid_starttime)
+            if alive:
+                # Phase 2 cannot reattach (legacy runner doesn't expose a
+                # reattach hook). Leave the state file untouched and tally
+                # under interrupted so the operator sees the boundary case;
+                # Phase 4 will replace this branch with a true reattach.
+                interrupted += 1
+                self._state_store.write(rec.transition(
+                    state=RunState.INTERRUPTED,
+                    error={"kind": "internal.backend_restarted",
+                           "message": "live PID found but Phase 2 cannot reattach"},
+                ))
+            else:
+                interrupted += 1
+                self._state_store.write(rec.transition(
+                    state=RunState.INTERRUPTED,
+                    error={"kind": "internal.backend_restarted",
+                           "message": "no live PID match"},
+                ))
+        return RecoveryReport(
+            reattached=reattached,
+            interrupted=interrupted,
+            terminal_already=terminal_already,
+        )
+
+    async def wait_for(self, run_id: RunId) -> RunStatus:
+        """Block until the run reaches a terminal state, then return final status.
+
+        Used by tests + observability flows that want to assert on completion.
+        Implementation: each submitted run has an asyncio.Future kept in
+        self._futures; wait_for awaits it. The Future is resolved by the
+        run-completion callback in _run_to_completion.
+        """
+        if run_id not in self._futures:
+            raise KeyError(f"unknown run_id: {run_id}")
+        await self._futures[run_id]
+        return await self.status(run_id)

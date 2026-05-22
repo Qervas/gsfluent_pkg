@@ -76,3 +76,57 @@ def test_validation_and_cap_errors() -> None:
         raise ValidationError("bad recipe")
     with pytest.raises(CapExceededError):
         raise CapExceededError("too many particles")
+
+
+# --- Conformance over real AsyncioRunManager --------------------------------
+
+
+@pytest.fixture
+def real_run_mgr(tmp_path, monkeypatch):
+    from gsfluent.core import runner
+    from gsfluent.core.run_manager import AsyncioRunManager
+    from gsfluent.core.state import RunStateStore
+
+    fake_sim = tmp_path / "fake_sim.sh"
+    fake_sim.write_text("#!/bin/bash\necho '[fake]'\nexit 0\n")
+    fake_sim.chmod(0o755)
+    monkeypatch.setattr(runner, "SIM_SCRIPT_RUNNER", fake_sim)
+    monkeypatch.setattr(runner, "FUSED_DIR", tmp_path / "fused")
+    monkeypatch.setattr(runner, "NPZ_REBUILD_AFTER_RUN", False)
+    runner._RUNS.clear()
+
+    # Phase 2 stubs for collaborators the shim accepts but does not yet
+    # dispatch through. Defined inline so this conformance test stays
+    # self-contained and independent of any single concrete impl.
+    class _NullEmitter:
+        def emit(self, event: str, **context) -> None: pass
+        def child(self, **context): return self
+    class _Stub:
+        def __getattr__(self, name):
+            async def _aio(*a, **kw): raise NotImplementedError
+            return _aio
+
+    store = RunStateStore(state_dir=tmp_path / "state" / "runs")
+    return AsyncioRunManager(
+        sim_engine=_Stub(),
+        fuser=_Stub(),
+        cache_codec=_Stub(),
+        storage=_Stub(),
+        obs=_NullEmitter(),
+        state_store=store,
+        wall_time_cap_sec=3600,
+        particle_count_cap=500_000,
+    )
+
+
+def test_real_run_mgr_satisfies_protocol(real_run_mgr) -> None:
+    rm: RunManager = real_run_mgr
+    assert isinstance(rm, RunManager)
+
+
+@pytest.mark.asyncio
+async def test_real_run_mgr_recover_on_boot_empty(real_run_mgr) -> None:
+    report = await real_run_mgr.recover_on_boot()
+    assert report.reattached == 0
+    assert report.interrupted == 0
+    assert report.terminal_already == 0
