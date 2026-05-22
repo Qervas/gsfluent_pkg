@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
-PKG_ROOT = Path(__file__).resolve().parents[2]  # gsfluent_pkg/
+from ._paths import PKG_ROOT  # re-exported; legacy `from ..server import PKG_ROOT` still works
 
 
 @asynccontextmanager

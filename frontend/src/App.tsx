@@ -7,6 +7,7 @@ import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
 import { RecipesModal } from "@/components/recipes/RecipesModal";
 import { useStore } from "@/lib/store";
+import { CellRef } from "@/lib/cell";
 import { api } from "@/lib/api";
 import type { SequenceItem, ModelItem } from "@/lib/types";
 
@@ -62,7 +63,7 @@ export default function App() {
   const onPickModel = useCallback(
     (m: ModelItem) => {
       setActiveModel(m);
-      useStore.getState().setActiveCell({ kind: "model", name: m.name });
+      useStore.getState().setActiveCell(new CellRef("model", m.name));
       resetForNewRun(m.name);
       setSimState("idle");
     },
@@ -78,7 +79,7 @@ export default function App() {
     if (!activeModel?.path) return;
     const cell = useStore.getState().activeCell;
     if (cell?.kind === "model" && cell.name === activeModel.name) return;
-    useStore.getState().setActiveCell({ kind: "model", name: activeModel.name });
+    useStore.getState().setActiveCell(new CellRef("model", activeModel.name));
     resetForNewRun(activeModel.name);
     setSimState("idle");
   }, [activeModel, resetForNewRun, setSimState]);
@@ -86,7 +87,7 @@ export default function App() {
   const onLoadRun = useCallback(
     (run_name: string) => {
       resetForNewRun(run_name);
-      useStore.getState().setActiveCell({ kind: "sequence", name: run_name });
+      useStore.getState().setActiveCell(new CellRef("sequence", run_name));
     },
     [resetForNewRun],
   );
@@ -107,7 +108,7 @@ export default function App() {
     const baseName = st.activeRecipeName.replace(/^★ /, "");
     const run_name = `${st.activeModel.name}_${baseName}_${ts}`;
     st.resetForNewRun(run_name);
-    st.setActiveCell({ kind: "sequence", name: run_name });
+    st.setActiveCell(new CellRef("sequence", run_name));
     try {
       await api.runs.start({
         run_name,

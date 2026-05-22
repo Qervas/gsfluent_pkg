@@ -35,11 +35,12 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 from scipy.spatial import cKDTree
 
-# Make `gsfluent` importable when this script runs from a checkout without
-# pip install. Mirrors the pattern in server/tools/migrate_to_library.py.
-_ROOT = Path(__file__).resolve().parents[2]
-if str(_ROOT / "server") not in sys.path:
-    sys.path.insert(0, str(_ROOT / "server"))
+# Bootstrap so `gsfluent` imports without pip install (server/tools/ is
+# outside the package); the bootstrap can't use _paths because _paths
+# lives inside the package we're about to make importable.
+_BOOTSTRAP_ROOT = Path(__file__).resolve().parents[2]
+if str(_BOOTSTRAP_ROOT / "server") not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT / "server"))
 
 from gsfluent.core.coord_convert import (  # noqa: E402
     rotate_normals_y_up_to_z_up as _rotate_norm,

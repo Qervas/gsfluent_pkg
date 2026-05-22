@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { ModelItem, Workspace } from "./types";
+import { CellRef } from "./cell";
 
 type SimState = "idle" | "running" | "done" | "error" | "cancelled";
 
@@ -56,8 +57,8 @@ type State = {
    *  resource (model preview vs simulation sequence) and its name.
    *  Null when nothing is loaded. Phase 4 promoted this to the sole
    *  source of truth, dropping the legacy `simRunName` / `simKind` pair. */
-  activeCell: { kind: "model" | "sequence"; name: string } | null;
-  setActiveCell: (cell: { kind: "model" | "sequence"; name: string } | null) => void;
+  activeCell: CellRef | null;
+  setActiveCell: (cell: CellRef | null) => void;
   simNFrames: number;
   simTotalFrames: number;
   simStage: string;
@@ -213,7 +214,16 @@ export const useStore = create<State>((set) => ({
   clearAllOverrides: () => set({ simOverrides: {} }),
   simState: "idle",
   activeCell: null,
-  setActiveCell: (cell) => set({ activeCell: cell }),
+  // Skip the set when the new ref names the same cell — keeps zustand's
+  // identity-compare selectors from firing on no-op rewrites (e.g. when
+  // SourceCard re-renders and re-dispatches the active sequence).
+  setActiveCell: (cell) =>
+    set((st) => {
+      const cur = st.activeCell;
+      if (cell === null && cur === null) return {};
+      if (cell && cur && cell.equals(cur)) return {};
+      return { activeCell: cell };
+    }),
   simNFrames: 0,
   simTotalFrames: 150,
   simStage: "idle",

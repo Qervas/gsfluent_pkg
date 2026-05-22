@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { CellRef } from "@/lib/cell";
 import { useActiveCell } from "@/lib/use-active-cell";
 import { useOverrides } from "@/lib/use-overrides";
 import { Properties } from "@/components/properties/Properties";
@@ -146,7 +147,7 @@ export function SimulationCard(_: Props) {
             const rname = seqRecipeSource ?? null;
             if (m && rname) {
               useStore.getState().resetForNewRun(m.name);
-              useStore.getState().setActiveCell({ kind: "model", name: m.name });
+              useStore.getState().setActiveCell(new CellRef("model", m.name));
               useStore.getState().setSimState("idle");
               api.recipes.get(rname).then((r) =>
                 useStore.getState().loadActiveRecipe(r.name, r.data)

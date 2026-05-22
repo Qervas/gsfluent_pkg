@@ -41,9 +41,17 @@ from pathlib import Path
 import numpy as np
 import zstandard as zstd
 
-REPO = Path(__file__).resolve().parents[2]
-CACHE = REPO / "work" / "cache" / "viser"
-LIB = REPO / "work" / "library" / "sequences"
+# Bootstrap so `gsfluent._paths` is importable without pip install
+# (server/tools/ is outside the package).
+_BOOTSTRAP_ROOT = Path(__file__).resolve().parents[2]
+if str(_BOOTSTRAP_ROOT / "server") not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT / "server"))
+
+from gsfluent._paths import PKG_ROOT, SEQUENCES, CACHE_VISER  # noqa: E402
+
+REPO = PKG_ROOT
+CACHE = CACHE_VISER
+LIB = SEQUENCES
 
 MAGIC = b"GSQ1"
 VERSION = 1

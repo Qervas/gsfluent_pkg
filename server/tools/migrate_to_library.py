@@ -43,12 +43,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# Make `gsfluent` importable when the script runs from a checkout without
-# pip install (we're in server/tools/, parent server/ holds the package).
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT / "server") not in sys.path:
-    sys.path.insert(0, str(ROOT / "server"))
+# Bootstrap so `gsfluent` imports without pip install (server/tools/ is
+# outside the package); the bootstrap can't use _paths because _paths
+# lives inside the package we're about to make importable.
+_BOOTSTRAP_ROOT = Path(__file__).resolve().parents[2]
+if str(_BOOTSTRAP_ROOT / "server") not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT / "server"))
 
+from gsfluent._paths import PKG_ROOT, WORK  # noqa: E402
 from gsfluent.core.library import (  # noqa: E402
     Model,
     Sequence,
@@ -60,7 +62,8 @@ from gsfluent.core.library import (  # noqa: E402
 
 _log = logging.getLogger("migrate")
 
-WORK_DIR = ROOT / "work"
+ROOT = PKG_ROOT  # back-compat for call sites in this file
+WORK_DIR = WORK
 OLD_UPLOADS = WORK_DIR / "uploads"
 OLD_FUSED = WORK_DIR / "fused"
 OLD_STATE = WORK_DIR / "_state"

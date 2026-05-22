@@ -1,10 +1,10 @@
+import type { CellRef } from "./cell";
+
 export type WorkbenchMode =
   | { kind: "idle" }
   | { kind: "model_preview"; modelName: string }
   | { kind: "sim_running"; runName: string }
   | { kind: "sim_replay"; runName: string };
-
-type ActiveCellArg = { kind: "model" | "sequence"; name: string } | null;
 
 /** Derive the workbench display mode from the active cell + sim state.
  *  Phase 4 dropped the legacy `simRunName` (with its `_model:` prefix
@@ -12,7 +12,7 @@ type ActiveCellArg = { kind: "model" | "sequence"; name: string } | null;
  *  the cell directly. */
 export function deriveMode(
   simState: string,
-  activeCell: ActiveCellArg,
+  activeCell: CellRef | null,
   nFrames: number,
 ): WorkbenchMode {
   if (!activeCell) return { kind: "idle" };

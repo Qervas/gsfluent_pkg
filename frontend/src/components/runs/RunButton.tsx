@@ -2,6 +2,7 @@ import { Play, Check, X, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { CellRef } from "@/lib/cell";
 import { useOverrides } from "@/lib/use-overrides";
 
 /** Run button with five visual states, consolidating what used to be
@@ -91,7 +92,7 @@ export function RunButton() {
       const baseName = activeRecipeName!.replace(/^★ /, "");
       const run_name = `${activeModel!.name}_${baseName}_${ts}`;
       resetForNewRun(run_name);
-      useStore.getState().setActiveCell({ kind: "sequence", name: run_name });
+      useStore.getState().setActiveCell(new CellRef("sequence", run_name));
       await api.runs.start({
         run_name,
         model_path: activeModel!.path,

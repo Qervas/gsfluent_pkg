@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { useActiveCell } from "@/lib/use-active-cell";
+import { CellRef } from "@/lib/cell";
 
 /**
  * Splats-mode renderer: viser running headless on the server side, React
@@ -220,10 +221,9 @@ export function ViserSplatScene() {
   // A sim that's mid-flight has the cell selected in the SPA but no
   // .npz has landed yet — just needs to wait.
   const simState = useStore((s) => s.simState);
+  const cellRef = CellRef.tryParseWire(cellName);
   const simIsRunning =
-    simState === "running" &&
-    cellName !== null &&
-    cellName.startsWith("sequence:");
+    simState === "running" && cellRef?.kind === "sequence";
 
   // ── on-demand cache build ──────────────────────────────────────────────
   // When the selected cell is a sequence with no local .npz, instead of
@@ -237,8 +237,7 @@ export function ViserSplatScene() {
   // sync_cell hits the backend through the vite proxy when the SPA was
   // built without VITE_BACKEND_URL (the default — local dev / preview),
   // and direct otherwise.
-  const seqName =
-    cellName?.startsWith("sequence:") ? cellName.slice("sequence:".length) : null;
+  const seqName = cellRef?.kind === "sequence" ? cellRef.name : null;
   type BuildState = "idle" | "building" | "syncing" | "error";
   const [buildState, setBuildState] = useState<BuildState>("idle");
   const [buildError, setBuildError] = useState<string | null>(null);
@@ -293,14 +292,18 @@ export function ViserSplatScene() {
 
   // Labels for the upper-left progress / error pill. Pulled out so the
   // mapping is editable in one spot without touching the rendering JSX.
+  // The viser /state endpoint returns wire-format names; parse defensively
+  // so a malformed payload falls back to the raw string rather than
+  // throwing inside render.
   function progressLabel(phase: string, name: string): string | null {
-    const bare = name.replace(/^(model:|sequence:)/, "");
+    const bare = CellRef.tryParseWire(name)?.name ?? name;
     if (phase === "fetching") return `Fetching ${bare}…`;
     if (phase === "parsing")  return "Parsing splats…";
     return null;
   }
   function errorLabel(tag: string | null, name: string): string {
-    const kind = name.startsWith("sequence:") ? "sequence" : "model";
+    const kind: "model" | "sequence" =
+      CellRef.tryParseWire(name)?.kind ?? "model";
     if (tag === "not_found")    return `${kind === "model" ? "Model" : "Sequence"} not found on backend.`;
     if (tag === "fetch_failed") return `Couldn't fetch ${kind} from backend.`;
     if (tag === "parse_failed") return `${kind === "model" ? "Model" : "Sequence"} loaded but couldn't be parsed.`;
@@ -329,7 +332,7 @@ export function ViserSplatScene() {
   const needsDownload =
     loading?.phase === "error" &&
     loading?.error === "not_found" &&
-    loading?.name?.startsWith("sequence:");
+    CellRef.tryParseWire(loading?.name)?.kind === "sequence";
   const viserPill: Pill = !loading || needsDownload
     ? null
     : loading.phase === "error"
