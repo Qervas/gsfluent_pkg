@@ -48,8 +48,15 @@ from gsfluent.protocols.runs import (
     TERMINAL_RUN_STATES,
     ValidationError,
 )
-from gsfluent.protocols.sim import ModelRef, SimulationEngine, ValidatedRecipe
+from gsfluent.protocols.sim import (
+    ModelRef,
+    SimulationEngine,
+    SimWallTimeExceededError,
+    ValidatedRecipe,
+)
 from gsfluent.protocols.storage import Storage
+
+_T = TypeVar("_T")
 
 
 def _runner_state_to_run_state(legacy: str) -> RunState:
@@ -131,6 +138,33 @@ async def escalate_kill_pg(
     except asyncio.TimeoutError:
         # Should not happen after SIGKILL, but don't deadlock the caller.
         pass
+
+
+async def run_with_wall_time(
+    *,
+    coro_factory: Callable[[], Awaitable[_T]],
+    wall_time_sec: float,
+    on_timeout: Callable[[], None],
+) -> _T:
+    """Run a coroutine under a wall-time cap. On timeout, fire on_timeout
+    (which should trigger killpg/escalation) and raise SimWallTimeExceededError.
+
+    The caller is responsible for the actual signal-escalation side effect
+    inside on_timeout — this helper only orchestrates the timing.
+    """
+    try:
+        return await asyncio.wait_for(coro_factory(), timeout=wall_time_sec)
+    except asyncio.TimeoutError:
+        try:
+            on_timeout()
+        except Exception:
+            # on_timeout side effects should not mask the timeout itself.
+            # Phase 6 will log this; for now we swallow so the raise below
+            # still happens.
+            pass
+        raise SimWallTimeExceededError(
+            f"Run exceeded wall-time cap of {wall_time_sec}s"
+        )
 
 
 def _read_pid_starttime(pid: int) -> float | None:
