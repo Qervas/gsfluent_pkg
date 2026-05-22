@@ -1,9 +1,10 @@
 """Composition root — single place where concrete impls get wired into the app.
 
-Phase 1 is a skeleton: it imports the existing FastAPI app factory and
-the AppConfig + EventEmitter we just built, and ensures work directories
-exist. Phase 2 will replace the stub wiring with real concrete impls
-(FilesystemStorage, GSQCodec, KNNKabschFuser, AsyncioRunManager).
+Phase 1 wired EventEmitter and ensured work directories existed.
+Phase 2 grows that: FilesystemStorage, GSQCodec, KNNKabschFuser, and
+AsyncioRunManager land here, attached to app.state for downstream
+Depends() retrieval (which Phase 3 will use to rewire api/runs.py and
+api/sequences.py).
 """
 from __future__ import annotations
 
@@ -21,8 +22,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from gsfluent._paths import PKG_ROOT
 from gsfluent.config import AppConfig
+from gsfluent.core.codecs.gsq import GSQCodec
+from gsfluent.core.fusers.knn_kabsch import KNNKabschFuser
+from gsfluent.core.run_manager import AsyncioRunManager
+from gsfluent.core.state import RunStateStore
 from gsfluent.observability.jsonlog import StdlibJSONEmitter
+from gsfluent.protocols.cache import CacheCodec
+from gsfluent.protocols.fuse import Fuser
 from gsfluent.protocols.observability import EventEmitter
+from gsfluent.protocols.runs import RunManager
+from gsfluent.protocols.storage import Storage
+from gsfluent.storage.filesystem import FilesystemStorage
 
 
 def _ensure_work_dirs(cfg: AppConfig) -> None:
@@ -114,23 +124,71 @@ def _add_legacy_introspection_routes(app: FastAPI) -> None:
 def build_app(cfg: AppConfig) -> FastAPI:
     """Construct the FastAPI app with all concrete dependencies wired.
 
-    Phase 1: skeleton wiring — EventEmitter is real, other deps are stubs
-    until Phase 2 lands their concrete impls. The app still serves the
-    existing routes from api/ as before.
+    Phase 2 attaches the new concretes to app.state so Phase 3 can swap
+    api/runs.py + api/sequences.py to Depends()-based injection. Existing
+    routers continue to call `runner.start_run` / `runner.cancel_run`
+    directly — that wiring is unchanged in Phase 2.
     """
     _ensure_work_dirs(cfg)
 
     obs: EventEmitter = StdlibJSONEmitter(stream=sys.stdout)
     obs.emit("backend.boot", work_dir=str(cfg.work_dir), sim_home=str(cfg.sim_home))
 
+    # Concrete impls.
+    storage: Storage = FilesystemStorage(root=cfg.work_dir / "cache" / "viser")
+    cache_codec: CacheCodec = GSQCodec()
+    fuser: Fuser = KNNKabschFuser(k=8)
+    state_store = RunStateStore(state_dir=cfg.work_dir / "_state" / "runs")
+
+    # Phase 2 shim placeholder: MPMSimulationEngine lands in Phase 3 and
+    # replaces this. The Phase 2 shim delegates to core.runner module
+    # functions and never dispatches through `sim_engine`, so a placeholder
+    # that raises on use is the safest fail-loud Phase 3-trigger.
+    class _DeferredSimEngine:
+        async def run(self, *a, **kw):
+            raise NotImplementedError(
+                "Phase 3 wires MPMSimulationEngine here; Phase 2's shim still "
+                "delegates to core.runner module functions and must not call this."
+            )
+
+    run_mgr: RunManager = AsyncioRunManager(
+        sim_engine=_DeferredSimEngine(),
+        fuser=fuser,
+        cache_codec=cache_codec,
+        storage=storage,
+        obs=obs,
+        state_store=state_store,
+        wall_time_cap_sec=cfg.caps.max_wall_time_sec,
+        particle_count_cap=cfg.caps.max_particle_count,
+    )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Phase 4 will plug RunManager.recover_on_boot() in here.
+        # Phase 4 will replace this with the real recover_on_boot wiring;
+        # Phase 2 calls it now to exercise the shim path on startup.
         obs.emit("backend.lifespan.startup")
+        try:
+            report = await run_mgr.recover_on_boot()
+            obs.emit(
+                "boot.recovery_complete",
+                reattached=report.reattached,
+                interrupted=report.interrupted,
+                terminal_already=report.terminal_already,
+            )
+        except Exception as e:
+            obs.emit("boot.recovery_failed", error=str(e))
         yield
         obs.emit("backend.lifespan.shutdown")
 
     app = FastAPI(title="gsfluent", version="0.1.0", lifespan=lifespan)
+
+    # Attach concretes to app.state so Depends() lookups work in Phase 3.
+    app.state.obs = obs
+    app.state.storage = storage
+    app.state.cache_codec = cache_codec
+    app.state.fuser = fuser
+    app.state.run_mgr = run_mgr
+    app.state.state_store = state_store
 
     # CORS — match the existing policy: allow any localhost/127.0.0.1
     # port (vite dev :5173, vite preview :4173, or any user-chosen port),

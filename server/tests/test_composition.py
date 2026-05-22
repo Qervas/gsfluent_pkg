@@ -51,3 +51,46 @@ def test_create_app_delegates_to_build_app(monkeypatch, tmp_path: Path) -> None:
     # Sanity check: the same routes the original app exposed are still there.
     client = TestClient(app)
     assert client.get("/api/health").status_code == 200
+
+
+# --- Phase 2: concrete impls attached to app.state ---------------------------
+
+
+def test_built_app_has_storage_on_state(cfg: AppConfig) -> None:
+    from gsfluent.protocols.storage import Storage
+    app = build_app(cfg)
+    s = getattr(app.state, "storage", None)
+    assert s is not None
+    assert isinstance(s, Storage)
+
+
+def test_built_app_has_cache_codec_on_state(cfg: AppConfig) -> None:
+    from gsfluent.protocols.cache import CacheCodec
+    app = build_app(cfg)
+    c = getattr(app.state, "cache_codec", None)
+    assert c is not None
+    assert isinstance(c, CacheCodec)
+
+
+def test_built_app_has_fuser_on_state(cfg: AppConfig) -> None:
+    from gsfluent.protocols.fuse import Fuser
+    app = build_app(cfg)
+    f = getattr(app.state, "fuser", None)
+    assert f is not None
+    assert isinstance(f, Fuser)
+
+
+def test_built_app_has_run_mgr_on_state(cfg: AppConfig) -> None:
+    from gsfluent.protocols.runs import RunManager
+    app = build_app(cfg)
+    rm = getattr(app.state, "run_mgr", None)
+    assert rm is not None
+    assert isinstance(rm, RunManager)
+
+
+def test_built_app_has_obs_on_state(cfg: AppConfig) -> None:
+    from gsfluent.protocols.observability import EventEmitter
+    app = build_app(cfg)
+    obs = getattr(app.state, "obs", None)
+    assert obs is not None
+    assert isinstance(obs, EventEmitter)
