@@ -42,9 +42,26 @@ def test_model_load_returns_meta():
 
 
 def test_sequence_load_returns_meta_and_frames():
-    name = Sequence.list()[0]
-    s = Sequence.load(name)
-    assert s is not None
+    # Real `work/library/` accumulates empty sequence dirs from cancelled
+    # / failed runs (just `_meta.json`, no frame_*.ply). Walk the list
+    # and pick the first one that actually has frames — the smoke test
+    # is about "any sequence with frames loads correctly", not
+    # "alphabetically first dir is non-empty".
+    names = Sequence.list()
+    s = None
+    name = None
+    for candidate in names:
+        loaded = Sequence.load(candidate)
+        if (
+            loaded is not None
+            and loaded.meta is not None
+            and loaded.frame_paths()
+        ):
+            s = loaded
+            name = candidate
+            break
+    if s is None:
+        pytest.skip("library/ has no sequence with frames yet")
     assert s.meta is not None, f"sequence {name} has no _meta.json"
     assert s.meta.get("kind") == "sequence"
     frames = s.frame_paths()
