@@ -16,7 +16,7 @@
 //   GSFLUENT_SKIP_NPM_INSTALL  if 1, skip `npm ci` (set by postinstall)
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
