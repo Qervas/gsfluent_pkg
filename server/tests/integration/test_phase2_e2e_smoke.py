@@ -18,7 +18,7 @@ from gsfluent.core.codecs.gsq import GSQCodec, MAGIC
 from gsfluent.core.fusers.knn_kabsch import KNNKabschFuser
 from gsfluent.protocols.sim import ModelRef
 from gsfluent.storage.filesystem import FilesystemStorage
-from tests.fixtures.mock_sim_engine import MockSimulationEngine
+from gsfluent.core.sim_engines.mock import MockSimulationEngine
 
 
 class _NullEmitter:

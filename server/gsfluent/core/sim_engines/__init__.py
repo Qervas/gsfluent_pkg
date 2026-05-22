@@ -1,4 +1,5 @@
 """Concrete SimulationEngine implementations."""
+from gsfluent.core.sim_engines.mock import MockSimulationEngine
 from gsfluent.core.sim_engines.mpm import (
     MPMErrorPattern,
     MPMSimulationEngine,
@@ -7,6 +8,7 @@ from gsfluent.core.sim_engines.mpm import (
 )
 
 __all__ = [
+    "MockSimulationEngine",
     "MPMErrorPattern",
     "MPMSimulationEngine",
     "classify_stderr",
