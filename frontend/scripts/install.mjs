@@ -107,12 +107,6 @@ if (process.env.PYTHON_ONLY === "1") {
   }
 }
 
-// ---- 4/4: placeholder npz --------------------------------------------------
-// viser_headless refuses to start on an empty --npz_dir. Drop a one-splat
-// placeholder so a fresh install works before any real sequences are
-// synced down. Name starts with `_`, which the backend regex rejects, so
-// it can never collide with a real cell.
-
 // ---- bootstrap .env from .env.example if missing --------------------------
 // Without .env, `npm start` falls back to localhost:8080 and every /api/*
 // call 502s. Copy the template so teammates only have to edit one line
@@ -125,21 +119,9 @@ if (!existsSync(ENV_FILE) && existsSync(ENV_EXAMPLE)) {
   note(`bootstrapped .env from .env.example — edit ${ENV_FILE} and set BACKEND_URL`);
 }
 
+// Make sure the cache dir exists. viser_headless now boots fine on an
+// empty dir (lazy cell load on first /set), so no placeholder needed.
 mkdirSync(VISER_NPZ_DIR, { recursive: true });
-const hasNpz = readdirSync(VISER_NPZ_DIR).some((f) => f.endsWith(".npz"));
-if (!hasNpz) {
-  note("writing placeholder .npz");
-  run(VENV_PY, ["-c", `
-import numpy as np
-np.savez(
-    "${resolve(VISER_NPZ_DIR, "_placeholder.npz")}",
-    frames=np.zeros((1, 1, 3), dtype=np.float32),
-    cov=np.eye(3, dtype=np.float32)[None],
-    rgb=np.zeros((1, 3), dtype=np.float32),
-    opacity=np.zeros((1,), dtype=np.float32),
-)
-`]);
-}
 
 note("done.");
 console.log("\nNext:  cd frontend && npm start");

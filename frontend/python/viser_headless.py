@@ -478,33 +478,18 @@ def main() -> int:
     # Argument name kept as `--npz_dir` for back-compat with old launchers,
     # but the directory now holds .gsq cells (npz is fully retired).
     npz_root = Path(args.npz_dir)
-    gsq_paths = sorted(npz_root.glob("*.gsq"))
-    if not gsq_paths:
-        print(f"ERROR: no .gsq in {npz_root}")
-        return 2
-
-    print(f"loading {len(gsq_paths)} cells from {npz_root}...")
+    npz_root.mkdir(parents=True, exist_ok=True)
+    # Lazy boot: just enumerate available .gsq files; do not decode.
+    # Each .gsq decode is ~1-3s + hundreds of MB of dequantized float32,
+    # so eager-loading 4+ cells used to take 10-30s and 3 GB of RAM at
+    # boot — for cells the user might never click. resolve_cell_lazily
+    # loads them on first /set with a "parsing" phase pill so the SPA
+    # shows progress; subsequent clicks are instant from the cells dict.
+    available = sorted(npz_root.glob("*.gsq"))
+    print(f"boot: {len(available)} .gsq cells available in {npz_root} (loaded on demand)")
+    for path in available:
+        print(f"  available: sequence:{path.stem}  ({path.stat().st_size / 1e6:.0f} MB)")
     cells: dict[str, dict] = {}
-    for path in gsq_paths:
-        stem = path.stem
-        # Key cells by their wire-format name (`sequence:<stem>`) so they
-        # match what the React workbench sends. Without this, pre-mmap'd
-        # cells live under bare names while lazy-loaded ones live under
-        # the prefixed form — the SPA then flags the bare-name pre-mmap
-        # cells as "not in viser cache" because it only knows the wire
-        # form. Models go through resolve_cell_lazily on demand and
-        # already land under `model:<name>`, so we don't add any here.
-        key = f"sequence:{stem}"
-        try:
-            cells[key] = load_cell_gsq(path)
-        except (KeyError, ValueError, OSError) as e:
-            print(f"  {key}: SKIPPED — {type(e).__name__}: {e}")
-            continue
-        c = cells[key]
-        print(f"  {key}: {c['frames'].shape}  bbox=({c['bbox_lo']}, {c['bbox_hi']})")
-    if not cells:
-        print(f"ERROR: every .gsq in {npz_root} was malformed")
-        return 2
 
     def _set_loading(name: str | None, phase: str | None, error: str | None = None) -> None:
         """Brief-locked update to state["loading"] so concurrent /state polls
