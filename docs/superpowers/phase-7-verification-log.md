@@ -420,7 +420,36 @@ curl -s -X POST "http://127.0.0.1:8092/set" \
 
 ## Classifier decision
 
-(Task 18 output.)
+Spec Open Question 1 outcome: **IMPLEMENTED PER SPEC DEFAULT** (verified
+in Phase 3 + Phase 6, Phase 7 confirmation only — Branch A).
+
+Inventory:
+- Typed error class: `server/gsfluent/protocols/sim.py:SimUnstableRecipeError`
+  (subclass of `SimError`).
+- Classifier function: `server/gsfluent/core/sim_engines/mpm.py:classify_stderr`
+  (line 91) — scans stderr against ordered patterns, first match wins,
+  fallback `SimCrashedError`.
+- YAML pattern file: `server/gsfluent/core/sim_engines/mpm_error_patterns.yaml`
+  — 4 spec-default patterns:
+  - `sim.gpu_oom`: `out of memory` (case-insensitive) — CUDA OOM
+  - `sim.unstable_recipe`: `CFL` (case-sensitive) — CFL violation
+  - `sim.unstable_recipe`: `illegal memory access` (case-insensitive) —
+    downstream effect of numerical blowup
+  - `sim.unstable_recipe`: `(?:nan|inf)` (case-insensitive) — non-finite
+    particle positions
+- Integration test: `server/tests/integration/test_sim_error_classification.py`
+  (12 parametrized cases — all green; covers each pattern + the
+  no-match fallback + the SimError-subclass dispatch in
+  `MPMSimulationEngine`).
+
+```
+$ pytest tests/integration/test_sim_error_classification.py -v
+======== 12 passed in 0.09s =========
+```
+
+No follow-up work needed. Patterns can be tuned post-launch by editing
+`mpm_error_patterns.yaml`; the file is read once at
+`MPMSimulationEngine.__init__`.
 
 ---
 
