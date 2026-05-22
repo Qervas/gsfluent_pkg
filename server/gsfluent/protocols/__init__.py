@@ -16,6 +16,17 @@ from gsfluent.protocols.fuse import (
     ParticleFrame,
 )
 from gsfluent.protocols.observability import EventEmitter
+from gsfluent.protocols.runs import (
+    CapExceededError,
+    RecoveryReport,
+    RunEvent,
+    RunId,
+    RunManager,
+    RunState,
+    RunStatus,
+    TERMINAL_RUN_STATES,
+    ValidationError,
+)
 from gsfluent.protocols.sim import (
     GPUUnavailableError,
     ModelRef,
@@ -42,6 +53,7 @@ from gsfluent.protocols.storage import (
 __all__ = [
     "CacheCodec",
     "CacheMetadata",
+    "CapExceededError",
     "CodecError",
     "CodecUnsanitizableError",
     "Correspondence",
@@ -54,6 +66,12 @@ __all__ = [
     "GPUUnavailableError",
     "ModelRef",
     "ParticleFrame",
+    "RecoveryReport",
+    "RunEvent",
+    "RunId",
+    "RunManager",
+    "RunState",
+    "RunStatus",
     "SimCrashedError",
     "SimError",
     "SimEnvMissingError",
@@ -70,4 +88,7 @@ __all__ = [
     "StorageNotFoundError",
     "StorageStat",
     "StorageTransientError",
+    "TERMINAL_RUN_STATES",
+    "ValidatedRecipe",
+    "ValidationError",
 ]
