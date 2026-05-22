@@ -49,25 +49,11 @@ export default function App() {
     setFpsHint(Math.min(declared, MAX_PLAYBACK_FPS));
   }, [activeSequenceName, sequences, setFpsHint]);
 
-  // Cmd-R toggles the recipes modal. Registered globally so it works
-  // anywhere in the app, with the standard editable-element guard.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const meta = e.metaKey || e.ctrlKey;
-      if (!meta || e.key.toLowerCase() !== "r") return;
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName?.toUpperCase();
-      const editable =
-        tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
-        target?.isContentEditable === true;
-      if (editable) return;
-      e.preventDefault();
-      const st = useStore.getState();
-      st.setRecipesModalOpen(!st.recipesModalOpen);
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  // (Removed Cmd-R hotkey — it was clobbering the browser's native
+  // reload. The recipes modal is still reachable via the Recipes
+  // button in TopBar. If a hotkey ever comes back, pick something
+  // that doesn't shadow a browser shortcut, e.g. plain "r" with the
+  // editable-element guard.)
 
   // Switching to a model preview is dispatched imperatively (not via a
   // useEffect on `activeModel`), so clicking the same model twice still
