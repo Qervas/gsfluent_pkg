@@ -12,8 +12,15 @@ from gsfluent.core.limits import CapConfig
 
 @pytest.fixture
 def cfg(tmp_path: Path) -> AppConfig:
+    # Phase 6: /api/health now reports sim_home_exists as a real signal,
+    # so the fixture must materialize the directory or the endpoint
+    # would (correctly) return status="down". Existing call sites
+    # treat this directory as a black-box path so creating it doesn't
+    # affect their semantics.
+    sim_home = tmp_path / "sim_home"
+    sim_home.mkdir()
     return AppConfig(
-        sim_home=tmp_path / "sim_home",
+        sim_home=sim_home,
         sim_python="python",
         sim_env=None,
         work_dir=tmp_path / "work",

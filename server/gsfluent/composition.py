@@ -80,13 +80,11 @@ def _add_legacy_introspection_routes(app: FastAPI) -> None:
 
     Preserved verbatim so the existing test suite + deployment handshake
     flows (gpu-check, system info, root index) don't regress when the
-    composition root takes over. Health route lives here too so the
-    response shape (status + pkg_root) matches the previous contract.
+    composition root takes over. Health route now lives in
+    gsfluent.api.health and is mounted separately in build_app() — kept
+    out of this helper because it needs the AppConfig + RunStateStore
+    captured at composition time.
     """
-
-    @app.get("/api/health")
-    async def health() -> dict:
-        return {"status": "ok", "pkg_root": str(PKG_ROOT)}
 
     @app.get("/api/gpu-check")
     async def gpu_check() -> dict:
@@ -287,5 +285,10 @@ def build_app(cfg: AppConfig) -> FastAPI:
     app.include_router(sequences_api.router)
     app.include_router(stream_api.router)
     app.include_router(schemas_api.router)
+
+    # Phase 6: real /api/health (replaces the trivial stub) with the
+    # composition-root state_store + cfg captured in closure.
+    from gsfluent.api.health import build_health_router
+    app.include_router(build_health_router(cfg=cfg, state_store=state_store))
 
     return app
