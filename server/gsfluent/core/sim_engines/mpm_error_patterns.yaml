@@ -1,0 +1,45 @@
+# Stderr pattern -> SimError-subclass classifier for MPMSimulationEngine.
+#
+# The MPM sim writes diagnostic output to stderr (merged into stdout by
+# the orchestrator). On non-zero exit, MPMSimulationEngine scans the
+# tail of stderr against these patterns in order and raises the matched
+# error kind. First match wins. If no pattern matches, the fallback is
+# SimCrashedError (kind: sim.crashed).
+#
+# Operators can tune patterns in-place without code changes — the file
+# is read at MPMSimulationEngine construction time (see mpm.py).
+#
+# Decision: this classifier is included per spec Open Question #1
+# default ("include it, parametrize patterns in YAML so they can be
+# tuned post-launch"). The cost is ~150 lines and one YAML file; the
+# value is structured error-kind reporting customers and operators can
+# act on directly.
+
+patterns:
+  # GPU out-of-memory: torch raises with this exact phrase on CUDA OOM.
+  - error_kind: sim.gpu_oom
+    regex: "out of memory"
+    case_insensitive: true
+    description: "CUDA OOM — sim allocated more GPU memory than available."
+
+  # CFL violation: warp/taichi MPM step emits CFL when substep_dt is too
+  # large for the current particle velocity field. Customer fix: increase
+  # substep count or shrink dt.
+  - error_kind: sim.unstable_recipe
+    regex: "CFL"
+    case_insensitive: false
+    description: "CFL condition violated — substep_dt too large; recipe is numerically unstable."
+
+  # Illegal memory access: a downstream effect of numerical blowup
+  # (NaN positions index past the grid). Same root cause as CFL.
+  - error_kind: sim.unstable_recipe
+    regex: "illegal memory access"
+    case_insensitive: true
+    description: "Illegal memory access on GPU — usually a downstream effect of CFL blowup."
+
+  # NaN / Inf in position output: sim hit a numerical singularity. Same
+  # customer message as CFL but a different upstream cause.
+  - error_kind: sim.unstable_recipe
+    regex: "(?:nan|inf)"
+    case_insensitive: true
+    description: "Non-finite values in particle positions — numerical blowup."
