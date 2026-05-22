@@ -13,9 +13,12 @@ hardcode the server's directory layout:
 
     GSFLUENT_SIM_SCRIPT_RUNNER  path to the shell wrapper invoked per run
                                 (default: <PKG_ROOT>/server/tools/run_sim.sh)
-    GSFLUENT_NPZ_REBUILD        if "1" (default), trigger .npz build after
-                                run completion. Set to "0" if you'd rather
-                                build manually.
+    GSFLUENT_CACHE_REBUILD      if "1" (default), trigger .gsq cache build
+                                after run completion. Set to "0" if you'd
+                                rather build manually. The legacy
+                                GSFLUENT_NPZ_REBUILD env name is honored
+                                as a deprecated alias with a one-shot
+                                warning per process.
 
 The wrapper receives:
     $1            model_dir
@@ -50,9 +53,33 @@ SIM_SCRIPT_RUNNER = Path(os.environ.get(
     "GSFLUENT_SIM_SCRIPT_RUNNER",
     str(PKG_ROOT / "server" / "tools" / "run_sim.sh"),
 ))
-# After a successful run, optionally rebuild the .npz cache so the
+# After a successful run, optionally rebuild the .gsq cache so the
 # client sync daemon notices the new sequence. Off by default in tests.
-NPZ_REBUILD_AFTER_RUN = os.environ.get("GSFLUENT_NPZ_REBUILD", "1") == "1"
+# Canonical env var is GSFLUENT_CACHE_REBUILD; GSFLUENT_NPZ_REBUILD is
+# honored as a deprecated alias with a one-shot per-process warning so
+# stale deployment scripts keep working through one release cycle.
+def _resolve_cache_rebuild() -> bool:
+    new_val = os.environ.get("GSFLUENT_CACHE_REBUILD")
+    legacy_val = os.environ.get("GSFLUENT_NPZ_REBUILD")
+    if new_val is not None:
+        return new_val == "1"
+    if legacy_val is not None:
+        import warnings as _warnings
+        _warnings.warn(
+            "gsfluent: GSFLUENT_NPZ_REBUILD is deprecated; use "
+            "GSFLUENT_CACHE_REBUILD. The old name will be removed in the "
+            "next release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return legacy_val == "1"
+    return True  # default ON
+
+
+CACHE_REBUILD_AFTER_RUN = _resolve_cache_rebuild()
+# Back-compat alias: tests and older callers reference the old name.
+# Removed in the next release alongside GSFLUENT_NPZ_REBUILD.
+NPZ_REBUILD_AFTER_RUN = CACHE_REBUILD_AFTER_RUN
 # Delete the per-frame sim plys + fused plys after the npz is built.
 # The .npz is the canonical artifact downstream (viser_headless + sync
 # daemon both consume it); the intermediate plys total ~6 GB per run
@@ -379,7 +406,7 @@ async def _drain(run: Run, run_dir: Path) -> None:
     # importing it) so any plyfile / numpy work it does runs in its own
     # process — keeps the API server's memory profile clean. Logged to
     # run.log so failures are visible in the same WS replay.
-    if run.state == "done" and NPZ_REBUILD_AFTER_RUN:
+    if run.state == "done" and CACHE_REBUILD_AFTER_RUN:
         try:
             await _rebuild_npz(run.name, run_dir, log_path)
         except Exception as e:
