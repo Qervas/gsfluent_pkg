@@ -108,94 +108,133 @@ def fetch_model_ply(server_base: str, model_path_on_server: str) -> Path:
     return local_path
 
 
+def _gsq_dequantize_frame(blob: bytes, n_splats: int,
+                          bbox_min: np.ndarray, span: np.ndarray) -> tuple:
+    """Decompress one frame chunk into (xyz f32, quat f32) arrays."""
+    import zstandard as _zstd
+    raw = _zstd.ZstdDecompressor().decompress(blob)
+    xyz_i16 = np.frombuffer(raw[: n_splats * 3 * 2], dtype=np.int16).reshape(n_splats, 3)
+    quat_i16 = np.frombuffer(
+        raw[n_splats * 3 * 2 : n_splats * 3 * 2 * 2], dtype=np.int16,
+    ).reshape(n_splats, 3)
+    xyz = bbox_min + (xyz_i16.astype(np.float32) + 32768.0) / 65535.0 * span
+    qxyz = quat_i16.astype(np.float32) / 32767.0
+    qw = np.sqrt(np.clip(1.0 - (qxyz * qxyz).sum(axis=1), 0.0, 1.0))
+    quat = np.empty((n_splats, 4), dtype=np.float32)
+    quat[:, 0] = qw
+    quat[:, 1:4] = qxyz
+    return xyz, quat
+
+
+def parse_gsq_header(buf: bytes) -> dict:
+    """Parse the 80-byte .gsq header + frame index.
+
+    Used by the streaming consumer to know which byte ranges to download
+    and decode incrementally. Returns enough info to build a cell shell
+    that can grow as frames arrive.
+    """
+    import struct as _struct
+    if len(buf) < 80:
+        raise ValueError(f"short header: {len(buf)} bytes")
+    if buf[:4] != b"GSQ1":
+        raise ValueError(f"not a .gsq: magic={buf[:4]!r}")
+    (version, n_splats, n_frames) = _struct.unpack_from("<III", buf, 4)
+    if version != 1:
+        raise ValueError(f"unsupported .gsq version {version}")
+    (fps_hint,) = _struct.unpack_from("<f", buf, 16)
+    bbox_min = np.frombuffer(buf[20:32], dtype=np.float32).copy()
+    bbox_max = np.frombuffer(buf[32:44], dtype=np.float32).copy()
+    (static_offset, static_size) = _struct.unpack_from("<QI", buf, 44)
+
+    index_end = 80 + n_frames * 16
+    if len(buf) < index_end:
+        raise ValueError(f"header read but index incomplete: have {len(buf)} need {index_end}")
+    frame_index = []
+    for i in range(n_frames):
+        off, sz, _r = _struct.unpack_from("<QII", buf, 80 + i * 16)
+        frame_index.append((off, sz))
+    return {
+        "version": version, "n_splats": n_splats, "n_frames": n_frames,
+        "fps_hint": fps_hint,
+        "bbox_min": bbox_min, "bbox_max": bbox_max,
+        "static_offset": static_offset, "static_size": static_size,
+        "frame_index": frame_index,
+    }
+
+
 def load_cell_gsq(gsq_path: Path) -> dict:
-    """Decode a .gsq file into the same dict shape mmap_cell produces.
+    """Decode a complete .gsq file into the same dict shape mmap_cell produces.
 
-    .gsq is the visual-lossless streamable format produced by
-    server/tools/pack_splats.py. See that file's docstring for the
-    on-disk layout. This loader is the synchronous all-at-once
-    counterpart — decompresses every frame upfront and returns a v2
-    cell dict. A streaming variant that lets viser play frames as
-    they arrive is a separate routine; this one matches the existing
-    mmap_cell contract so the render loop doesn't need to change.
-
-    Memory budget: dequantized frames are float32 (T,N,3) ≈ 1.2 GB for
-    a 151×683k sequence. That's only marginally more than mmap_cell's
-    mmap-backed view, so the page cache absorbs most of it on Linux.
+    See server/tools/pack_splats.py for the on-disk layout. This is the
+    synchronous all-at-once loader. For incremental decode used by the
+    streaming /sync_cell path, see _gsq_dequantize_frame + parse_gsq_header.
     """
     import struct as _struct
     import zstandard as _zstd
-
     with open(gsq_path, "rb") as f:
-        head = f.read(80)
-        if head[:4] != b"GSQ1":
-            raise ValueError(f"not a .gsq: magic={head[:4]!r}")
-        (version, n_splats, n_frames) = _struct.unpack_from("<III", head, 4)
-        if version != 1:
-            raise ValueError(f"unsupported .gsq version {version}")
-        (fps_hint,) = _struct.unpack_from("<f", head, 16)
-        bbox_min = np.frombuffer(head[20:32], dtype=np.float32)
-        bbox_max = np.frombuffer(head[32:44], dtype=np.float32)
-        (static_offset, static_size) = _struct.unpack_from("<QI", head, 44)
-
-        # Read frame index table.
-        idx_raw = f.read(n_frames * 16)
-        frame_index = []
-        for i in range(n_frames):
-            off, sz, _r = _struct.unpack_from("<QII", idx_raw, i * 16)
-            frame_index.append((off, sz))
-
-        # Static block: rgb f16 ×3, opacity u8 ×1, scales f16 ×3.
-        f.seek(static_offset)
-        static_blob = _zstd.ZstdDecompressor().decompress(f.read(static_size))
-        off = 0
-        rgb_bytes = n_splats * 3 * 2  # f16
-        rgb_f16 = np.frombuffer(static_blob[off : off + rgb_bytes], dtype=np.float16).reshape(n_splats, 3)
-        off += rgb_bytes
-        opacity_u8 = np.frombuffer(static_blob[off : off + n_splats], dtype=np.uint8).reshape(n_splats)
-        off += n_splats
-        scales_f16 = np.frombuffer(static_blob[off : off + n_splats * 3 * 2], dtype=np.float16).reshape(n_splats, 3)
-
-        # Decompress each frame chunk.
-        dctx = _zstd.ZstdDecompressor()
-        xyz_per_frame = np.empty((n_frames, n_splats, 3), dtype=np.float32)
-        quat_per_frame = np.empty((n_frames, n_splats, 4), dtype=np.float32)
+        head_buf = f.read(80)
+        # n_frames is at bytes 12..16 — read it directly so we know how
+        # much more to read for the index.
+        n_frames_peek = _struct.unpack_from("<I", head_buf, 12)[0]
+        idx_buf = f.read(n_frames_peek * 16)
+        h = parse_gsq_header(head_buf + idx_buf)
+        n_splats, n_frames = h["n_splats"], h["n_frames"]
+        bbox_min, bbox_max = h["bbox_min"], h["bbox_max"]
         span = (bbox_max - bbox_min).astype(np.float32)
         span[span == 0] = 1.0
-        for t, (off, sz) in enumerate(frame_index):
-            f.seek(off)
-            blob = dctx.decompress(f.read(sz))
-            xyz_i16 = np.frombuffer(blob[: n_splats * 3 * 2], dtype=np.int16).reshape(n_splats, 3)
-            quat_i16 = np.frombuffer(
-                blob[n_splats * 3 * 2 : n_splats * 3 * 2 * 2], dtype=np.int16,
-            ).reshape(n_splats, 3)
-            # Dequantize xyz: int16 +32768 normalizes to [0,65535], scale to span.
-            xyz_per_frame[t] = bbox_min + (xyz_i16.astype(np.float32) + 32768.0) / 65535.0 * span
-            # Recover qw from qx,qy,qz. We dropped qw sign at encode; viser
-            # uses cov = R·S·Sᵀ·Rᵀ which is invariant under q→-q, so it
-            # doesn't matter for rendering.
-            qxyz = quat_i16.astype(np.float32) / 32767.0
-            qw = np.sqrt(np.clip(1.0 - (qxyz * qxyz).sum(axis=1), 0.0, 1.0))
-            quat_per_frame[t, :, 0] = qw
-            quat_per_frame[t, :, 1:4] = qxyz
 
-    # Match mmap_cell's v2 dict shape, including the same bbox derivation
-    # (frame-0 × K, plus floor_z from the global frame-z min).
-    frames_scaled_0 = xyz_per_frame[0] * _VISER_K
-    bbox_lo = frames_scaled_0.min(axis=0).astype(np.float32)
-    bbox_hi = frames_scaled_0.max(axis=0).astype(np.float32)
-    bbox_lo[2] = float(xyz_per_frame[..., 2].min() * _VISER_K)
+        f.seek(h["static_offset"])
+        static_blob = _zstd.ZstdDecompressor().decompress(f.read(h["static_size"]))
+        rgb_bytes = n_splats * 3 * 2
+        rgb_f16 = np.frombuffer(static_blob[:rgb_bytes], dtype=np.float16).reshape(n_splats, 3)
+        opacity_u8 = np.frombuffer(static_blob[rgb_bytes:rgb_bytes + n_splats], dtype=np.uint8)
+        scales_f16 = np.frombuffer(static_blob[rgb_bytes + n_splats : rgb_bytes + n_splats + n_splats * 3 * 2],
+                                   dtype=np.float16).reshape(n_splats, 3)
+
+        xyz_per_frame = np.empty((n_frames, n_splats, 3), dtype=np.float32)
+        quat_per_frame = np.empty((n_frames, n_splats, 4), dtype=np.float32)
+        for t, (off, sz) in enumerate(h["frame_index"]):
+            f.seek(off)
+            xyz, quat = _gsq_dequantize_frame(f.read(sz), n_splats, bbox_min, span)
+            xyz_per_frame[t] = xyz
+            quat_per_frame[t] = quat
+
+    return _build_gsq_cell_dict(xyz_per_frame, quat_per_frame, rgb_f16,
+                                opacity_u8, scales_f16, bbox_min, bbox_max,
+                                n_loaded=n_frames)
+
+
+def _build_gsq_cell_dict(xyz: np.ndarray, quat: np.ndarray, rgb_f16: np.ndarray,
+                         opacity_u8: np.ndarray, scales_f16: np.ndarray,
+                         bbox_min: np.ndarray, bbox_max: np.ndarray,
+                         n_loaded: int) -> dict:
+    """Assemble the v2 cell dict from already-decoded arrays.
+
+    n_loaded ≤ xyz.shape[0]; n_frames in the dict reflects what's actually
+    valid so the render loop won't index into uninitialized rows. bbox
+    derives from the global header bbox (not just loaded frames) so the
+    grid + camera don't jitter as more frames stream in.
+    """
     K2 = _VISER_K * _VISER_K
+    bbox_lo = (bbox_min * _VISER_K).astype(np.float32)
+    bbox_hi = (bbox_max * _VISER_K).astype(np.float32)
+    # Render loop wants `frames.shape[0]` == n_valid frames. Slice the
+    # backing array (no copy) so growing n_loaded grows the visible
+    # frame range without reallocating.
     scales_f32 = scales_f16.astype(np.float32)
     return {
         "version": 2,
-        "frames": xyz_per_frame,                          # (T,N,3) f32
-        "quats": quat_per_frame,                          # (T,N,4) f32
+        "frames": xyz[:n_loaded],                         # (n_loaded,N,3)
+        "quats": quat[:n_loaded],                         # (n_loaded,N,4)
         "scales_sq": (scales_f32 * scales_f32) * K2,
-        "rgb": rgb_f16.astype(np.float32),                # (N,3) f32
+        "rgb": rgb_f16.astype(np.float32),
         "opacity": (opacity_u8.astype(np.float32) / 255.0).reshape(-1, 1),
         "bbox_lo": bbox_lo,
         "bbox_hi": bbox_hi,
+        "_streaming": {
+            "xyz_backing": xyz, "quat_backing": quat,
+            "n_total": xyz.shape[0], "n_loaded": n_loaded,
+        },
     }
 
 
@@ -973,43 +1012,171 @@ def main() -> int:
             filename=p.name,
         )
 
+    def _sync_cell_gsq_streaming(name: str, url: str, dest: Path, partial: Path) -> dict:
+        """Streaming .gsq download + incremental decode.
+
+        Reads the request body once. The first chunk(s) supply the
+        header + frame index → we know the static block offset and
+        the per-frame byte ranges. Each subsequent chunk extends a
+        buffer; whenever we have enough bytes for the static block
+        and then each next frame, we decode and grow the cell.
+
+        cells[name] appears the moment frame 0 is decoded. n_loaded
+        grows monotonically until the whole file lands. /state polls
+        see n_frames = n_loaded, so the SPA can scrub right away.
+        """
+        import zstandard as _zstd
+
+        try:
+            with httpx.stream("GET", url, timeout=600.0,
+                              follow_redirects=True, trust_env=False) as r:
+                if r.status_code != 200:
+                    return {"ok": False, "error":
+                            f"download failed: HTTP {r.status_code}"}
+
+                buf = bytearray()
+                pf = open(partial, "wb")
+                header_parsed = None      # dict from parse_gsq_header
+                static_decoded = False
+                rgb_f16 = opacity_u8 = scales_f16 = None
+                xyz_backing = quat_backing = None
+                n_loaded = 0
+                bbox_min = bbox_max = span = None
+
+                def commit_cell():
+                    """Publish current state under the lock + nudge render."""
+                    cell = _build_gsq_cell_dict(
+                        xyz_backing, quat_backing, rgb_f16, opacity_u8,
+                        scales_f16, bbox_min, bbox_max, n_loaded=n_loaded,
+                    )
+                    with lock:
+                        cells[name] = cell
+                        if state["cell"] == name:
+                            state["scene_dirty"] = True
+                            state["pushed_frame"] = -1
+
+                try:
+                    for chunk in r.iter_bytes(chunk_size=1024 * 1024):
+                        buf.extend(chunk)
+                        pf.write(chunk)
+
+                        # Phase 1: header + frame index.
+                        if header_parsed is None and len(buf) >= 80:
+                            import struct as _struct
+                            n_frames_peek = _struct.unpack_from("<I", bytes(buf[:80]), 12)[0]
+                            need = 80 + n_frames_peek * 16
+                            if len(buf) >= need:
+                                header_parsed = parse_gsq_header(bytes(buf[:need]))
+                                bbox_min = header_parsed["bbox_min"]
+                                bbox_max = header_parsed["bbox_max"]
+                                span = (bbox_max - bbox_min).astype(np.float32)
+                                span[span == 0] = 1.0
+                                xyz_backing = np.zeros(
+                                    (header_parsed["n_frames"], header_parsed["n_splats"], 3),
+                                    dtype=np.float32,
+                                )
+                                quat_backing = np.zeros(
+                                    (header_parsed["n_frames"], header_parsed["n_splats"], 4),
+                                    dtype=np.float32,
+                                )
+                                quat_backing[..., 0] = 1.0  # identity rotation default
+                                _set_loading(name, "streaming")
+
+                        # Phase 2: static block.
+                        if (header_parsed is not None and not static_decoded
+                                and len(buf) >= header_parsed["static_offset"] + header_parsed["static_size"]):
+                            s_off = header_parsed["static_offset"]
+                            s_sz = header_parsed["static_size"]
+                            n_sp = header_parsed["n_splats"]
+                            blob = _zstd.ZstdDecompressor().decompress(bytes(buf[s_off : s_off + s_sz]))
+                            rgb_bytes = n_sp * 3 * 2
+                            rgb_f16 = np.frombuffer(blob[:rgb_bytes], dtype=np.float16).reshape(n_sp, 3).copy()
+                            opacity_u8 = np.frombuffer(blob[rgb_bytes:rgb_bytes + n_sp], dtype=np.uint8).copy()
+                            scales_f16 = np.frombuffer(
+                                blob[rgb_bytes + n_sp : rgb_bytes + n_sp + n_sp * 3 * 2],
+                                dtype=np.float16,
+                            ).reshape(n_sp, 3).copy()
+                            static_decoded = True
+
+                        # Phase 3: decode as many subsequent frames as the buffer covers.
+                        if static_decoded:
+                            n_sp = header_parsed["n_splats"]
+                            n_total = header_parsed["n_frames"]
+                            while n_loaded < n_total:
+                                f_off, f_sz = header_parsed["frame_index"][n_loaded]
+                                if len(buf) < f_off + f_sz:
+                                    break  # not enough bytes yet
+                                xyz, quat = _gsq_dequantize_frame(
+                                    bytes(buf[f_off : f_off + f_sz]),
+                                    n_sp, bbox_min, span,
+                                )
+                                xyz_backing[n_loaded] = xyz
+                                quat_backing[n_loaded] = quat
+                                n_loaded += 1
+                            # Publish whenever we made progress AND we have
+                            # at least frame 0 — gates the first visible
+                            # render on the first decoded frame, not the
+                            # first arriving byte.
+                            if n_loaded > 0:
+                                commit_cell()
+
+                    pf.close()
+                except Exception as e:
+                    pf.close()
+                    partial.unlink(missing_ok=True)
+                    _set_loading(name, "error", "stream_failed")
+                    return {"ok": False, "error": f"stream failed: {e}"}
+
+            partial.replace(dest)
+
+            if header_parsed is None or not static_decoded or n_loaded == 0:
+                _set_loading(name, "error", "stream_failed")
+                return {"ok": False, "error":
+                        f"incomplete .gsq: parsed_header={header_parsed is not None}, "
+                        f"static={static_decoded}, frames={n_loaded}"}
+
+            # Final commit (in case the last batch of frames hadn't been
+            # published — commit_cell only runs while bytes are flowing).
+            commit_cell()
+            _set_loading(None, None)
+
+            return {"ok": True, "cell": name, "added": True,
+                    "bytes": dest.stat().st_size,
+                    "n_frames": n_loaded}
+        except Exception as e:
+            partial.unlink(missing_ok=True)
+            return {"ok": False, "error": f"stream failed: {e}"}
+
     @api.post("/sync_cell")
     def sync_cell(name: str, url: str) -> dict:
         """Download a cell artifact from `url` and load it as cell `name`.
 
-        Accepts both .npz and .gsq URLs — picked by suffix on the URL.
-        Save path mirrors the suffix so the same path also works for the
-        boot-time scanner and the lazy resolver (both already understand
-        either extension).
+        For .gsq URLs, decode frames AS THEY ARRIVE. The cell appears in
+        `cells[name]` as soon as the static block is decoded (frame 0
+        included), and grows frame-by-frame as more bytes land. The SPA
+        sees /state.n_frames creep up as the stream progresses, so it
+        can start playback immediately.
 
-        Used by the SPA's on-demand cache flow: when a sequence has no
-        local copy, the SPA POSTs /api/sequences/{name}/cache/build to
-        the backend to build it server-side, then calls this endpoint
-        with the download URL so the client picks up the artifact and
-        registers the cell. Removes the need for sync_daemon for the
-        single-cell case.
+        For .npz URLs, fall back to download-then-load (no streaming).
 
         Path-traversal defense same as /reload: `name` must match
         _SAFE_NAME and the resolved file must stay under npz_dir.
         """
         if not _SAFE_NAME.match(name):
             return {"ok": False, "error": f"invalid cell name: {name!r}"}
-        # Choose suffix from URL (strip query); default to .npz.
         u = url.split("?", 1)[0].rstrip("/").lower()
         suffix = ".gsq" if u.endswith(".gsq") else ".npz"
-        loader = load_cell_gsq if suffix == ".gsq" else mmap_cell
         dest = (npz_root / f"{name}{suffix}").resolve()
         try:
             dest.relative_to(npz_root.resolve())
         except ValueError:
             return {"ok": False, "error": f"cell path escapes npz_dir: {name!r}"}
 
-        # Stream-download to a `.partial` sibling then atomic-rename, so
-        # an interrupted download doesn't leave a corrupt file that the
-        # loader would later choke on. trust_env=False so a user-set
-        # http_proxy (ClashX / corp proxy) doesn't try to route a
-        # localhost-bound URL through the proxy and 502.
         partial = dest.with_suffix(f"{suffix}.partial")
+        if suffix == ".gsq":
+            return _sync_cell_gsq_streaming(name, url, dest, partial)
+
+        # .npz fallback: not streamable, download then load whole.
         try:
             with httpx.stream("GET", url, timeout=600.0,
                               follow_redirects=True, trust_env=False) as r:
@@ -1025,7 +1192,7 @@ def main() -> int:
             return {"ok": False, "error": f"download failed: {e}"}
 
         try:
-            new_data = loader(dest)
+            new_data = mmap_cell(dest)
         except Exception as e:
             return {"ok": False, "error": f"load failed: {e}"}
         with lock:
