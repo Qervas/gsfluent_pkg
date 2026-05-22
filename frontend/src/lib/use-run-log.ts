@@ -138,8 +138,14 @@ export function useRunLogPoller(pollMs: number = 500): void {
           }
         }
         offsetRef.current = r.offset;
-      } catch {
-        /* network blip / 404 (log not yet created) — try again next tick */
+      } catch (err) {
+        /* For library sequences (not active runs), /api/runs/{name}/log is
+           a hard 404 that will never resolve. Permanent-404 → stop polling.
+           Transient errors (network blip, brief 5xx) → keep polling. */
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.startsWith("HTTP 404")) {
+          cancelled = true;
+        }
       }
     };
 
