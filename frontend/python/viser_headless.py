@@ -27,8 +27,12 @@ contents: .gsq is the only format produced today; .npz is fully retired.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import json as _json
+import os as _os
 import re
 import signal
+import sys as _sys
 import threading
 import time
 from pathlib import Path
@@ -40,6 +44,44 @@ import viser
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+
+# ----- structured event emitter (Phase 6) ----------------------------------
+#
+# Mirrors the JSON shape emitted by gsfluent.observability.jsonlog so
+# operators can grep journalctl uniformly across backend + viser_headless
+# events. Writes to stderr (not stdout) because the viser library uses
+# stdout for its own progress messages.
+#
+# We vendor a tiny implementation rather than importing
+# gsfluent.observability because viser_headless is a standalone client
+# script that must remain runnable without the server package on PYTHONPATH.
+
+def _emit_event(event: str, **context):
+    """Emit one structured JSON event to stderr.
+
+    Output shape (one line):
+        {"ts": "2026-05-22T12:34:56.789Z", "level": "INFO",
+         "event": "cell.cache.hit", ...}
+    """
+    obj = {
+        "ts": _dt.datetime.now(_dt.timezone.utc)
+              .isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "level": "INFO",
+        "event": event,
+        "component": "viser_headless",
+    }
+    for k, v in context.items():
+        try:
+            _json.dumps(v)
+            obj[k] = v
+        except (TypeError, ValueError):
+            obj[k] = str(v)
+    _sys.stderr.write(_json.dumps(obj, separators=(",", ":")) + "\n")
+    try:
+        _sys.stderr.flush()
+    except Exception:
+        pass
 
 # Strict-allowlist regex for any user-supplied identifier that becomes
 # part of a filesystem path. Library sequence names already pass through
@@ -1209,7 +1251,13 @@ def main() -> int:
                                 state["scene_dirty"] = True
                                 state["pushed_frame"] = -1
                         _set_loading(None, None)
-                        print(f"  cell.cache.hit ({source}) for {name} from {dest}")
+                        _emit_event(
+                            "cell.cache.hit",
+                            cell=name,
+                            source=source,
+                            path=str(dest),
+                            bytes=dest.stat().st_size,
+                        )
                         return {
                             "ok": True, "cell": name, "added": False,
                             "cached": True, "source": source,
@@ -1237,7 +1285,11 @@ def main() -> int:
                 # Best-effort: only resume when the prefix is non-empty.
                 # Zero-byte partials happen on rare crash modes; treat as
                 # fresh.
-                print(f"  cell.cache.resuming {name} from byte {resume_offset}")
+                _emit_event(
+                    "cell.cache.resuming",
+                    cell=name,
+                    resume_offset=resume_offset,
+                )
                 try:
                     headers = {"Range": f"bytes={resume_offset}-"}
                     with httpx.stream("GET", url, headers=headers,
