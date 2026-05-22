@@ -132,11 +132,77 @@ choice from Phase 2.
 
 ### ruff
 
-(Task 11 output.)
+Task 11 — `ruff check gsfluent/ tests/` final state:
+
+```
+$ ruff check gsfluent/ tests/
+All checks passed!
+```
+
+Fix summary:
+- 155 auto-fixed: F401 unused imports, I001 import sort, UP006 generics
+  modernization, C4xx comprehension cleanups.
+- E702 (semicolon multi-statement, 28 hits): expanded inline matrix
+  assignments to one-statement-per-line in `core/codecs/gsq.py`,
+  `core/frame_stream.py`, `core/fusers/knn_kabsch.py`, and 4 test files.
+- B904 (raise from, 25 hits): added `from e` / `from None` to all
+  `raise HTTPException(...)` inside `except` blocks across `api/*.py`,
+  `core/library.py`, `core/run_manager.py`. Translates internal
+  exceptions into HTTP-layer responses without losing the cause chain.
+- F841 (unused local, 4 hits): removed.
+- E402 (module-level imports after code, 11 hits): per-file ignore for
+  `core/library.py`, `core/models.py` (intentional re-export structure
+  to avoid cycles) and `tests/protocols/*` (real-impl imports below
+  the Protocol-only test block).
+- B008 (function-call default arg, 3 hits): per-file ignore on
+  `gsfluent/api/*.py` — FastAPI's `File`/`Depends`/`Form`/`Query` are
+  framework idiom, not bugs.
+- Restored `from ._paths import PKG_ROOT` re-export in `server.py`
+  (ruff's `--unsafe-fixes` pruned it as "unused"; legacy callers
+  depend on it).
+
+No silenced findings beyond the per-file ignores above.
 
 ### mypy --strict
 
-(Task 12 output.)
+Task 12 — `mypy` (scoped to bulletproofing-slice modules):
+
+```
+$ mypy
+Success: no issues found in 17 source files
+```
+
+Scope (from `[tool.mypy].files`):
+- `gsfluent/protocols/` (all six Protocol modules)
+- `gsfluent/observability/` (`jsonlog.py`)
+- `gsfluent/storage/` (`filesystem.py`)
+- `gsfluent/config.py`
+- `gsfluent/core/state.py`, `limits.py`, `recovery.py`, `sdnotify.py`
+- `gsfluent/core/sim_engines/mock.py`
+
+Explicitly OUT of strict scope (and tracked as legacy type debt):
+- `gsfluent/api/*.py` — 49 type-arg + 52 no-untyped-def violations.
+- `gsfluent/core/library.py`, `library_io.py`, `models.py`,
+  `recipes.py`, `runner.py`, `run_manager.py`, `frame_stream.py`,
+  `codecs/gsq.py`, `fusers/knn_kabsch.py`, `sim_engines/mpm.py` —
+  pre-Phase-1 code that hasn't been audited for strict-typing.
+
+Total legacy debt: 141 errors across 24 files. Threading strict
+through them is a separate sprint; the bulletproofing slice's new
+code (the 17 modules above) is the slice's typed surface.
+
+Fixes applied within scope:
+- `core/limits.py:check_recipe_caps` — `dict` → `dict[str, Any]`.
+- `core/state.py:RunStateRecord` — `error: dict` → `dict[str, Any] | None`;
+  `transition(**changes: Any)`.
+- `storage/filesystem.py:_stream_range._gen` — explicit
+  `AsyncIterator[bytes]` return annotation.
+- `observability/jsonlog.py:RunLogAdapter` — documented Python 3.10
+  `LoggerAdapter` non-generic + Liskov-override `process()` quirks
+  with single-line `# type: ignore` and inline rationale.
+
+No `disable_error_code`, no `strict = false`. Three `# type: ignore`
+total, all annotated.
 
 ---
 
