@@ -84,13 +84,22 @@ on the server and the frontend pulls them on demand over the REST API.
 
 ## Server admin
 
-The backend process is supervised by `server/supervise.sh`, run on the
-GPU host:
+The backend process is supervised by a systemd unit. Files live in
+`deploy/` (`gsfluent-backend.service` for production,
+`gsfluent-backend.dev.service` for a dev box). `Type=notify` +
+`WatchdogSec=30s` detects a wedged backend; every startup runs
+`recover_on_boot()` to reconcile in-flight runs (live PG → re-attach,
+dead PID → mark `INTERRUPTED`). Install steps live in
+[`deploy/README.md`](deploy/README.md).
 
 ```bash
-bash server/supervise.sh up      # start v1 backend with auto-restart
-bash server/supervise.sh status  # show current PID
-bash server/supervise.sh stop    # take it down
+# Production
+sudo systemctl enable --now gsfluent-backend.service
+sudo systemctl status gsfluent-backend.service
+
+# Dev box (per-user systemd)
+systemctl --user enable --now gsfluent-backend.service
+systemctl --user status gsfluent-backend.service
 ```
 
 Bindings:
@@ -102,7 +111,10 @@ Bindings:
 Post-sim utilities (ply → gsq cache, frames.bin packing) live in
 `server/tools/` and are run by hand over ssh as needed.
 
-Logs land in `/path/to/gsfluent_pkg/work/logs/{v1,supervisor}.log`.
+Logs flow through journald: `journalctl -u gsfluent-backend -f -o
+json | jq -r '.MESSAGE | fromjson?'` (add `--user` for the dev-box
+unit). The backend emits one JSON event per line, so `jq` can filter
+by `run_id` / `event`.
 
 The Python interpreters are configured via `.env`
 (`GSFLUENT_API_PYTHON`, `GSFLUENT_SIM_PYTHON`).
@@ -147,6 +159,6 @@ Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 |----------------------------------------|-----------------------------------------------------------------------------|
 | SPA won't open / `:5173` error         | Port in use — check `lsof -i :5173`, or `UI_PORT=5174 npm start`            |
 | Splat viewport stays blank             | viser not up — `curl http://127.0.0.1:8092/state`                           |
-| All `/api/*` calls 502 / refused       | Server backend is down — on the server run `bash server/supervise.sh status` |
+| All `/api/*` calls 502 / refused       | Server backend is down — run `systemctl status gsfluent-backend.service` (add `--user` on a dev box) |
 | Sim errors right after submission      | `curl <backend>/api/runs/<name>/log?offset=0` to see sim stdout             |
 | Local `.venv/` is broken               | `rm -rf .venv/ frontend/dist/ && cd frontend && npm install`                |

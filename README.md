@@ -80,12 +80,20 @@ splat WebSocket 全程走本机 127.0.0.1,不吃公网带宽。仿真结果以 P
 
 ## 服务端运维
 
-后端进程由 `server/supervise.sh` 托管,在服务器上跑:
+后端进程由 systemd unit 托管,unit 文件在 `deploy/`(生产用
+`gsfluent-backend.service`,开发机用 `gsfluent-backend.dev.service`)。
+`Type=notify` + `WatchdogSec=30s` 能检测到卡死;每次启动会调用
+`recover_on_boot()` 把中断的 run 标成 INTERRUPTED。安装步骤见
+[`deploy/README.md`](deploy/README.md)。
 
 ```bash
-bash server/supervise.sh up      # 启动 v1 backend,挂了自动重启
-bash server/supervise.sh status  # 看当前 PID
-bash server/supervise.sh stop    # 停掉
+# 生产
+sudo systemctl enable --now gsfluent-backend.service
+sudo systemctl status gsfluent-backend.service
+
+# 开发机(per-user systemd)
+systemctl --user enable --now gsfluent-backend.service
+systemctl --user status gsfluent-backend.service
 ```
 
 端口绑定:
@@ -97,7 +105,8 @@ bash server/supervise.sh stop    # 停掉
 仿真后处理(把 ply 转 gsq 缓存、打包 frames.bin)在 `server/tools/` 下,
 按需 ssh 进服务器手动跑。
 
-日志在 `/path/to/gsfluent_pkg/work/logs/{v1,supervisor}.log`。
+日志走 journald:`journalctl -u gsfluent-backend -f -o json | jq -r '.MESSAGE | fromjson?'`(开发机加 `--user`)。后端写的是
+JSON event,可直接 `jq` 过滤 `run_id` / `event`。
 
 Python 解释器在 `.env` 里通过 `GSFLUENT_API_PYTHON` / `GSFLUENT_SIM_PYTHON`
 配,需要改就改 `.env`。
@@ -142,6 +151,6 @@ Python 解释器在 `.env` 里通过 `GSFLUENT_API_PYTHON` / `GSFLUENT_SIM_PYTHO
 |-------------------------------------|----------------------------------------------------------------------------|
 | 前端打不开 / `:5173` 报错           | 端口被占,`lsof -i :5173`;或者 `UI_PORT=5174 npm start`                   |
 | Splat 没画面                        | viser 没起,`curl http://127.0.0.1:8092/state`                             |
-| `/api/*` 全部 502 / connection refused | 服务器后端挂了,在服务器跑 `bash server/supervise.sh status`            |
+| `/api/*` 全部 502 / connection refused | 服务器后端挂了,跑 `systemctl status gsfluent-backend.service`(或加 `--user`)         |
 | 提交仿真后立刻 error                | `curl <backend>/api/runs/<name>/log?offset=0` 看 stdout                    |
 | 本机 `.venv/` 坏了                  | `rm -rf .venv/ frontend/dist/ && cd frontend && npm install`               |

@@ -63,9 +63,12 @@ client-side.
 - **Does NOT own**: viewer rendering (client-side), per-cell viser
   caches (built by `server/tools/pack_splats.py`, served by
   `frontend/python/viser_headless.py`).
-- Process management: `server/supervise.sh up|stop|status` — a small
-  shell supervisor (no systemd, no docker) that respawns the backend
-  if it dies.
+- Process management: a systemd unit at `deploy/gsfluent-backend.service`
+  (production) or `deploy/gsfluent-backend.dev.service` (dev box) keeps
+  the backend up. `Type=notify` + `WatchdogSec=30s` detects wedged
+  processes; the FastAPI lifespan calls `recover_on_boot()` on every
+  startup to reconcile in-flight runs after a restart. Install steps
+  are in `deploy/README.md`.
 
 ### `server/tools/` — server-side pipeline glue
 
@@ -87,12 +90,15 @@ client-side.
 - `run_sim.sh` — sim launcher invoked by the v1 backend's runner.
 - `migrate_to_library.py`, `check_recipe_compat.py` — one-shot utilities.
 
-### `server/recipes/`, `server/patches/`, `server/supervise.sh`
+### `server/recipes/`, `server/patches/`
 
 - `recipes/*.json` — physics recipes consumed by the server-side sim.
 - `patches/gs_simulation_building.patched.py` — patched copy of the
   upstream GaussianFluent sim file.
-- `supervise.sh` — backend process manager described above.
+
+Backend process supervision is handled by the systemd units in
+`deploy/`; see `deploy/README.md` for install and migration notes
+(supervise.sh was removed in Phase 4).
 
 ### `frontend/python/` — client-side Python utilities
 
@@ -279,8 +285,11 @@ as sequences. The viewer wrappers know how to derive them.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Launch on your server: `bash server/supervise.sh up` (starts and supervises
-v1 backend on `:7869` + viser_headless on loopback `:8091/:8092`).
+Launch on your server: enable the systemd unit at
+`deploy/gsfluent-backend.service` (or `.dev.service` for a dev box).
+That brings up the v1 backend on `:7869`; viser_headless on
+`:8091/:8092` is started by the frontend dev script on the client side.
+See `deploy/README.md` for install commands.
 Launch on a teammate's client: `cd frontend && npm start` (runs
 `frontend/scripts/start.mjs`, which brings up viser_headless on the client's
 own loopback + vite preview proxying `/api/*` to your server).
