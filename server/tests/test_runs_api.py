@@ -86,7 +86,12 @@ def test_post_returns_422_when_model_path_missing(client, tmp_path):
     }
     r = client.post("/api/runs", json=body)
     assert r.status_code == 422
-    assert "model_path" in r.json()["detail"].lower() or "exist" in r.json()["detail"].lower()
+    # Phase 3 envelope: detail = {"error": {"kind", "message", "details", "trace_id"}}
+    body_json = r.json()
+    envelope = body_json["detail"] if "detail" in body_json else body_json
+    msg = envelope["error"]["message"].lower()
+    assert "model_path" in msg or "exist" in msg
+    assert envelope["error"]["kind"] == "validation.model_path"
 
 
 def test_post_returns_422_when_model_path_is_file(client, tmp_path):
