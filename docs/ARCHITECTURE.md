@@ -1,8 +1,11 @@
 # gsfluent_pkg — Architecture
 
-Status: 2026-05-20. Describes the system as deployed today: a single v1
-backend on your server, a client-local SPA + viser pair on each teammate's
-machine, and a public NAT port linking the two.
+Status: 2026-05-22 (post backend-bulletproofing slice). Describes the
+system as deployed today: a single v1 backend on your server (split
+into six Protocols + composition root, supervised by systemd), a
+client-local SPA + viser pair on each teammate's machine (with
+HEAD-skip + Range-resume on the streaming cache), and a public NAT port
+linking the two.
 
 ---
 
@@ -58,10 +61,11 @@ client-side.
   `sequences`, `schemas`, plus the per-frame xyz WebSocket at
   `/api/stream`. The SPA static fallback is mounted last so `/api/*`
   always wins on prefix conflict.
-- **Owns**: the library API surface, the WS frame pump, the runner that
-  spawns sim subprocesses.
+- **Owns**: the library API surface, the WS frame pump, the run
+  lifecycle controller (Layer 1, `RunManager`), and the sim orchestrator
+  (Layer 2, `SimulationEngine`).
 - **Does NOT own**: viewer rendering (client-side), per-cell viser
-  caches (built by `server/tools/pack_splats.py`, served by
+  caches (built by `core/codecs/gsq.py:GSQCodec`, served by
   `frontend/python/viser_headless.py`).
 - Process management: a systemd unit at `deploy/gsfluent-backend.service`
   (production) or `deploy/gsfluent-backend.dev.service` (dev box) keeps
@@ -70,16 +74,87 @@ client-side.
   startup to reconcile in-flight runs after a restart. Install steps
   are in `deploy/README.md`.
 
-### `server/tools/` — server-side pipeline glue
+#### Six-Protocol layout (post-bulletproofing slice)
 
-- `fuse_to_full_ply.py` — sim_*.ply + reference 3DGS → frame_*.ply.
-  K-NN skinning and per-frame Kabsch rotation behind flags.
-- `pack_splats.py` — frame_*.ply → `splats.gsq` (visual-lossless
-  streamable splat cache: int16-quantized xyz + axis-vec quats per
-  frame, fp16 rgb/scales + uint8 opacity static, zstd-compressed
-  per-frame chunks. ~3× smaller than the retired `.npz` format.
-  Format spec in the pack_splats.py docstring). Served on demand
-  via `/api/sequences/{name}/cache/splats.gsq` and streamed by
+The backend is split into six layers, each a `typing.Protocol` interface
+with a current concrete implementation. All wiring happens in
+`server/gsfluent/composition.py:build_app(AppConfig)`.
+
+| Layer | Protocol (`gsfluent/protocols/`)            | Current impl                                       |
+|-------|---------------------------------------------|----------------------------------------------------|
+| L1    | `runs.py:RunManager`                        | `core/run_manager.py:AsyncioRunManager`            |
+| L2    | `sim.py:SimulationEngine`                   | `core/sim_engines/mpm.py:MPMSimulationEngine`      |
+| L3    | `fuse.py:Fuser`                             | `core/fusers/knn_kabsch.py:KNNKabschFuser`         |
+| L4    | `cache.py:CacheCodec`                       | `core/codecs/gsq.py:GSQCodec`                      |
+| L5    | `storage.py:Storage`                        | `storage/filesystem.py:FilesystemStorage`          |
+| L6    | `observability.py:EventEmitter`             | `observability/jsonlog.py:StdlibJSONEmitter`       |
+
+Each Protocol has a conformance suite at
+`server/tests/protocols/test_*_conformance.py`. Swapping an
+implementation (e.g. `SPZCodec` for `GSQCodec`, `S3Storage` for
+`FilesystemStorage`, `CeleryRunManager` for `AsyncioRunManager`) is a
+single-class change in `composition.py` after the new impl passes the
+conformance suite.
+
+#### Hardening threads
+
+1. **Process model.** Sim subprocesses spawn in a fresh process group
+   (`asyncio.create_subprocess_*(start_new_session=True)`). Cancellation
+   and wall-time timeout escalate via `os.killpg(pgid, SIGTERM)` →
+   30s grace → `os.killpg(pgid, SIGKILL)`.
+2. **Recipe boundary.** `POST /api/runs` strict-Pydantic-validates and
+   runs `core/limits.check_recipe_caps()` before any state file is
+   written or any subprocess is spawned. Violations return HTTP 422
+   with a structured error envelope; see the cap-config table in
+   [`README.md`](../README.md) for env-var overrides.
+3. **HTTP cache hygiene.** `api/sequences.py` returns `.gsq` with
+   `Cache-Control: public, immutable, max-age=31536000` and
+   `ETag: "<size>-<mtime>"`. `If-None-Match` matching returns 304.
+   Client `viser_headless._sync_cell_gsq_streaming` HEAD-checks before
+   download (cache hit → skip) and uses `Range: bytes=<n>-` to resume
+   from `.partial` (cache miss with prior interrupted download).
+4. **Structured observability.** Every state transition emits one
+   structured JSON event through `EventEmitter`. Events have the shape
+   `{"ts": "<ISO-8601>", "level": "INFO", "event": "<dotted.noun.verb>",
+    "run_id": "...", ...}`. The lifecycle event chain is:
+   `run.queued` → `run.started` → `run.preflight_ok` → `sim.started` →
+   `sim.completed` → `run.simmed` → `run.fused` → `run.packed` →
+   `run.completed`. Cancellation adds `run.cancelling` → `run.cancelled`;
+   failure swaps the terminal event for `run.failed` with an
+   `error.<kind>` companion. Boot recovery emits `boot.run.reattached`
+   or `boot.run.interrupted` per recovered record.
+
+#### Run state persistence
+
+Every run owns a JSON file at `work/_state/runs/<run_id>.json`. Writes
+are atomic (temp file + rename). On startup, `RunManager.recover_on_boot()`
+scans the directory, cross-checks PID + `/proc/<pid>/stat` start-time
+against persisted records, and reconciles:
+
+- Live PID + matching starttime → re-attach.
+- Dead PID or starttime mismatch → mark `interrupted` with
+  `error.kind = internal.backend_restarted`.
+- Already terminal → no-op.
+
+Runs are never auto-resumed; customers re-submit interrupted recipes.
+
+### `server/tools/` — server-side pipeline glue (thin CLI wrappers)
+
+After the bulletproofing slice, the logic in these scripts lives in
+`server/gsfluent/core/`; the scripts here are thin CLI wrappers kept
+for ssh-driven one-shot runs.
+
+- `fuse_to_full_ply.py` — CLI wrapper around
+  `core/fusers/knn_kabsch.py:KNNKabschFuser`. K-NN skinning and
+  per-frame Kabsch rotation.
+- `pack_splats.py` — CLI wrapper around
+  `core/codecs/gsq.py:GSQCodec`. Encodes frame_*.ply →
+  `splats.gsq` (visual-lossless streamable splat cache:
+  int16-quantized xyz + axis-vec quats per frame, fp16 rgb/scales +
+  uint8 opacity static, zstd-compressed per-frame chunks. ~3× smaller
+  than the retired `.npz` format. Format spec in the
+  pack_splats.py docstring). Served on demand via
+  `/api/sequences/{name}/cache/splats.gsq` and streamed by
   viser_headless's `/sync_cell`.
 - `pack_sim_splats.py` — same encode but reads raw `sim_*.ply` instead
   of fused frame plys. Produces a "no-fuse" A/B sequence for
@@ -87,7 +162,10 @@ client-side.
 - `pack_sequence.py` — frame_*.ply → `frames.bin` (GSSQ int16-quantized
   xyz). Used by Points mode (`gsfluent/core/frame_stream.py:PackedReader`,
   WS stream). ~30× smaller on disk than per-frame plies.
-- `run_sim.sh` — sim launcher invoked by the v1 backend's runner.
+- `run_sim.sh` — ~20-line conda-activate shim that execs the sim entry
+  point in `core/sim_engines/mpm.py`. The sim-orchestration logic
+  (PG-spawn, wall-time enforcement, error classification) lives in the
+  backend, not in this script.
 - `migrate_to_library.py`, `check_recipe_compat.py` — one-shot utilities.
 
 ### `server/recipes/`, `server/patches/`
@@ -304,9 +382,12 @@ there is no high-bandwidth WAN hop for splat playback.
 | Adding... | Goes in... |
 |---|---|
 | A new sim recipe | `server/recipes/<name>.json`; consumed server-side |
-| A new fuse strategy (K-NN variant, MLS, ...) | `server/tools/fuse_to_full_ply.py` as a flag, OR a sibling `server/tools/fuse_<name>.py` |
+| A new fuse strategy (K-NN variant, MLS, ...) | A new class implementing `protocols/fuse.py:Fuser` under `core/fusers/<name>.py`; wire in `composition.py` |
+| A new sim engine (alternative physics, mock) | A new class implementing `protocols/sim.py:SimulationEngine` under `core/sim_engines/<name>.py`; wire in `composition.py` |
+| A new cache codec (SPZ, 4DGS, ...) | A new class implementing `protocols/cache.py:CacheCodec` under `core/codecs/<name>.py`; wire in `composition.py` |
+| A new storage backend (S3, GCS, ...) | A new class implementing `protocols/storage.py:Storage` under `storage/<name>.py`; wire in `composition.py` |
 | A viewer-specific transform | The viewer's wrapper (`vkgs_play.py` for vkgs; `viser_headless.py` for splat). NEVER mutate library frames. |
-| A new backend endpoint | `server/gsfluent/api/<route>.py` |
+| A new backend endpoint | `server/gsfluent/api/<route>.py`; mount in `composition.py:build_app` |
 | A web-side renderer mode | `frontend/src/components/viewport/<NewMode>.tsx` |
 | A one-shot migration | `server/tools/_oneshot/<date>_<purpose>.py`, not flat in `server/tools/` |
 
