@@ -1,23 +1,18 @@
-"""AsyncioRunManager — RunManager Protocol shim over the existing core.runner
-module-level functions.
+"""AsyncioRunManager — RunManager Protocol concrete implementation.
 
-Phase 2 scope: thin adapter. submit() delegates to runner.start_run; cancel()
-delegates to runner.cancel_run; status() reads from the in-memory _RUNS
-registry and the persisted RunStateStore; recover_on_boot() reads the state
-dir and reconciles orphans with no live PID match (marks them INTERRUPTED).
+Phase 2 scope: thin adapter over the legacy core.runner module functions.
 
-The legacy runner.start_run signature requires explicit kwargs (run_name,
-model_dir, recipe_data, recipe_source_name, particles). The Protocol's
-submit(recipe, *, model) collapses this — we shim by reading the missing
-fields from the recipe dict's "_run_name", "_recipe_source_name", and
-"_particles" keys. Callers that need to set them explicitly do so via these
-recipe-dict keys; Phase 3 will replace this convention with a proper typed
-submit signature.
+Phase 4 rewire: when sim_engine is provided, submit() drives it directly
+via a background asyncio task that spawns the sim subprocess in its own
+process group, persists pid/pgid/pid_starttime to RunStateRecord (so
+recover_on_boot can defend against PID reuse), and on completion records
+the final state. cancel() uses escalate_kill_pg against the persisted
+pgid. When sim_engine is None (legacy callers), submit() falls back to
+the original _runner.start_run delegation.
 
-Phase 3 will rewrite this class to own the lifecycle directly (PG-spawn,
-signal escalation, structured event emission). The Protocol surface stays
-unchanged across that transition so api/runs.py only needs to flip from
-direct runner.start_run() calls to Depends(get_run_manager).submit().
+Cross-plan attribute contract: `_state` (RunStateStore), `_obs`
+(EventEmitter), `_procs` (RunId -> Process), `_futures` (RunId -> Future),
+`_pgids` (RunId -> int), `_reattached` (set[RunId] for boot-found runs).
 """
 from __future__ import annotations
 
@@ -246,11 +241,18 @@ class AsyncioRunManager:
     async def submit(
         self, recipe: ValidatedRecipe, *, model: ModelRef
     ) -> RunId:
-        """Schedule a run. The Phase 2 shim reads required-but-not-in-Protocol
-        fields from the recipe dict under reserved underscore-prefixed keys."""
+        """Schedule a run.
+
+        Recipe carries reserved underscore-prefixed keys for fields not
+        in the Protocol (`_run_name`, `_recipe_source_name`, `_particles`).
+        When `self._sim` is a real SimulationEngine, the run is driven by a
+        background asyncio task that owns the subprocess lifecycle (Phase 4
+        rewire). When `self._sim` is None (legacy callers), falls back to
+        the original `_runner.start_run` delegation path.
+        """
         run_name = recipe.get("_run_name")
         if not run_name:
-            raise ValidationError("recipe missing '_run_name' (Phase 2 shim convention)")
+            raise ValidationError("recipe missing '_run_name' (shim convention)")
         recipe_source_name = recipe.get("_recipe_source_name", "unknown")
         particles = recipe.get("_particles", 0)
         try:
@@ -260,8 +262,16 @@ class AsyncioRunManager:
         if particles < 0:
             raise CapExceededError(f"particles must be >= 0; got {particles}")
 
-        # Persist initial state BEFORE delegating to the runner so a crash
-        # between submit() and runner.start_run() leaves a discoverable record.
+        # --- Phase 4 rewire path: drive sim_engine directly when present ---
+        if self._sim is not None:
+            return await self._submit_via_engine(
+                recipe=recipe,
+                model=model,
+                run_name=run_name,
+                particles=particles,
+            )
+
+        # --- Legacy fallback: delegate to runner.start_run (Phase 2 shim) ---
         legacy_run_id = await _runner.start_run(
             run_name=run_name,
             model_dir=model.path,
@@ -270,8 +280,6 @@ class AsyncioRunManager:
             particles=particles,
         )
         rid = RunId(legacy_run_id)
-        # Persist as RUNNING — recover_on_boot will check PID liveness later.
-        # Phase 3 transitions through STARTED/RUNNING explicitly.
         self._state_store.write(RunStateRecord(
             id=rid,
             state=RunState.RUNNING,
@@ -279,17 +287,255 @@ class AsyncioRunManager:
         ))
         return rid
 
-    async def cancel(self, run_id: RunId) -> None:
-        """Idempotent cancellation. Returns silently if run_id is unknown
-        or already terminal (per Protocol contract)."""
-        # Delegate to legacy cancel. It returns False for unknown / terminal runs;
-        # the Protocol says cancel is idempotent so we swallow the False.
-        _runner.cancel_run(run_id)
-        # Update persisted state to CANCELLING (Phase 3 will add the escalation
-        # background task; Phase 2 just records the user's intent).
+    async def _submit_via_engine(
+        self,
+        *,
+        recipe: ValidatedRecipe,
+        model: ModelRef,
+        run_name: str,
+        particles: int,
+    ) -> RunId:
+        """Drive self._sim directly. Spawns a background task that:
+          1. Calls self._sim.run(recipe, model, output_dir, wall_time, on_event)
+          2. Intercepts the engine's sim.spawned event to persist
+             pid/pgid/pid_starttime to RunStateRecord (so recover_on_boot
+             can defend against PID reuse on restart).
+          3. On completion, persists final state (COMPLETED / FAILED /
+             CANCELLED with classified error).
+        Returns the run_id immediately; the task runs in the background.
+        """
+        import uuid
+        rid = RunId(uuid.uuid4().hex[:12])
+
+        # Persist initial QUEUED record BEFORE spawning so a crash between
+        # write() and create_task() leaves a discoverable record that
+        # recover_on_boot can mark INTERRUPTED.
+        self._state_store.write(RunStateRecord(
+            id=rid,
+            state=RunState.QUEUED,
+            sequence_name=run_name,
+        ))
+
+        # Background task drives the engine end-to-end. Holding the Future
+        # in self._futures lets wait_for() block on it from tests + ops.
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        self._futures[rid] = fut
+
+        task = asyncio.create_task(
+            self._run_to_completion(rid, recipe, model, run_name, fut)
+        )
+        self._tasks[rid] = task
+        return rid
+
+    async def _run_to_completion(
+        self,
+        run_id: RunId,
+        recipe: ValidatedRecipe,
+        model: ModelRef,
+        run_name: str,
+        fut: asyncio.Future[None],
+    ) -> None:
+        """Background task: drive sim_engine.run() through to terminal state."""
+        # Wall-time cap: prefer recipe-supplied value, clamp to configured cap.
+        recipe_wall = int(recipe.get("wall_time_sec", self._wall_time_cap_sec))
+        wall_time = min(recipe_wall, self._wall_time_cap_sec)
+
+        # Output dir convention - mirrors what MPMSimulationEngine expects.
+        output_dir = Path(recipe.get("_output_dir") or f"/tmp/gsfluent-{run_id}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Spying EventEmitter: intercepts sim.spawned to capture pid/pgid/
+        # pid_starttime and persist them onto the RunStateRecord.
+        mgr = self
+        outer_obs = self._obs.child(run_id=run_id) if hasattr(self._obs, "child") else self._obs
+
+        class _PidCapturingEmitter:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def emit(self, event: str, **context):
+                self._inner.emit(event, **context)
+                if event == "sim.spawned":
+                    pid = context.get("pid")
+                    pgid = context.get("pgid")
+                    pid_starttime = context.get("pid_starttime")
+                    if pid is not None:
+                        mgr._pgids[run_id] = pgid if pgid is not None else pid
+                        rec = mgr._state_store.read(run_id)
+                        if rec is not None:
+                            mgr._state_store.write(rec.transition(
+                                state=RunState.RUNNING,
+                                pid=int(pid),
+                                pgid=int(pgid) if pgid is not None else None,
+                                pid_starttime=float(pid_starttime) if pid_starttime is not None else None,
+                                started_at=time.time(),
+                            ))
+
+            def child(self, **context):
+                if hasattr(self._inner, "child"):
+                    return _PidCapturingEmitter(self._inner.child(**context))
+                return self
+
+        spying = _PidCapturingEmitter(outer_obs)
+
+        # Mark STARTED before the engine fires up.
         rec = self._state_store.read(run_id)
-        if rec is not None and not rec.is_terminal():
-            self._state_store.write(rec.transition(state=RunState.CANCELLING))
+        if rec is not None:
+            self._state_store.write(rec.transition(state=RunState.STARTED))
+
+        try:
+            # Wall-time cap: on timeout we issue escalate_kill_pg against the
+            # captured pgid (if any). The engine's run() returns a SimResult
+            # on success or raises a typed SimError on failure.
+            def _on_timeout() -> None:
+                pgid = mgr._pgids.get(run_id)
+                if pgid is None:
+                    return
+                # Best-effort: ask the kernel to terminate the group; the
+                # actual escalation ladder is owned by the engine when it
+                # uses spawn_in_new_pg / escalate_kill_pg. Here we just
+                # send a polite SIGTERM as a baseline.
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+            async def _engine_run():
+                return await self._sim.run(
+                    recipe, model, output_dir, wall_time, spying,
+                )
+
+            result = await run_with_wall_time(
+                coro_factory=_engine_run,
+                wall_time_sec=wall_time,
+                on_timeout=_on_timeout,
+            )
+            # Success path.
+            rec = self._state_store.read(run_id)
+            if rec is not None:
+                self._state_store.write(rec.transition(
+                    state=RunState.COMPLETED,
+                    finished_at=time.time(),
+                    paths={"frames_dir": str(result.frames_dir)},
+                ))
+            self._obs.emit(
+                "run.completed",
+                run_id=run_id,
+                n_frames=result.n_frames,
+                duration_sec=result.duration_sec,
+            )
+            if not fut.done():
+                fut.set_result(None)
+        except SimWallTimeExceededError as e:
+            rec = self._state_store.read(run_id)
+            if rec is not None:
+                self._state_store.write(rec.transition(
+                    state=RunState.FAILED,
+                    finished_at=time.time(),
+                    error={"kind": "sim.wall_time_exceeded", "message": str(e)},
+                ))
+            self._obs.emit("run.failed", run_id=run_id, kind="sim.wall_time_exceeded")
+            if not fut.done():
+                fut.set_result(None)
+        except asyncio.CancelledError:
+            # Cooperative cancellation - cancel() above set the user intent.
+            # Mark CANCELLED on disk and re-raise so the task records cancel.
+            rec = self._state_store.read(run_id)
+            if rec is not None and not rec.is_terminal():
+                self._state_store.write(rec.transition(
+                    state=RunState.CANCELLED,
+                    finished_at=time.time(),
+                ))
+            self._obs.emit("run.cancelled", run_id=run_id)
+            if not fut.done():
+                fut.set_result(None)
+            raise
+        except Exception as e:
+            # Typed SimError or any other failure - record and emit.
+            kind = type(e).__name__
+            # Map common SimError subclasses to spec error.kind strings.
+            from gsfluent.protocols.sim import (
+                GPUUnavailableError, SimCrashedError, SimEnvMissingError,
+                SimGpuOomError, SimInterpreterMissingError, SimUnstableRecipeError,
+            )
+            kind_map = {
+                SimGpuOomError: "sim.gpu_oom",
+                SimUnstableRecipeError: "sim.unstable_recipe",
+                SimCrashedError: "sim.crashed",
+                SimEnvMissingError: "sim.env_missing",
+                SimInterpreterMissingError: "sim.interpreter_missing",
+                GPUUnavailableError: "sim.gpu_unavailable",
+            }
+            mapped_kind = next(
+                (v for k, v in kind_map.items() if isinstance(e, k)),
+                f"internal.{kind.lower()}",
+            )
+            rec = self._state_store.read(run_id)
+            if rec is not None:
+                self._state_store.write(rec.transition(
+                    state=RunState.FAILED,
+                    finished_at=time.time(),
+                    error={"kind": mapped_kind, "message": str(e)},
+                ))
+            self._obs.emit("run.failed", run_id=run_id, kind=mapped_kind, error=str(e))
+            if not fut.done():
+                fut.set_result(None)
+        finally:
+            # Clean up internal handles regardless of outcome.
+            self._tasks.pop(run_id, None)
+            self._pgids.pop(run_id, None)
+
+    async def cancel(self, run_id: RunId) -> None:
+        """Idempotent cancellation.
+
+        Phase 4 rewire: when self._sim drives the run (modern path), use
+        escalate_kill_pg against the captured pgid + cancel the supervising
+        asyncio task. Falls back to _runner.cancel_run for runs that came
+        in via the legacy path.
+        """
+        rec = self._state_store.read(run_id)
+        if rec is None or rec.is_terminal():
+            # Idempotent: unknown / already-done runs return silently.
+            return
+
+        # Mark CANCELLING before tearing things down so a crash during
+        # cancel still leaves a discoverable in-flight state.
+        self._state_store.write(rec.transition(state=RunState.CANCELLING))
+
+        # Modern path: we own the task + pgid -> escalate signal ladder.
+        task = self._tasks.get(run_id)
+        proc = self._procs.get(run_id)
+        pgid = self._pgids.get(run_id)
+
+        if task is not None or proc is not None or pgid is not None:
+            # If we have a live Process handle, use escalate_kill_pg for the
+            # full SIGTERM->grace->SIGKILL ladder. Otherwise fall back to a
+            # direct killpg call against the captured pgid.
+            if proc is not None and pgid is not None:
+                try:
+                    await escalate_kill_pg(proc, pgid=pgid)
+                except Exception:
+                    # Best-effort - the engine might have torn down already.
+                    pass
+            elif pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            # Cancel the supervising task so _run_to_completion records
+            # CANCELLED on disk.
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            return
+
+        # Legacy path: delegate to runner.cancel_run for runs spawned
+        # through the Phase 2 shim path.
+        _runner.cancel_run(run_id)
 
     async def status(self, run_id: RunId) -> RunStatus:
         """Snapshot the run's current state. Raises KeyError if unknown."""
