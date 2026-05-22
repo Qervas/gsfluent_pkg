@@ -50,15 +50,57 @@ from gsfluent.storage.filesystem import FilesystemStorage
 WATCHDOG_INTERVAL_SEC = 15.0
 
 
-async def _watchdog_loop(obs: EventEmitter) -> None:
-    """Send WATCHDOG=1 every WATCHDOG_INTERVAL_SEC seconds.
+def _should_send_watchdog(status) -> bool:
+    """True iff WATCHDOG=1 should be sent for the given health status.
+
+    Per spec Section 3 Flow C: status='down' suppresses the heartbeat so
+    the systemd watchdog timer fires and the unit is restarted. status
+    'ok' and 'degraded' both send — degraded is "alive but worried", not
+    "needs restart".
+    """
+    # Imported here to avoid a circular import at module load.
+    from gsfluent.api.health import HealthStatus
+    return status != HealthStatus.DOWN
+
+
+def _current_health_status(*, cfg: AppConfig, state_store):
+    """In-process health probe: builds the same status discriminator the
+    /api/health endpoint reports, without going through HTTP."""
+    import time as _time
+    from gsfluent.api.health import (
+        _gpu_reachable, _disk_free_pct, _last_successful_run_at, _derive_status,
+    )
+    return _derive_status(
+        sim_home_exists=cfg.sim_home.is_dir(),
+        disk_free_pct=_disk_free_pct(cfg.work_dir),
+        gpu_reachable=_gpu_reachable(),
+        last_successful_run_at=_last_successful_run_at(state_store),
+        now=_time.time(),
+    )
+
+
+async def _watchdog_loop(obs: EventEmitter, health_probe=None) -> None:
+    """Send WATCHDOG=1 every WATCHDOG_INTERVAL_SEC seconds, gated on health.
 
     Cancelled cleanly by the lifespan on shutdown. Logs a single event
     per heartbeat (one line per 15s — cheap).
+
+    health_probe: callable returning a HealthStatus. When provided, the
+    loop only sends WATCHDOG=1 when _should_send_watchdog(status) is
+    True. When omitted, falls back to unconditional heartbeats (legacy
+    behavior, preserved for tests that don't care about gating).
     """
     try:
         while True:
             await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
+            if health_probe is not None:
+                status = health_probe()
+                if not _should_send_watchdog(status):
+                    obs.emit(
+                        "backend.watchdog.suppressed",
+                        reason=str(status.value if hasattr(status, "value") else status),
+                    )
+                    continue
             sent = notify_watchdog()
             if sent:
                 obs.emit("backend.watchdog.ping")
@@ -222,7 +264,15 @@ def build_app(cfg: AppConfig) -> FastAPI:
         notify_ready()
         obs.emit("backend.ready")
 
-        watchdog_task = asyncio.create_task(_watchdog_loop(obs))
+        # Phase 6: gate the watchdog heartbeat on health.status. When
+        # the in-process health snapshot reports "down" (sim_home gone,
+        # disk near full), suppress WATCHDOG=1 so the systemd watchdog
+        # timer fires and the unit is restarted by the system.
+        def _probe():
+            return _current_health_status(cfg=cfg, state_store=state_store)
+        watchdog_task = asyncio.create_task(
+            _watchdog_loop(obs, health_probe=_probe)
+        )
 
         try:
             yield
