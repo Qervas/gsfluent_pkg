@@ -470,4 +470,23 @@ integration + 90 baseline + 20 leftover loose tests = 364). Skips:
 
 ## Final test re-run
 
-(Task 23 output.)
+Task 23 — full suite + ruff + mypy after all Phase 7 edits:
+
+```
+$ pytest tests/ -q --tb=short
+364 passed, 4 skipped in 6.64s
+
+$ ruff check gsfluent/ tests/
+All checks passed!
+
+$ mypy
+Success: no issues found in 17 source files
+```
+
+Pass count matches Task 8 aggregate (364). 3 stress-test repetitions
+all green (no flakes after hardening
+`tests/integration/test_cancel_kills_pg.py` with `_wait_pg_dead()`
+poller — replaces immediate `assert not _pg_alive(pgid)` which raced
+against the kernel's PG-entry reap window).
+
+Final lint + typecheck states preserved.
