@@ -891,11 +891,13 @@ def main() -> int:
 
         # Stream-download to a `.partial` sibling then atomic-rename, so
         # an interrupted download doesn't leave a corrupt .npz that
-        # mmap_cell would later choke on.
+        # mmap_cell would later choke on. trust_env=False so a user-set
+        # http_proxy (ClashX / corp proxy) doesn't try to route a
+        # localhost-bound URL through the proxy and 502.
         partial = npz_path.with_suffix(".npz.partial")
         try:
             with httpx.stream("GET", url, timeout=600.0,
-                              follow_redirects=True) as r:
+                              follow_redirects=True, trust_env=False) as r:
                 if r.status_code != 200:
                     return {"ok": False, "error":
                             f"download failed: HTTP {r.status_code}"}
