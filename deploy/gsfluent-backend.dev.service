@@ -1,0 +1,46 @@
+# gsfluent backend — dev-box systemd unit.
+#
+# Use when an operator wants systemd supervision on a workstation
+# without creating a dedicated system user. Runs as the current user
+# under per-user systemd (systemctl --user).
+#
+# Install (per-user systemd):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/gsfluent-backend.dev.service ~/.config/systemd/user/gsfluent-backend.service
+#   # Edit WorkingDirectory= and ExecStart= to your repo path + venv path.
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gsfluent-backend.service
+#
+# Logs: journalctl --user -u gsfluent-backend -f -o json | jq
+
+[Unit]
+Description=gsfluent backend (dev-box, user-mode)
+After=network-online.target
+# Restart history — these two keys live in [Unit] (not [Service]) per
+# `man systemd.unit`.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
+
+WorkingDirectory=/home/frankyin/Desktop/work/gsfluent_pkg
+Environment=PYTHONPATH=/home/frankyin/Desktop/work/gsfluent_pkg/server
+Environment=GSFLUENT_WORK_DIR=/home/frankyin/Desktop/work/gsfluent_pkg/work
+EnvironmentFile=-/home/frankyin/Desktop/work/gsfluent_pkg/.env
+
+ExecStart=/home/frankyin/Desktop/work/gsfluent_pkg/.venv/bin/uvicorn gsfluent.server:app --host 127.0.0.1 --port 7869
+
+Restart=always
+RestartSec=5
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

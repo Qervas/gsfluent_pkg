@@ -1,0 +1,65 @@
+# gsfluent backend — production systemd unit.
+#
+# Install: see deploy/README.md
+#
+# This unit assumes:
+#   - A dedicated system user `gsfluent` (created during install).
+#   - The repo is checked out under /opt/gsfluent (or symlinked there).
+#   - A uv-managed virtualenv lives at /opt/gsfluent/.venv with
+#     uvicorn + gsfluent installed (`uv sync` was run in /opt/gsfluent/server).
+#
+# Edit the User= / WorkingDirectory= / ExecStart= lines to match your
+# install path. The dev-box variant `gsfluent-backend.dev.service` runs
+# as the current user and points at this repo directly.
+
+[Unit]
+Description=gsfluent backend (FastAPI + uvicorn)
+Documentation=file:///opt/gsfluent/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+# Restart history — systemd will give up after this many fast restarts.
+# These two keys live in [Unit] (not [Service]) per `man systemd.unit`.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
+
+User=gsfluent
+Group=gsfluent
+
+WorkingDirectory=/opt/gsfluent
+Environment=PYTHONPATH=/opt/gsfluent/server
+Environment=GSFLUENT_WORK_DIR=/opt/gsfluent/work
+EnvironmentFile=-/opt/gsfluent/.env
+
+ExecStart=/opt/gsfluent/.venv/bin/uvicorn gsfluent.server:app --host 127.0.0.1 --port 7869
+
+Restart=always
+RestartSec=5
+
+# Sim subprocesses are spawned in their own process group via
+# start_new_session=True (Phase 3). KillMode=mixed sends SIGTERM to the
+# main backend process only — the backend's own RunManager.cancel()
+# logic propagates PG-SIGTERM/SIGKILL to sim children. If the backend
+# doesn't exit within TimeoutStopSec, systemd SIGKILLs the whole cgroup
+# as a last resort.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+
+# Filesystem hardening — keep these conservative; the backend writes to
+# /opt/gsfluent/work, reads from /opt/gsfluent/server, and shells out to
+# the configured sim interpreter.
+ProtectSystem=strict
+ReadWritePaths=/opt/gsfluent/work
+PrivateTmp=true
+NoNewPrivileges=true
+
+# Resource ceilings — let the GPU sim use real RAM; cap file descriptors.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
