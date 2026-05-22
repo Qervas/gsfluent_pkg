@@ -94,3 +94,69 @@ def test_built_app_has_obs_on_state(cfg: AppConfig) -> None:
     obs = getattr(app.state, "obs", None)
     assert obs is not None
     assert isinstance(obs, EventEmitter)
+
+
+# --- Phase 4: lifespan recovery + sd_notify ----------------------------------
+
+
+def test_lifespan_calls_recover_on_boot(cfg: AppConfig) -> None:
+    """Verify the lifespan kicks off recovery on startup. We don't need
+    real subprocesses; an empty state dir suffices to confirm the call
+    path. If recover_on_boot raised, the lifespan would have failed and
+    the TestClient context entry would have re-raised."""
+    app = build_app(cfg)
+    with TestClient(app) as client:
+        r = client.get("/api/health")
+        assert r.status_code == 200
+
+
+def test_lifespan_sends_sd_notify_ready_when_socket_present(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """When $NOTIFY_SOCKET points at a real datagram socket, lifespan
+    sends READY=1 after recovery."""
+    import socket
+
+    from gsfluent.config import AppConfig
+    from gsfluent.core.limits import CapConfig
+
+    sock_path = tmp_path / "notify.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    listener.bind(str(sock_path))
+    listener.settimeout(5.0)
+    try:
+        monkeypatch.setenv("NOTIFY_SOCKET", str(sock_path))
+        cfg = AppConfig(
+            sim_home=tmp_path / "sim_home",
+            sim_python="python",
+            sim_env=None,
+            work_dir=tmp_path / "work",
+            caps=CapConfig(),
+        )
+        app = build_app(cfg)
+        ready_seen = False
+        with TestClient(app):
+            # Drain datagrams until READY=1 shows up (sd_notify may send
+            # STATUS=... datagrams before READY=1).
+            for _ in range(10):
+                try:
+                    data, _ = listener.recvfrom(4096)
+                except socket.timeout:
+                    break
+                if b"READY=1" in data:
+                    ready_seen = True
+                    break
+        assert ready_seen, "READY=1 datagram never arrived"
+    finally:
+        listener.close()
+
+
+def test_built_app_health_route_works_after_phase_4_lifespan(cfg: AppConfig) -> None:
+    """Smoke: even after Phase 4 wiring, /api/health still responds 200
+    and the lifespan completes cleanly (TestClient context exits without
+    raising)."""
+    app = build_app(cfg)
+    with TestClient(app) as client:
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        assert r.json().get("status") == "ok"

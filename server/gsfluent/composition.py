@@ -5,9 +5,16 @@ Phase 2 grows that: FilesystemStorage, GSQCodec, KNNKabschFuser, and
 AsyncioRunManager land here, attached to app.state for downstream
 Depends() retrieval (which Phase 3 will use to rewire api/runs.py and
 api/sequences.py).
+
+Phase 4 extends the lifespan: crash recovery runs before yielding,
+sd_notify("READY=1") fires once recovery completes, and a background
+watchdog task pings systemd every 15 seconds. None of this requires
+systemd to be present — sd_notify helpers no-op when $NOTIFY_SOCKET
+is unset.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import platform
 import shutil
@@ -25,6 +32,7 @@ from gsfluent.config import AppConfig
 from gsfluent.core.codecs.gsq import GSQCodec
 from gsfluent.core.fusers.knn_kabsch import KNNKabschFuser
 from gsfluent.core.run_manager import AsyncioRunManager
+from gsfluent.core.sdnotify import notify_ready, notify_status, notify_watchdog
 from gsfluent.core.sim_engines.mpm import MPMSimulationEngine
 from gsfluent.core.state import RunStateStore
 from gsfluent.observability.jsonlog import StdlibJSONEmitter
@@ -34,6 +42,29 @@ from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.runs import RunManager
 from gsfluent.protocols.storage import Storage
 from gsfluent.storage.filesystem import FilesystemStorage
+
+
+# Watchdog heartbeat interval. systemd's WatchdogSec=30s leaves a 2x
+# safety margin: if any single heartbeat misses, the next one still
+# fires before systemd kills the process.
+WATCHDOG_INTERVAL_SEC = 15.0
+
+
+async def _watchdog_loop(obs: EventEmitter) -> None:
+    """Send WATCHDOG=1 every WATCHDOG_INTERVAL_SEC seconds.
+
+    Cancelled cleanly by the lifespan on shutdown. Logs a single event
+    per heartbeat (one line per 15s — cheap).
+    """
+    try:
+        while True:
+            await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
+            sent = notify_watchdog()
+            if sent:
+                obs.emit("backend.watchdog.ping")
+    except asyncio.CancelledError:
+        obs.emit("backend.watchdog.stopped")
+        raise
 
 
 def _ensure_work_dirs(cfg: AppConfig) -> None:
@@ -165,21 +196,46 @@ def build_app(cfg: AppConfig) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Phase 4 will replace this with the real recover_on_boot wiring;
-        # Phase 2 calls it now to exercise the shim path on startup.
+        # Phase 4: recover_on_boot before yield, sd_notify READY=1, start
+        # the watchdog heartbeat task. Crash recovery must not crash the
+        # backend itself — recovery failure is logged but the unit still
+        # comes up so the operator can investigate via /api/health and
+        # journalctl.
         obs.emit("backend.lifespan.startup")
+        notify_status("recovering in-flight runs")
+
+        report = None
         try:
             report = await run_mgr.recover_on_boot()
-            obs.emit(
-                "boot.recovery_complete",
-                reattached=report.reattached,
-                interrupted=report.interrupted,
-                terminal_already=report.terminal_already,
-            )
+            # AsyncioRunManager.recover_on_boot already emits
+            # boot.recovery_complete; do not double-log here.
         except Exception as e:
-            obs.emit("boot.recovery_failed", error=str(e))
-        yield
-        obs.emit("backend.lifespan.shutdown")
+            obs.emit("backend.recovery.failed", error=str(e))
+
+        if report is not None:
+            notify_status(
+                f"ready (reattached={report.reattached} "
+                f"interrupted={report.interrupted} "
+                f"terminal_already={report.terminal_already})"
+            )
+        else:
+            notify_status("ready (recovery failed; check logs)")
+
+        notify_ready()
+        obs.emit("backend.ready")
+
+        watchdog_task = asyncio.create_task(_watchdog_loop(obs))
+
+        try:
+            yield
+        finally:
+            obs.emit("backend.lifespan.shutdown")
+            notify_status("shutting down")
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
 
     app = FastAPI(title="gsfluent", version="0.1.0", lifespan=lifespan)
 
