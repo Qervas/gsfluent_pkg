@@ -430,47 +430,28 @@ _build_lock = Lock()
 
 
 def _run_build_subprocess(name: str, job: dict) -> None:
-    """Worker thread: build .npz then .gsq for one sequence, update `job`.
+    """Worker thread: build the .gsq cache for one sequence.
 
-    Two steps because pack_splats.py reads the .npz that batch_convert
-    just produced. Failure of step 2 doesn't fail the job — the .npz
-    is the safety net; the client just won't get the smaller artifact.
+    Single pass since 2026-05-22: pack_splats.py now reads frame_*.ply
+    directly. The .npz intermediate is gone from the build path — old
+    .npz files on disk still play (fallback paths in viser_headless +
+    SPA), but new builds only emit .gsq.
     """
-    npz_tool = PKG_ROOT / "server" / "tools" / "batch_convert_to_npz.py"
     gsq_tool = PKG_ROOT / "server" / "tools" / "pack_splats.py"
-
     try:
-        # Step 1: build the .npz (legacy path; required for client fallback).
         r = subprocess.run(
-            [sys.executable, str(npz_tool), name],
-            capture_output=True, text=True, timeout=600,
-        )
-        if r.returncode != 0:
-            with _build_lock:
-                job["state"] = "error"
-                job["stdout_tail"] = (r.stdout or "")[-800:]
-                job["error"] = ((r.stderr or "")[-500:]
-                                or f"npz build exit {r.returncode}")
-                job["finished_at"] = time.time()
-            return
-
-        # Step 2: build the .gsq (smaller, streamable). Best-effort.
-        r2 = subprocess.run(
             [sys.executable, str(gsq_tool), name],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=600,
         )
         with _build_lock:
             job["finished_at"] = time.time()
-            job["stdout_tail"] = ((r.stdout or "") + "\n--- pack_splats ---\n"
-                                  + (r2.stdout or ""))[-1500:]
-            if r2.returncode != 0:
-                # npz exists, only gsq failed → still usable
+            job["stdout_tail"] = (r.stdout or "")[-1500:]
+            if r.returncode == 0:
                 job["state"] = "done"
-                job["error"] = "gsq build failed (npz is fine): " + \
-                               (r2.stderr or "")[-300:]
             else:
-                job["state"] = "done"
-
+                job["state"] = "error"
+                job["error"] = ((r.stderr or "")[-500:]
+                                or f"pack_splats exit {r.returncode}")
     except subprocess.TimeoutExpired:
         with _build_lock:
             job["state"] = "error"
@@ -498,8 +479,11 @@ def build_viser_cache(name: str) -> dict:
     if not Sequence.exists(name):
         raise HTTPException(404, f"sequence not found: {name}")
 
-    # Fast path: cache already on disk.
-    if (_VISER_CACHE / f"{name}.npz").is_file():
+    # Fast path: cache already on disk. .gsq is the canonical artifact;
+    # an .npz alone (from before the format switch) counts too so the
+    # SPA can fall through to it.
+    if (_VISER_CACHE / f"{name}.gsq").is_file() \
+       or (_VISER_CACHE / f"{name}.npz").is_file():
         return {"name": name, "state": "done",
                 "note": "cache already exists on disk"}
 
@@ -539,8 +523,9 @@ def get_viser_cache_build_status(name: str) -> dict:
         job = _build_jobs.get(name)
         if job is not None:
             return dict(job)
-    # No job tracked → reflect disk state.
-    if (_VISER_CACHE / f"{name}.npz").is_file():
+    # No job tracked → reflect disk state. Either artifact counts.
+    if (_VISER_CACHE / f"{name}.gsq").is_file() \
+       or (_VISER_CACHE / f"{name}.npz").is_file():
         return {"name": name, "state": "done", "note": "cache exists (no job tracked)"}
     return {"name": name, "state": "idle"}
 

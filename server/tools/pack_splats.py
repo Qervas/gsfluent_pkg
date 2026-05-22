@@ -1,69 +1,26 @@
-"""Encode a sequence .npz into the visual-lossless streamable .gsq format.
+"""Encode a sequence directly from frame_*.ply into the .gsq streaming format.
 
-Why a new format
-────────────────
-The .npz cache is monolithic fp32 — ~2.9 GB for a 151-frame 683k-splat
-sequence. The client has to download the whole thing before viser can
-mmap it, so first-frame latency is bound by total file size / WAN
-bandwidth. Per discussion 2026-05-22: aim for visual-lossless playback
-that streams as it downloads, so first frame is on screen in ~1s
-regardless of sequence length.
+Replaces the previous two-step pipeline (frame_*.ply → batch_convert_to_npz
+→ .npz → pack_splats → .gsq). This single pass reads the fused frame plys
+and writes the .gsq directly, skipping the ~600 MB intermediate.
 
-.gsq layout (version 1)
-───────────────────────
-All multi-byte integers are little-endian.
+.gsq layout — see the docstring of the previous version (format unchanged):
+  header(80B) + frame_index(16B × N) + static_block(zstd) + frame_chunks(zstd)
 
-  +---- HEADER (fixed 80 bytes) ------------------------------+
-  | magic         u8[4]   "GSQ1"                              |
-  | version       u32     = 1                                 |
-  | n_splats      u32                                         |
-  | n_frames      u32                                         |
-  | fps_hint      f32                                         |
-  | bbox_min      f32[3]  per-axis min over all frames        |
-  | bbox_max      f32[3]  per-axis max over all frames        |
-  | static_offset u64     byte offset of the static block     |
-  | static_size   u32     compressed size of the static block |
-  | reserved      u8[16]  zero; for forward compat            |
-  +-----------------------------------------------------------+
-  +---- FRAME INDEX (16 bytes × n_frames) --------------------+
-  | for each frame:                                           |
-  |   offset      u64     byte offset of this frame's chunk   |
-  |   size        u32     compressed size in bytes            |
-  |   reserved    u32     zero                                |
-  +-----------------------------------------------------------+
-  +---- STATIC BLOCK (zstd-compressed) -----------------------+
-  | rgb           f16[n_splats, 3]  linear 3DGS color (HDR;   |
-  |                                 not 0..1)                 |
-  | opacity       u8[n_splats]      0..255 ⇒ 0..1             |
-  | scales        f16[n_splats, 3]  linear stddev             |
-  +-----------------------------------------------------------+
-  +---- FRAME CHUNKS (zstd-compressed each) ------------------+
-  | xyz           i16[n_splats, 3]  dequant via bbox          |
-  | quat_xyz      i16[n_splats, 3]  axis-angle, w recovered   |
-  +-----------------------------------------------------------+
+Per-frame ply field mapping (matches sequence_to_viser_npz.py):
+  - xyz:     v["x"], v["y"], v["z"]                       — per frame
+  - quat:    (rot_0, rot_1, rot_2, rot_3) normalized      — per frame (v2 only)
+  - scales:  exp(scale_0, scale_1, scale_2)               — static (frame 0)
+  - rgb:     clip(0.5 + 0.282 * f_dc_*, 0, 1)             — static (frame 0)
+  - opacity: sigmoid(opacity_raw)                         — static (frame 0)
 
-Dequantization
-──────────────
-  p_f32 = bbox_min + (q_i16 + 32768) / 65535.0 * (bbox_max - bbox_min)
+If frame 0 has no rot_0..3 fields, we fall back to identity quats — viewer
+falls back to the static-cov rendering path.
 
-Visual-lossless threshold
-─────────────────────────
-Per-axis position quantum = (bbox_max - bbox_min) / 65535. For a 60-unit
-bbox that's ~0.001 units (≈1 mm in scene scale) — well below pixel-level
-discrimination at any reasonable render distance.
-
-Quaternion to axis-angle
-────────────────────────
-We send (qx, qy, qz) of a normalized (qw,qx,qy,qz). Receiver recovers
-qw = sqrt(max(0, 1 - qx² - qy² - qz²)). The qw sign is lost — but viser
-uses cov reconstruction R·S·Sᵀ·Rᵀ which is invariant under q → -q, so
-the sign is irrelevant for rendering.
-
-Usage
-─────
-  python server/tools/pack_splats.py             # all sequences w/ npz
-  python server/tools/pack_splats.py <seq>       # one sequence
-  python server/tools/pack_splats.py --force ... # rebuild if up-to-date
+Usage:
+    python server/tools/pack_splats.py                # all sequences
+    python server/tools/pack_splats.py <seq>          # one sequence
+    python server/tools/pack_splats.py --force <seq>  # rebuild
 """
 from __future__ import annotations
 
@@ -77,101 +34,172 @@ import numpy as np
 import zstandard as zstd
 
 REPO = Path(__file__).resolve().parents[2]
+LIB = REPO / "work" / "library" / "sequences"
 CACHE = REPO / "work" / "cache" / "viser"
+SH_C0 = 0.28209479177387814
 
 MAGIC = b"GSQ1"
 VERSION = 1
 HEADER_SIZE = 80
-INDEX_ENTRY_SIZE = 16  # u64 offset + u32 size + u32 reserved
-ZSTD_LEVEL = 9  # mid-range; level 22 is ~5% smaller but ~10× slower
+INDEX_ENTRY_SIZE = 16
+ZSTD_LEVEL = 9
+_FP16_COV_FLOOR_SQRT = np.float32(np.sqrt(6.1e-5))  # ≈ 7.81e-3
 
 
-def _quantize_xyz(xyz: np.ndarray, bmin: np.ndarray, bmax: np.ndarray) -> np.ndarray:
-    """xyz (T,N,3) float32 → int16 (T,N,3). Per-axis normalize to [0,65535],
-    then subtract 32768 so the result fits int16 with no signed-overflow
-    surprises in numpy view-casts."""
+def _has_rot_fields(v) -> bool:
+    return all(f in v.dtype.names for f in ("rot_0", "rot_1", "rot_2", "rot_3"))
+
+
+def _norm_quats(qw, qx, qy, qz):
+    """Normalize + fix sign so scalar is non-negative (continuous trajectory)."""
+    qn = np.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    qn[qn == 0] = 1.0
+    qw, qx, qy, qz = qw / qn, qx / qn, qy / qn, qz / qn
+    flip = qw < 0
+    qw[flip] = -qw[flip]; qx[flip] = -qx[flip]
+    qy[flip] = -qy[flip]; qz[flip] = -qz[flip]
+    return qw, qx, qy, qz
+
+
+def _read_static_attrs(v0):
+    """frame_0 → (scales, rgb, opacity). Applies the fp16 cov-floor clamp
+    so viser's WS transport doesn't render needle-splats."""
+    sx = np.exp(np.asarray(v0["scale_0"], dtype=np.float32))
+    sy = np.exp(np.asarray(v0["scale_1"], dtype=np.float32))
+    sz = np.exp(np.asarray(v0["scale_2"], dtype=np.float32))
+    scales = np.stack([sx, sy, sz], axis=1)
+    n_clamped = int((scales < _FP16_COV_FLOOR_SQRT).any(axis=1).sum())
+    if n_clamped:
+        print(f"  clamping {n_clamped} splat scales below fp16 normal "
+              f"({n_clamped/len(scales)*100:.1f}%)")
+        np.maximum(scales, _FP16_COV_FLOOR_SQRT, out=scales)
+
+    rgb = np.stack([
+        0.5 + np.asarray(v0["f_dc_0"], dtype=np.float32) * SH_C0,
+        0.5 + np.asarray(v0["f_dc_1"], dtype=np.float32) * SH_C0,
+        0.5 + np.asarray(v0["f_dc_2"], dtype=np.float32) * SH_C0,
+    ], axis=1).astype(np.float32)
+
+    op_logit = np.asarray(v0["opacity"], dtype=np.float32)
+    opacity = (1.0 / (1.0 + np.exp(-op_logit))).astype(np.float32)
+    return scales, rgb, opacity
+
+
+def _read_per_frame(v, want_quats: bool):
+    xyz = np.stack([
+        np.asarray(v["x"], dtype=np.float32),
+        np.asarray(v["y"], dtype=np.float32),
+        np.asarray(v["z"], dtype=np.float32),
+    ], axis=1)
+    quat = None
+    if want_quats:
+        qw = np.asarray(v["rot_0"], dtype=np.float32)
+        qx = np.asarray(v["rot_1"], dtype=np.float32)
+        qy = np.asarray(v["rot_2"], dtype=np.float32)
+        qz = np.asarray(v["rot_3"], dtype=np.float32)
+        qw, qx, qy, qz = _norm_quats(qw, qx, qy, qz)
+        quat = np.stack([qw, qx, qy, qz], axis=1)
+    return xyz, quat
+
+
+def _quantize_xyz(xyz, bmin, bmax):
     span = (bmax - bmin).astype(np.float64)
-    span = np.where(span > 0, span, 1.0)  # zero-span axis: degenerate scene
+    span = np.where(span > 0, span, 1.0)
     q = (xyz.astype(np.float64) - bmin) / span * 65535.0
     q = np.clip(np.round(q), 0, 65535).astype(np.int32) - 32768
     return q.astype(np.int16)
 
 
-def _quantize_quats(q: np.ndarray) -> np.ndarray:
-    """quaternions (T,N,4) (w,x,y,z) → axis-vec int16 (T,N,3).
-
-    We send (qx,qy,qz) as ±1-clipped int16 / 32767. Receiver normalizes
-    against qw via sqrt(1 - x² - y² - z²). Quaternions out of viser are
-    already unit, so each component is in [-1,1] before quantization."""
-    qxyz = q[..., 1:4]  # drop qw
-    qxyz = np.clip(qxyz, -1.0, 1.0)
+def _quantize_quats(q):
+    qxyz = np.clip(q[..., 1:4], -1.0, 1.0)
     return np.round(qxyz * 32767.0).astype(np.int16)
 
 
-def encode_npz_to_gsq(npz_path: Path, out_path: Path) -> None:
-    print(f"  loading  {npz_path.name}")
-    d = np.load(npz_path)
+def encode_sequence_to_gsq(seq_name: str, out_path: Path) -> None:
+    from plyfile import PlyData
 
-    frames = np.asarray(d["frames"], dtype=np.float32)        # (T,N,3)
-    n_frames, n_splats, _ = frames.shape
-    fps_hint = float(d["fps_hint"]) if "fps_hint" in d.files else 24.0
+    frames_dir = LIB / seq_name / "frames"
+    if not frames_dir.is_dir():
+        raise SystemExit(f"no frames/ in {LIB / seq_name}")
+    frame_paths = sorted(p for p in frames_dir.iterdir()
+                         if p.is_file() and p.name.startswith("frame_") and p.suffix == ".ply")
+    if not frame_paths:
+        raise SystemExit(f"no frame_*.ply in {frames_dir}")
+    n_frames = len(frame_paths)
 
-    # quats may not exist on v1 caches; fabricate identity in that case.
-    if "quats" in d.files:
-        quats = np.asarray(d["quats"], dtype=np.float32)      # (T,N,4)
-        if quats.shape != (n_frames, n_splats, 4):
-            raise SystemExit(
-                f"quats shape mismatch: {quats.shape} vs ({n_frames},{n_splats},4)"
-            )
-    else:
-        print("  WARN: no per-frame quats in source npz; using identity")
-        quats = np.zeros((n_frames, n_splats, 4), dtype=np.float32)
-        quats[..., 0] = 1.0  # w=1
+    print(f"  reading frame 0 for static attrs: {frame_paths[0].name}")
+    v0 = PlyData.read(str(frame_paths[0]))["vertex"].data
+    n_splats = v0.shape[0]
+    has_rot_v0 = _has_rot_fields(v0)
+    # Probe frame 1 too — sometimes frame 0 carries quats but later frames
+    # don't (sim-emitted plys may only have xyz). v2 needs per-frame rot.
+    probe = frame_paths[1] if n_frames > 1 else frame_paths[0]
+    v_probe = PlyData.read(str(probe))["vertex"].data
+    want_quats = has_rot_v0 and _has_rot_fields(v_probe)
+    if not has_rot_v0:
+        print(f"  WARN: frame 0 has no rot_* fields; using identity quats (v1 fallback)")
 
-    rgb = np.asarray(d["rgb"], dtype=np.float32)              # (N,3) or (N,) etc.
-    opacity = np.asarray(d["opacity"], dtype=np.float32)
-    scales = np.asarray(d["scales"], dtype=np.float32) if "scales" in d.files \
-             else None
+    scales, rgb, opacity = _read_static_attrs(v0)
 
-    if scales is None:
-        # v1 npz had a static cov instead of scales+quats. Approximate
-        # scales as the diagonal of the cov's eigendecomposition. Cheap.
-        if "cov" in d.files:
-            cov = np.asarray(d["cov"], dtype=np.float32)      # (N,3,3)
-            eig = np.linalg.eigvalsh(cov)                     # (N,3) ascending
-            scales = np.sqrt(np.clip(eig, 0, None))[:, ::-1]  # descending
-        else:
-            raise SystemExit(
-                f"npz has neither 'scales' nor 'cov': {list(d.files)}"
-            )
+    xyz_all = np.empty((n_frames, n_splats, 3), dtype=np.float32)
+    quat_all = np.empty((n_frames, n_splats, 4), dtype=np.float32)
+    if not want_quats:
+        # Identity quaternion (w=1) — invariant under cov reconstruction.
+        quat_all[..., 0] = 1.0
+        quat_all[..., 1:] = 0.0
 
-    bbox_min = frames.reshape(-1, 3).min(axis=0).astype(np.float32)
-    bbox_max = frames.reshape(-1, 3).max(axis=0).astype(np.float32)
+    print(f"  reading {n_frames} frames…  (n_splats={n_splats}, quats={'yes' if want_quats else 'no'})")
+    t0 = time.time()
+    for i, p in enumerate(frame_paths):
+        v = PlyData.read(str(p))["vertex"].data
+        if v.shape[0] != n_splats:
+            raise SystemExit(f"{p.name} has {v.shape[0]} splats, expected {n_splats}")
+        xyz, quat = _read_per_frame(v, want_quats=want_quats)
+        xyz_all[i] = xyz
+        if quat is not None:
+            quat_all[i] = quat
+        if (i + 1) % 25 == 0 or i + 1 == n_frames:
+            print(f"    {i+1}/{n_frames}  ({time.time()-t0:.1f}s)", flush=True)
 
-    print(f"  quantizing  n_frames={n_frames}  n_splats={n_splats}")
-    xyz_q = _quantize_xyz(frames, bbox_min, bbox_max)          # (T,N,3) i16
-    quat_q = _quantize_quats(quats)                            # (T,N,3) i16
+    # NaN sanitization — sim particles that escape the bbox can produce
+    # NaN xyz. K-NN fuse propagates them. Forward-fill from the prior
+    # frame so the splat freezes in place instead of crashing the
+    # WASM splat sorter.
+    nan_mask = np.isnan(xyz_all).any(axis=2)
+    if nan_mask.any():
+        n_bad = int(nan_mask.sum())
+        print(f"  sanitizing {n_bad} NaN positions (forward-fill)")
+        if nan_mask[0].any():
+            # Nothing earlier; clamp NaNs to the centroid of finite frame-0 points.
+            finite = ~nan_mask[0]
+            ctr = xyz_all[0][finite].mean(axis=0) if finite.any() else np.zeros(3, dtype=np.float32)
+            xyz_all[0][nan_mask[0]] = ctr
+        for t in range(1, n_frames):
+            bad = nan_mask[t]
+            if bad.any():
+                xyz_all[t][bad] = xyz_all[t - 1][bad]
 
-    # rgb is 3DGS linear-space color, not [0,1] — values can exceed both
-    # ends (HDR). uint8 clipping was destroying that range, so store as
-    # fp16 instead (~4MB static cost for 683k splats, negligible).
+    bbox_min = xyz_all.reshape(-1, 3).min(axis=0).astype(np.float32)
+    bbox_max = xyz_all.reshape(-1, 3).max(axis=0).astype(np.float32)
+
+    print(f"  quantizing  bbox={bbox_min.tolist()}..{bbox_max.tolist()}")
+    xyz_q = _quantize_xyz(xyz_all, bbox_min, bbox_max)
+    quat_q = _quantize_quats(quat_all)
+
     rgb_f16 = rgb.astype(np.float16)
-    opacity_u8 = np.clip(np.round(opacity.reshape(-1) * 255.0), 0, 255).astype(np.uint8)
+    opacity_u8 = np.clip(np.round(opacity * 255.0), 0, 255).astype(np.uint8)
     scales_f16 = scales.astype(np.float16)
 
     cctx = zstd.ZstdCompressor(level=ZSTD_LEVEL)
-
-    print(f"  compressing  static + {n_frames} frames @ zstd level {ZSTD_LEVEL}")
+    print(f"  compressing  static + {n_frames} frames @ zstd L{ZSTD_LEVEL}")
     static_uncompressed = rgb_f16.tobytes() + opacity_u8.tobytes() + scales_f16.tobytes()
     static_compressed = cctx.compress(static_uncompressed)
 
-    # Per-frame chunks: xyz (i16 ×3) + quat (i16 ×3).
     frame_chunks: list[bytes] = []
     for t in range(n_frames):
         raw = xyz_q[t].tobytes() + quat_q[t].tobytes()
         frame_chunks.append(cctx.compress(raw))
 
-    # Lay out the file.
     static_offset = HEADER_SIZE + n_frames * INDEX_ENTRY_SIZE
     static_size = len(static_compressed)
     frame0_offset = static_offset + static_size
@@ -183,15 +211,16 @@ def encode_npz_to_gsq(npz_path: Path, out_path: Path) -> None:
         off += len(c)
 
     print(f"  writing  {out_path}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(MAGIC)
         f.write(struct.pack("<III", VERSION, n_splats, n_frames))
-        f.write(struct.pack("<f", fps_hint))
+        f.write(struct.pack("<f", 24.0))  # fps_hint default
         f.write(bbox_min.tobytes())
         f.write(bbox_max.tobytes())
         f.write(struct.pack("<QI", static_offset, static_size))
-        f.write(b"\x00" * 24)  # reserved → fills HEADER_SIZE
-        assert f.tell() == HEADER_SIZE, f"header size drift: {f.tell()} != {HEADER_SIZE}"
+        f.write(b"\x00" * 24)
+        assert f.tell() == HEADER_SIZE, f"header drift: {f.tell()}"
         for off, sz in index_entries:
             f.write(struct.pack("<QII", off, sz, 0))
         assert f.tell() == static_offset, "static offset drift"
@@ -199,10 +228,8 @@ def encode_npz_to_gsq(npz_path: Path, out_path: Path) -> None:
         for c in frame_chunks:
             f.write(c)
 
-    final_size = out_path.stat().st_size
-    src_size = npz_path.stat().st_size
-    ratio = src_size / max(final_size, 1)
-    print(f"  done  {final_size/1e6:.1f} MB  (npz was {src_size/1e6:.1f} MB,  {ratio:.1f}× smaller)")
+    out_size = out_path.stat().st_size
+    print(f"  done  {out_size/1e6:.1f} MB")
 
 
 def main() -> int:
@@ -210,33 +237,37 @@ def main() -> int:
     p.add_argument("sequence", nargs="?", default=None,
                    help="single sequence name; omit for all")
     p.add_argument("--force", action="store_true",
-                   help="rebuild even if .gsq is newer than .npz")
+                   help="rebuild even if .gsq is newer than the source frames")
     args = p.parse_args()
 
-    if not CACHE.is_dir():
-        print(f"no viser cache at {CACHE}", file=sys.stderr)
-        return 1
+    CACHE.mkdir(parents=True, exist_ok=True)
 
     if args.sequence:
-        targets = [CACHE / f"{args.sequence}.npz"]
-        if not targets[0].is_file():
-            print(f"no .npz for {args.sequence}: {targets[0]}", file=sys.stderr)
-            return 1
+        seq_names = [args.sequence]
     else:
-        targets = sorted(CACHE.glob("*.npz"))
+        seq_names = sorted(p.name for p in LIB.iterdir()
+                           if p.is_dir() and (p / "frames").is_dir())
 
     n_built = n_skipped = n_failed = 0
-    for npz in targets:
-        gsq = npz.with_suffix(".gsq")
-        if gsq.is_file() and not args.force \
-           and gsq.stat().st_mtime >= npz.stat().st_mtime:
-            print(f"[pack_splats] {npz.stem}: up-to-date, skip")
+    for name in seq_names:
+        out = CACHE / f"{name}.gsq"
+        frames_dir = LIB / name / "frames"
+        if not frames_dir.is_dir():
+            print(f"[pack_splats] {name}: no frames/ — skip")
             n_skipped += 1
             continue
-        print(f"[pack_splats] {npz.stem}: building")
+        # Up-to-date if .gsq exists and is newer than the newest source frame.
+        if out.is_file() and not args.force:
+            newest_src = max(p.stat().st_mtime for p in frames_dir.iterdir()
+                             if p.suffix == ".ply")
+            if out.stat().st_mtime >= newest_src:
+                print(f"[pack_splats] {name}: up-to-date, skip")
+                n_skipped += 1
+                continue
+        print(f"[pack_splats] {name}: building")
         t0 = time.time()
         try:
-            encode_npz_to_gsq(npz, gsq)
+            encode_sequence_to_gsq(name, out)
             n_built += 1
             print(f"  ({time.time()-t0:.1f}s)\n")
         except Exception as e:
