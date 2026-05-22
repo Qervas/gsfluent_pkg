@@ -19,7 +19,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -218,19 +218,50 @@ async def get_frame(name: str, frame_idx: int):
     return await _get_run_frame(name, frame_idx)
 
 
+# .gsq files are immutable per (name, size, mtime): once produced for a
+# given sequence, the bytes don't change. We surface that with a weak
+# ETag and Cache-Control: immutable so the viser_headless client can
+# short-circuit on HEAD when its local copy is current.
+_GSQ_CACHE_CONTROL = "public, immutable, max-age=31536000"
+
+
+def _gsq_etag(size: int, mtime: float) -> str:
+    """Weak ETag '"<size>-<mtime_int>"' — matches the client's
+    _local_etag() formula in frontend/python/viser_headless.py."""
+    return f'"{size}-{int(mtime)}"'
+
+
 @router.get("/{name}/cache/splats.gsq")
-def get_splats_gsq(name: str):
+def get_splats_gsq(name: str, request: Request):
     """Serve the .gsq visual-lossless streamable cache.
 
     Produced by `server/tools/pack_splats.py` as a smaller, byte-range
     addressable alternative to the .npz cache. Typical size: 0.4-1 GB
-    vs 2.9 GB for the npz on the same sequence (~3-7× smaller). Same
+    vs 2.9 GB for the npz on the same sequence (~3-7x smaller). Same
     Range support via FileResponse — interrupted downloads resume
     it natively.
 
+    Headers:
+      Cache-Control: public, immutable, max-age=31536000
+        Tells any intermediate cache that the body is safe to keep
+        forever for this URL+ETag pair. .gsq is content-addressable
+        via (name, size, mtime).
+      ETag: "<size>-<mtime_int>"
+        Weak ETag per spec Open Question 3 default. Cheap to compute
+        (stat already on the hot path); strong ETag (content hash)
+        would cost a full-file read per response.
+
+    Conditional GET:
+      If-None-Match matches current ETag -> 304 (no body) so the
+      viser_headless client can keep its local file authoritative
+      without re-downloading.
+
+    Range:
+      FileResponse already provides byte-range. Verified by
+      tests/api/test_sequences_cache_headers.py.
+
     Falls through to 404 with a build hint if the .gsq doesn't exist
-    yet. The client is expected to fall back to viser.npz in that case
-    (the older path the build flow already produces).
+    yet.
     """
     if not Sequence.exists(name):
         raise HTTPException(404, f"sequence not found: {name}")
@@ -247,10 +278,23 @@ def get_splats_gsq(name: str):
         target.relative_to(cache_root)
     except ValueError:
         raise HTTPException(400, f"refusing to serve outside cache: {name}")
+
+    st = target.stat()
+    etag = _gsq_etag(st.st_size, st.st_mtime)
+
+    if request.headers.get("if-none-match") == etag:
+        # 304 carries no body but must repeat ETag + Cache-Control so
+        # downstream caches stay consistent.
+        return Response(
+            status_code=304,
+            headers={"etag": etag, "cache-control": _GSQ_CACHE_CONTROL},
+        )
+
     return FileResponse(
         target,
         media_type="application/octet-stream",
         filename=f"{name}.gsq",
+        headers={"etag": etag, "cache-control": _GSQ_CACHE_CONTROL},
     )
 
 
