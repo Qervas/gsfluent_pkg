@@ -18,7 +18,11 @@ the actual GPU upload happens on viser's render thread on its next tick.
 Latency is whatever viser's WS push + browser render takes (~1 frame).
 
 Usage:
-    python frontend/python/viser_headless.py --npz_dir work/cache/viser
+    python frontend/python/viser_headless.py --cache-dir work/cache/viser
+
+The legacy --npz_dir flag is accepted as a deprecated alias and prints a
+warning on first use (per-process). Same applies to the cache directory
+contents: .gsq is the only format produced today; .npz is fully retired.
 """
 from __future__ import annotations
 
@@ -459,8 +463,18 @@ class CameraBody(BaseModel):
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
-    p.add_argument("--npz_dir", required=True,
-                   help="Directory containing per-sequence .npz files")
+    # --cache-dir is the canonical Phase-5 flag. --npz_dir is the
+    # deprecated alias kept for one release so existing run-client.sh
+    # invocations keep working; it prints a one-shot warning per process.
+    cache_group = p.add_mutually_exclusive_group(required=True)
+    cache_group.add_argument(
+        "--cache-dir", dest="cache_dir", default=None,
+        help="Directory containing per-sequence .gsq cache files",
+    )
+    cache_group.add_argument(
+        "--npz_dir", dest="cache_dir_legacy", default=None,
+        help="[DEPRECATED] Use --cache-dir. Same meaning, kept for back-compat.",
+    )
     p.add_argument("--viser_port", type=int, default=8091,
                    help="Port for viser's HTTP+WS (where the iframe points)")
     p.add_argument("--control_port", type=int, default=8092,
@@ -494,18 +508,30 @@ def main() -> int:
         _xdg = _os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/{_os.getuid()}"
         args.sync_status_file = Path(_xdg) / "gsfluent_sync_status.json"
 
-    # Argument name kept as `--npz_dir` for back-compat with old launchers,
-    # but the directory now holds .gsq cells (npz is fully retired).
-    npz_root = Path(args.npz_dir)
-    npz_root.mkdir(parents=True, exist_ok=True)
+    # Resolve --cache-dir vs the deprecated --npz_dir alias. The
+    # mutually-exclusive group above guarantees exactly one of them is
+    # set; here we prefer the new name and warn on first sighting of the
+    # old one (once per process, not per call, since main() runs once).
+    if args.cache_dir_legacy is not None:
+        import warnings as _warnings
+        _warnings.warn(
+            "viser_headless: --npz_dir is deprecated; use --cache-dir. "
+            "The old flag will be removed in the next release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        cache_root = Path(args.cache_dir_legacy)
+    else:
+        cache_root = Path(args.cache_dir)
+    cache_root.mkdir(parents=True, exist_ok=True)
     # Lazy boot: just enumerate available .gsq files; do not decode.
     # Each .gsq decode is ~1-3s + hundreds of MB of dequantized float32,
     # so eager-loading 4+ cells used to take 10-30s and 3 GB of RAM at
     # boot — for cells the user might never click. resolve_cell_lazily
     # loads them on first /set with a "parsing" phase pill so the SPA
     # shows progress; subsequent clicks are instant from the cells dict.
-    available = sorted(npz_root.glob("*.gsq"))
-    print(f"boot: {len(available)} .gsq cells available in {npz_root} (loaded on demand)")
+    available = sorted(cache_root.glob("*.gsq"))
+    print(f"boot: {len(available)} .gsq cells available in {cache_root} (loaded on demand)")
     for path in available:
         print(f"  available: sequence:{path.stem}  ({path.stat().st_size / 1e6:.0f} MB)")
     cells: dict[str, dict] = {}
@@ -524,7 +550,7 @@ def main() -> int:
 
         Resolution order:
           1. model:<modelName>  → fetch via /api/models, then .ply, then mmap_model_cell
-          2. sequence:<seqName> → look for <seqName>.npz under npz_root
+          2. sequence:<seqName> → look for <seqName>.gsq under cache_root
           3. bare <name>        → try sequence first, then model (transition fallback)
 
         Returns (ok, error). `error` is a short tag from the set:
@@ -569,7 +595,7 @@ def main() -> int:
                 return False, "parse_failed"
 
         def _try_sequence(seq_name: str) -> tuple[bool, str | None]:
-            gsq = npz_root / f"{seq_name}.gsq"
+            gsq = cache_root / f"{seq_name}.gsq"
             if not gsq.is_file():
                 return False, "not_found"
             _set_loading(name, "parsing")
@@ -1392,15 +1418,15 @@ def main() -> int:
         For .npz URLs, fall back to download-then-load (no streaming).
 
         Path-traversal defense same as /reload: `name` must match
-        _SAFE_NAME and the resolved file must stay under npz_dir.
+        _SAFE_NAME and the resolved file must stay under cache_dir.
         """
         if not _SAFE_NAME.match(name):
             return {"ok": False, "error": f"invalid cell name: {name!r}"}
-        dest = (npz_root / f"{name}.gsq").resolve()
+        dest = (cache_root / f"{name}.gsq").resolve()
         try:
-            dest.relative_to(npz_root.resolve())
+            dest.relative_to(cache_root.resolve())
         except ValueError:
-            return {"ok": False, "error": f"cell path escapes npz_dir: {name!r}"}
+            return {"ok": False, "error": f"cell path escapes cache_dir: {name!r}"}
         partial = dest.with_suffix(".gsq.partial")
         return _sync_cell_gsq_streaming(name, url, dest, partial)
 
@@ -1424,11 +1450,11 @@ def main() -> int:
         # in case the regex misses something exotic.
         if not _SAFE_NAME.match(cell):
             return {"ok": False, "error": f"invalid cell name: {cell!r}"}
-        gsq_path = (npz_root / f"{cell}.gsq").resolve()
+        gsq_path = (cache_root / f"{cell}.gsq").resolve()
         try:
-            gsq_path.relative_to(npz_root.resolve())
+            gsq_path.relative_to(cache_root.resolve())
         except ValueError:
-            return {"ok": False, "error": f"cell path escapes npz_dir: {cell!r}"}
+            return {"ok": False, "error": f"cell path escapes cache_dir: {cell!r}"}
         if not gsq_path.is_file():
             return {"ok": False, "error": f"no .gsq at {gsq_path}"}
         try:
