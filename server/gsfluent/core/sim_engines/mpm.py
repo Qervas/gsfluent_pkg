@@ -300,6 +300,14 @@ class MPMSimulationEngine:
         )
         if fuse_rc != 0:
             joined = "".join(fuse_stderr_chunks)
+            # Spec invariant: emit one structured boundary event per
+            # failure. The RunManager's de-dup guard checks for this
+            # exact event name so it doesn't mirror it.
+            on_event.emit(
+                "error.fuse.crashed",
+                returncode=fuse_rc,
+                stderr_tail=joined[-2000:],
+            )
             raise SimCrashedError(
                 f"fuse exited with rc={fuse_rc} after {fuse_duration:.1f}s; "
                 f"stderr tail: {joined[-500:]}"
