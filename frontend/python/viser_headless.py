@@ -45,6 +45,25 @@ from pydantic import BaseModel
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
+def _local_etag(path: Path) -> str:
+    """Compute the weak ETag the server would emit for `path`.
+
+    Format MUST match server/gsfluent/api/sequences.py:_gsq_etag — the
+    contract is the literal byte equality of the quoted ETag string.
+
+        '"<size>-<mtime_int>"'
+
+    Recomputed from os.stat() each call; no persistent sidecar file. The
+    .gsq cache is small enough (sub-GB) that a stat is free and the
+    sidecar maintenance cost would outweigh its benefit.
+
+    Raises FileNotFoundError if path doesn't exist — callers should
+    check is_file() first.
+    """
+    st = path.stat()
+    return f'"{st.st_size}-{int(st.st_mtime)}"'
+
+
 # Workbench dark palette (mirrors frontend/tailwind.config.js). Keeping
 # this in sync visually means the iframe inside the React workbench
 # doesn't look like a foreign element pasted in. RGB tuples are 0-255.
@@ -944,21 +963,297 @@ def main() -> int:
             filename=p.name,
         )
 
+    def _sync_cell_gsq_streaming_with_prefix(
+        *,
+        name: str,
+        dest: Path,
+        partial: Path,
+        response,                 # httpx.Response in stream mode
+        prefix: bytes,
+        cell_key: str,
+    ) -> dict:
+        """Decode a .gsq stream that resumed mid-download.
+
+        Pre-seeds the decode buffer with `prefix` (the bytes already on
+        disk from the prior interrupted run), then continues from the
+        206 response body. The static block + frame index live near the
+        head of the file, so a resumed download where the offset is
+        > header_size still works because the decoder operates on a
+        single concatenated buffer.
+
+        Returns the same dict shape as a fresh download:
+            {ok, cell, added, cached?, bytes, n_frames}
+        """
+        import struct as _struct
+        import zstandard as _zstd
+
+        buf = bytearray(prefix)
+        pf = open(partial, "ab")
+        header_parsed = None
+        static_decoded = False
+        rgb_f16 = opacity_u8 = scales_f16 = None
+        xyz_backing = quat_backing = None
+        n_loaded = 0
+        bbox_min = bbox_max = span = None
+
+        def commit_cell():
+            cell = _build_gsq_cell_dict(
+                xyz_backing, quat_backing, rgb_f16, opacity_u8,
+                scales_f16, bbox_min, bbox_max, n_loaded=n_loaded,
+            )
+            with lock:
+                cells[cell_key] = cell
+                if state["cell"] == cell_key:
+                    state["scene_dirty"] = True
+                    state["pushed_frame"] = -1
+
+        # Decode whatever is already in the prefix BEFORE any new bytes
+        # arrive. This handles the case where the prior run had decoded
+        # the static block + several frames but never flipped partial ->
+        # dest. The same per-chunk logic below is just looped once with
+        # no new bytes.
+        def _try_advance():
+            nonlocal header_parsed, static_decoded, rgb_f16, opacity_u8
+            nonlocal scales_f16, xyz_backing, quat_backing, n_loaded
+            nonlocal bbox_min, bbox_max, span
+
+            if header_parsed is None and len(buf) >= 80:
+                n_frames_peek = _struct.unpack_from("<I", bytes(buf[:80]), 12)[0]
+                need = 80 + n_frames_peek * 16
+                if len(buf) >= need:
+                    header_parsed = parse_gsq_header(bytes(buf[:need]))
+                    bbox_min = header_parsed["bbox_min"]
+                    bbox_max = header_parsed["bbox_max"]
+                    span = (bbox_max - bbox_min).astype(np.float32)
+                    span[span == 0] = 1.0
+                    xyz_backing = np.zeros(
+                        (header_parsed["n_frames"], header_parsed["n_splats"], 3),
+                        dtype=np.float32,
+                    )
+                    quat_backing = np.zeros(
+                        (header_parsed["n_frames"], header_parsed["n_splats"], 4),
+                        dtype=np.float32,
+                    )
+                    quat_backing[..., 0] = 1.0
+                    _set_loading(cell_key, "streaming")
+
+            if (header_parsed is not None and not static_decoded
+                    and len(buf) >= header_parsed["static_offset"] + header_parsed["static_size"]):
+                s_off = header_parsed["static_offset"]
+                s_sz = header_parsed["static_size"]
+                n_sp = header_parsed["n_splats"]
+                blob = _zstd.ZstdDecompressor().decompress(
+                    bytes(buf[s_off : s_off + s_sz])
+                )
+                rgb_bytes = n_sp * 3 * 2
+                rgb_f16 = np.frombuffer(blob[:rgb_bytes], dtype=np.float16).reshape(n_sp, 3).copy()
+                opacity_u8 = np.frombuffer(blob[rgb_bytes:rgb_bytes + n_sp], dtype=np.uint8).copy()
+                scales_f16 = np.frombuffer(
+                    blob[rgb_bytes + n_sp : rgb_bytes + n_sp + n_sp * 3 * 2],
+                    dtype=np.float16,
+                ).reshape(n_sp, 3).copy()
+                static_decoded = True
+
+            if static_decoded:
+                n_sp = header_parsed["n_splats"]
+                n_total = header_parsed["n_frames"]
+                while n_loaded < n_total:
+                    f_off, f_sz = header_parsed["frame_index"][n_loaded]
+                    if len(buf) < f_off + f_sz:
+                        break
+                    xyz, quat = _gsq_dequantize_frame(
+                        bytes(buf[f_off : f_off + f_sz]),
+                        n_sp, bbox_min, span,
+                    )
+                    xyz_backing[n_loaded] = xyz
+                    quat_backing[n_loaded] = quat
+                    n_loaded += 1
+                if n_loaded > 0:
+                    commit_cell()
+
+        # Decode whatever the prefix already covers.
+        _try_advance()
+
+        try:
+            for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                buf.extend(chunk)
+                pf.write(chunk)
+                _try_advance()
+            pf.close()
+        except Exception:
+            pf.close()
+            raise
+
+        partial.replace(dest)
+
+        if header_parsed is None or not static_decoded or n_loaded == 0:
+            _set_loading(cell_key, "error", "stream_failed")
+            return {"ok": False, "error":
+                    f"incomplete .gsq after resume: parsed_header="
+                    f"{header_parsed is not None}, static={static_decoded}, "
+                    f"frames={n_loaded}"}
+
+        commit_cell()
+        _set_loading(None, None)
+        return {
+            "ok": True, "cell": name, "added": True, "resumed": True,
+            "bytes": dest.stat().st_size, "n_frames": n_loaded,
+        }
+
     def _sync_cell_gsq_streaming(name: str, url: str, dest: Path, partial: Path) -> dict:
-        """Streaming .gsq download + incremental decode.
+        """Streaming .gsq download + incremental decode, with cache-hit + resume.
 
-        Reads the request body once. The first chunk(s) supply the
-        header + frame index → we know the static block offset and
-        the per-frame byte ranges. Each subsequent chunk extends a
-        buffer; whenever we have enough bytes for the static block
-        and then each next frame, we decode and grow the cell.
+        Three entry paths, taken in order:
 
-        cells[name] appears the moment frame 0 is decoded. n_loaded
-        grows monotonically until the whole file lands. /state polls
-        see n_frames = n_loaded, so the SPA can scrub right away.
+        1. HEAD probe (if dest exists). If the server's ETag matches our
+           _local_etag(dest), or content-length matches dest.stat().st_size
+           (back-compat for pre-Phase-5 servers that don't emit ETag),
+           skip the body entirely and load the cell from disk. Emits
+           cell.cache.hit.
+
+        2. Range resume (if .partial exists). Send Range: bytes=<n>-,
+           treat 206 as resume (append, decode-as-arrives accounting for
+           the offset), treat 200 as "server ignored Range" (unlink
+           .partial and fall through to a fresh download). Emits
+           cell.cache.resuming.
+
+        3. Fresh streaming download (the existing path). Reads the
+           request body once. The first chunk(s) supply the header +
+           frame index — we know the static block offset and the
+           per-frame byte ranges. Each subsequent chunk extends a
+           buffer; whenever we have enough bytes for the static block
+           and then each next frame, we decode and grow the cell.
+
+           cells[name] appears the moment frame 0 is decoded. n_loaded
+           grows monotonically until the whole file lands. /state polls
+           see n_frames = n_loaded, so the SPA can scrub right away.
         """
         import zstandard as _zstd
 
+        cell_key = name if ":" in name else f"sequence:{name}"
+
+        # --- Path 1: cache hit on HEAD probe ---------------------------------
+        if dest.is_file():
+            try:
+                head = httpx.head(url, timeout=10.0,
+                                  follow_redirects=True, trust_env=False)
+            except Exception as e:
+                # Network error on HEAD is non-fatal — fall through to a
+                # fresh download. The body request below will fail with
+                # the same error and the user sees the same surface.
+                print(f"  cache HEAD failed for {name}: {e}; falling through to download")
+                head = None
+            if head is not None and head.status_code == 200:
+                remote_etag = head.headers.get("etag")
+                local_etag_val = None
+                try:
+                    local_etag_val = _local_etag(dest)
+                except FileNotFoundError:
+                    pass  # raced with a delete; just download
+
+                etag_match = (
+                    remote_etag is not None
+                    and local_etag_val is not None
+                    and remote_etag == local_etag_val
+                )
+                size_match = False
+                if not etag_match:
+                    # Back-compat: server may not emit ETag yet (older
+                    # deployments). Compare content-length instead.
+                    try:
+                        remote_size = int(head.headers.get("content-length", "-1"))
+                        size_match = remote_size >= 0 and remote_size == dest.stat().st_size
+                    except (ValueError, OSError):
+                        size_match = False
+
+                if etag_match or size_match:
+                    source = "etag" if etag_match else "size"
+                    try:
+                        cell = load_cell_gsq(dest)
+                    except Exception as e:
+                        # Local file is current per the server, but our
+                        # decoder choked. Could be a stale Phase 1/2
+                        # format we no longer support. Fall through to a
+                        # fresh download with a structured note.
+                        print(f"  cache hit decode failed for {name}: {e}; re-downloading")
+                    else:
+                        with lock:
+                            cells[cell_key] = cell
+                            if state["cell"] == cell_key:
+                                state["scene_dirty"] = True
+                                state["pushed_frame"] = -1
+                        _set_loading(None, None)
+                        print(f"  cell.cache.hit ({source}) for {name} from {dest}")
+                        return {
+                            "ok": True, "cell": name, "added": False,
+                            "cached": True, "source": source,
+                            "bytes": dest.stat().st_size,
+                            "n_frames": int(cell.get("n_frames", 0)),
+                        }
+
+        # --- Path 2: resume from .partial -----------------------------------
+        # An interrupted prior download leaves <dest>.partial on disk. We
+        # send Range: bytes=<n>- where n = partial size. If the server
+        # honors it (206 Partial Content), we append to the partial,
+        # decode against the file-relative byte offsets (the parser uses
+        # absolute offsets from the .gsq header, so we must rebuild the
+        # full buffer from the on-disk prefix + the streamed suffix). If
+        # the server returns 200 (Range ignored), we unlink the partial
+        # and let Path 3 (fresh download) re-fetch from byte 0.
+        resume_offset = 0
+        prefix_bytes: bytes | None = None
+        if partial.is_file():
+            try:
+                resume_offset = partial.stat().st_size
+            except OSError:
+                resume_offset = 0
+            if resume_offset > 0:
+                # Best-effort: only resume when the prefix is non-empty.
+                # Zero-byte partials happen on rare crash modes; treat as
+                # fresh.
+                print(f"  cell.cache.resuming {name} from byte {resume_offset}")
+                try:
+                    headers = {"Range": f"bytes={resume_offset}-"}
+                    with httpx.stream("GET", url, headers=headers,
+                                      timeout=600.0, follow_redirects=True,
+                                      trust_env=False) as r:
+                        if r.status_code == 206:
+                            # Server honored Range. Re-open the partial
+                            # for append + read prefix into memory once
+                            # so the existing decoder can index by
+                            # absolute offset.
+                            prefix_bytes = partial.read_bytes()
+                            try:
+                                ok = _sync_cell_gsq_streaming_with_prefix(
+                                    name=name, dest=dest, partial=partial,
+                                    response=r, prefix=prefix_bytes,
+                                    cell_key=cell_key,
+                                )
+                            except Exception as e:
+                                partial.unlink(missing_ok=True)
+                                _set_loading(cell_key, "error", "resume_failed")
+                                return {"ok": False, "error": f"resume failed: {e}"}
+                            return ok
+                        elif r.status_code == 200:
+                            # Server returned full body. Discard the
+                            # partial and fall through to fresh-download
+                            # path below.
+                            partial.unlink(missing_ok=True)
+                            resume_offset = 0
+                            print(f"  server ignored Range for {name}; restarting at byte 0")
+                        else:
+                            partial.unlink(missing_ok=True)
+                            _set_loading(cell_key, "error", "resume_failed")
+                            return {"ok": False, "error":
+                                    f"resume HTTP {r.status_code}"}
+                except Exception as e:
+                    # Network error during resume. Drop partial and try
+                    # a fresh download from byte 0.
+                    print(f"  resume network error for {name}: {e}; restarting at byte 0")
+                    partial.unlink(missing_ok=True)
+                    resume_offset = 0
+
+        # --- Path 3: fresh download (existing path) -------------------------
         try:
             with httpx.stream("GET", url, timeout=600.0,
                               follow_redirects=True, trust_env=False) as r:
@@ -975,13 +1270,10 @@ def main() -> int:
                 n_loaded = 0
                 bbox_min = bbox_max = span = None
 
-                # Cells are keyed by their wire-format name
-                # ("sequence:<stem>" / "model:<stem>") in the boot scanner +
-                # /set callers. The SPA's /sync_cell call passes the bare
-                # stem (no prefix), so we prefix here so /set's lookup
-                # succeeds. Models would never come through this path,
-                # so "sequence:" is always correct.
-                cell_key = name if ":" in name else f"sequence:{name}"
+                # cell_key is computed once at the top of the enclosing
+                # function (see Path 1 / Path 2 / Path 3 docstring).
+                # Re-binding here was redundant pre-Phase-5 and would
+                # shadow the outer name; left as the docstring note.
 
                 def commit_cell():
                     """Publish current state under the lock + nudge render."""
