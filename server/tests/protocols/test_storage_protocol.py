@@ -76,3 +76,38 @@ async def test_exists_reflects_put() -> None:
     assert (await s.exists("a")) is False
     await s.put("a", io.BytesIO(b"x"), {})
     assert (await s.exists("a")) is True
+
+
+# --- Conformance over all real impls -----------------------------------------
+
+
+@pytest.fixture
+def real_filesystem_storage(tmp_path):
+    from gsfluent.storage.filesystem import FilesystemStorage
+    return FilesystemStorage(root=tmp_path)
+
+
+def test_real_filesystem_storage_satisfies_storage_protocol(real_filesystem_storage) -> None:
+    s: Storage = real_filesystem_storage
+    assert isinstance(s, Storage)
+
+
+@pytest.mark.asyncio
+async def test_real_filesystem_storage_put_then_stat(real_filesystem_storage) -> None:
+    await real_filesystem_storage.put("conf.gsq", io.BytesIO(b"abc"), {})
+    st = await real_filesystem_storage.stat("conf.gsq")
+    assert st is not None and st.size == 3
+
+
+@pytest.mark.asyncio
+async def test_real_filesystem_storage_exists(real_filesystem_storage) -> None:
+    assert (await real_filesystem_storage.exists("nope.gsq")) is False
+    await real_filesystem_storage.put("yes.gsq", io.BytesIO(b"x"), {})
+    assert (await real_filesystem_storage.exists("yes.gsq")) is True
+
+
+@pytest.mark.asyncio
+async def test_real_filesystem_storage_range_round_trip(real_filesystem_storage) -> None:
+    await real_filesystem_storage.put("r.gsq", io.BytesIO(b"0123456789"), {})
+    chunks = [c async for c in await real_filesystem_storage.get_range("r.gsq", 2, 6)]
+    assert b"".join(chunks) == b"2345"
