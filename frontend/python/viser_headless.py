@@ -602,12 +602,32 @@ def main() -> int:
     # still carries an orientation cue without dominating the view.
     server.scene.world_axes.visible = False
 
-    # Bootstrap scene helpers (grid, gizmo, initial camera) using the
-    # first cell's bbox as a reasonable default — but DO NOT auto-load
-    # the cell's splat. The frontend should show an empty scene until
-    # the user explicitly picks something in the outliner.
-    cur_name = next(iter(cells))
-    cur = cells[cur_name]
+    # Bootstrap scene helpers (grid, gizmo, initial camera). Under
+    # lazy-decode boot, `cells` is empty at this point, so derive a
+    # bbox cheaply from the first available .gsq's 80-byte header (no
+    # frame decompression). Falls back to a neutral bbox if nothing is
+    # on disk yet. We do NOT auto-load any splat — the splat node is
+    # only added when the user picks a cell via /set.
+    if cells:
+        cur = next(iter(cells.values()))
+    elif available:
+        with open(available[0], "rb") as _f:
+            _head = _f.read(80)
+        if _head[:4] != b"GSQ1":
+            raise SystemExit(f"corrupt .gsq header at {available[0]}")
+        # _VISER_K matches _build_gsq_cell_dict so units agree once the
+        # real cell loads via resolve_cell_lazily on the first /set.
+        _bbox_min = np.frombuffer(_head[20:32], dtype=np.float32)
+        _bbox_max = np.frombuffer(_head[32:44], dtype=np.float32)
+        cur = {
+            "bbox_lo": (_bbox_min * _VISER_K).astype(np.float32),
+            "bbox_hi": (_bbox_max * _VISER_K).astype(np.float32),
+        }
+    else:
+        cur = {
+            "bbox_lo": np.array([-10.0, -10.0, -2.0], dtype=np.float32),
+            "bbox_hi": np.array([10.0, 10.0,  8.0], dtype=np.float32),
+        }
     splat = None
 
     # Adaptive grid + small floor-corner gizmo, both per-cell — when a
