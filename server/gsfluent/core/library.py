@@ -55,42 +55,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    """Write `payload` as pretty-printed JSON via tmp + os.replace.
+from .library_io import (
+    atomic_write_json as _atomic_write_json,
+    read_json_tolerant as _read_json_tolerant,
+    read_ply_bbox_and_count as _read_ply_bbox_and_count,
+)
 
-    Atomic on the same filesystem; safe against partial writes that would
-    leave a half-written `_meta.json` and crash subsequent reads.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(payload, indent=2))
-        os.replace(str(tmp), str(path))
-    except Exception:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise
-
-
-def _read_meta_tolerant(path: Path) -> Optional[dict]:
-    """Read `_meta.json` returning a dict, or None on missing/corrupt.
-
-    Tolerance is the point: callers iterate over many entries, and a
-    single bad meta shouldn't crash the listing — just log and skip.
-    """
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        _log.warning("could not parse meta at %s: %s", path, e)
-        return None
-    if not isinstance(data, dict):
-        _log.warning("meta at %s is not a JSON object", path)
-        return None
-    return data
+# Keep the legacy private alias so internal call sites that used the
+# meta-flavored name continue to work without churn.
+_read_meta_tolerant = _read_json_tolerant
 
 
 def _check_coord(meta: dict, where: str) -> None:
@@ -749,27 +722,6 @@ def import_sequence(
     return seq
 
 
-def read_ply_bbox_and_count(ply_path: Path) -> tuple[Optional[int], Optional[list[list[float]]]]:
-    """Read a .ply and return (n_splats, bbox). Tolerant of unreadable
-    files — returns (None, None) on any failure so callers can degrade
-    gracefully (the meta still gets written, just without these fields).
-    """
-    try:
-        from plyfile import PlyData
-        import numpy as np
-
-        v = PlyData.read(str(ply_path))["vertex"].data
-        n = int(v.shape[0])
-        x = np.asarray(v["x"], dtype=np.float64)
-        y = np.asarray(v["y"], dtype=np.float64)
-        z = np.asarray(v["z"], dtype=np.float64)
-        if n == 0:
-            return n, None
-        bbox = [
-            [float(x.min()), float(y.min()), float(z.min())],
-            [float(x.max()), float(y.max()), float(z.max())],
-        ]
-        return n, bbox
-    except Exception as e:
-        _log.warning("could not read bbox/count from %s: %s", ply_path, e)
-        return None, None
+# Public re-export so external callers (e.g. core/runner.py) continue
+# to find `library.read_ply_bbox_and_count`.
+read_ply_bbox_and_count = _read_ply_bbox_and_count
