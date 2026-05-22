@@ -284,11 +284,26 @@ export function ViserSplatScene() {
     }
   }
 
-  // Auto-trigger removed (2026-05-22) per user request. A sequence
-  // download is multi-hundred-MB and should never start without an
-  // explicit click — auto-trigger turned "browsing the outliner" into
-  // "committing to a multi-minute WAN download per click." The pill
-  // now offers a Download button when the cell isn't local.
+  // When viser reports a sequence-cell as not_found, that means the .npz
+  // isn't in this client's local cache yet. The fix is the Build flow
+  // (server-side cache build + client-side download via /sync_cell). Auto-
+  // trigger it here so the user doesn't have to click — they'll see the
+  // buildState progress pill take over from the viser error.
+  useEffect(() => {
+    if (
+      loading?.phase === "error" &&
+      loading?.error === "not_found" &&
+      loading.name.startsWith("sequence:") &&
+      buildState === "idle"
+    ) {
+      const seq = loading.name.slice("sequence:".length);
+      startBuild(seq);
+    }
+    // startBuild is defined per-render but is a stable closure over the
+    // refs it touches; pulling it into deps would make this fire on every
+    // poll. Intentionally omitted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading?.name, loading?.phase, loading?.error, buildState]);
 
   // Labels for the upper-left progress / error pill. Pulled out so the
   // mapping is editable in one spot without touching the rendering JSX.
@@ -326,14 +341,11 @@ export function ViserSplatScene() {
     : buildState === "error"
       ? { tone: "error", text: buildError ?? "Build failed." }
       : { tone: "info", text: buildLabel[buildState]! };
-  // not_found on a sequence is a *recoverable* state — surface a
-  // Download button instead of a scary red error pill. The user
-  // clicks Download → buildPill takes over with progress.
-  const needsDownload =
+  const loadingIsAutoRecovering =
     loading?.phase === "error" &&
     loading?.error === "not_found" &&
     CellRef.tryParseWire(loading?.name)?.kind === "sequence";
-  const viserPill: Pill = !loading || needsDownload
+  const viserPill: Pill = !loading || loadingIsAutoRecovering
     ? null
     : loading.phase === "error"
       ? { tone: "error", text: errorLabel(loading.error, loading.name) }
@@ -377,21 +389,6 @@ export function ViserSplatScene() {
           )}
         </div>
       )}
-      {/* Download prompt: shown when viser reports the sequence isn't
-          local AND we're not already in a build flow. User-explicit:
-          download only starts on click. */}
-      {needsDownload && seqName && buildState === "idle" && (
-        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-3 max-w-[28rem] z-10">
-          <span>Sequence not on this client.</span>
-          <button
-            type="button"
-            className="px-2 py-0.5 rounded bg-accent text-canvas hover:opacity-90 text-xs"
-            onClick={() => startBuild(seqName)}
-          >
-            Download
-          </button>
-        </div>
-      )}
       {cellMissing && !loading && !pill && (
         simIsRunning ? (
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/85 border border-border text-text-muted text-xs rounded flex items-center gap-2 backdrop-blur">
@@ -399,17 +396,43 @@ export function ViserSplatScene() {
             <span>Waiting for first frame from sim…</span>
           </div>
         ) : seqName ? (
-          // Pre-/state-poll fallback: brief flash before viser reports
-          // anything. Same Download button as the needsDownload pill.
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-3 max-w-[28rem]">
-            <span>Sequence not on this client.</span>
-            <button
-              type="button"
-              className="px-2 py-0.5 rounded bg-accent text-canvas hover:opacity-90 text-xs"
-              onClick={() => startBuild(seqName)}
-            >
-              Download
-            </button>
+            {buildState === "idle" && (
+              <>
+                <span>Sequence cache not on this client.</span>
+                <button
+                  type="button"
+                  className="px-2 py-0.5 rounded bg-accent text-canvas hover:opacity-90 text-xs"
+                  onClick={() => startBuild(seqName)}
+                >
+                  Build
+                </button>
+              </>
+            )}
+            {buildState === "building" && (
+              <>
+                <Loader2 size={12} className="animate-spin text-accent" />
+                <span>Building cache on server…</span>
+              </>
+            )}
+            {buildState === "syncing" && (
+              <>
+                <Loader2 size={12} className="animate-spin text-accent" />
+                <span>Downloading cache locally…</span>
+              </>
+            )}
+            {buildState === "error" && (
+              <>
+                <span className="text-warning">{buildError ?? "build failed"}</span>
+                <button
+                  type="button"
+                  className="px-2 py-0.5 rounded bg-elevated text-text-primary hover:opacity-90 text-xs border border-border"
+                  onClick={() => startBuild(seqName)}
+                >
+                  Retry
+                </button>
+              </>
+            )}
           </div>
         ) : (
           <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur">
