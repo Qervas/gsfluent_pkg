@@ -358,18 +358,18 @@ export function ViserSplatScene() {
         allowFullScreen
       />
       {pill && pill.tone === "info" && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 bg-elevated/95 border border-border text-text-primary text-sm rounded-lg backdrop-blur shadow-lg flex items-center gap-2 z-20">
-          <Loader2 size={14} className="animate-spin text-accent" />
+        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-2 z-10">
+          <Loader2 size={12} className="animate-spin text-accent" />
           <span>{pill.text}</span>
         </div>
       )}
       {pill && pill.tone === "error" && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 bg-elevated/95 border border-warning text-warning text-sm rounded-lg backdrop-blur shadow-lg z-20 flex items-center gap-3">
+        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur z-10 flex items-center gap-3">
           <span>{pill.text}</span>
           {buildState === "error" && seqName && (
             <button
               type="button"
-              className="px-3 py-1 rounded bg-elevated text-text-primary hover:opacity-90 text-xs border border-border"
+              className="px-2 py-0.5 rounded bg-elevated text-text-primary hover:opacity-90 text-xs border border-border"
               onClick={() => startBuild(seqName)}
             >
               Retry
@@ -377,56 +377,42 @@ export function ViserSplatScene() {
           )}
         </div>
       )}
-      {/* Download prompt: centered, unmissable. Shown when viser
-          reports the sequence isn't local AND we're not already in
-          a build flow. User-explicit: download only starts on click. */}
+      {/* Download prompt: shown when viser reports the sequence isn't
+          local AND we're not already in a build flow. User-explicit:
+          download only starts on click. */}
       {needsDownload && seqName && buildState === "idle" && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
-          <div className="pointer-events-auto px-5 py-4 bg-elevated/95 border border-border text-text-primary text-sm rounded-lg backdrop-blur shadow-xl flex flex-col items-center gap-3 max-w-md">
-            <div className="text-text-secondary text-xs uppercase tracking-wide">
-              Not on this client
-            </div>
-            <div className="font-mono text-xs text-text-primary truncate max-w-full">
-              {seqName}
-            </div>
-            <button
-              type="button"
-              className="px-4 py-1.5 rounded bg-accent text-canvas hover:opacity-90 text-sm font-medium"
-              onClick={() => startBuild(seqName)}
-            >
-              Download to play
-            </button>
-          </div>
+        <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-3 max-w-[28rem] z-10">
+          <span>Sequence not on this client.</span>
+          <button
+            type="button"
+            className="px-2 py-0.5 rounded bg-accent text-canvas hover:opacity-90 text-xs"
+            onClick={() => startBuild(seqName)}
+          >
+            Download
+          </button>
         </div>
       )}
       {cellMissing && !loading && !pill && (
         simIsRunning ? (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 bg-elevated/95 border border-border text-text-muted text-sm rounded-lg shadow-lg flex items-center gap-2 backdrop-blur z-20">
-            <Loader2 size={14} className="animate-spin text-accent" />
+          <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/85 border border-border text-text-muted text-xs rounded flex items-center gap-2 backdrop-blur">
+            <Loader2 size={12} className="animate-spin text-accent" />
             <span>Waiting for first frame from sim…</span>
           </div>
         ) : seqName ? (
           // Pre-/state-poll fallback: brief flash before viser reports
-          // anything. Same Download UX as the needsDownload modal.
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
-            <div className="pointer-events-auto px-5 py-4 bg-elevated/95 border border-border text-text-primary text-sm rounded-lg backdrop-blur shadow-xl flex flex-col items-center gap-3 max-w-md">
-              <div className="text-text-secondary text-xs uppercase tracking-wide">
-                Not on this client
-              </div>
-              <div className="font-mono text-xs text-text-primary truncate max-w-full">
-                {seqName}
-              </div>
-              <button
-                type="button"
-                className="px-4 py-1.5 rounded bg-accent text-canvas hover:opacity-90 text-sm font-medium"
-                onClick={() => startBuild(seqName)}
-              >
-                Download to play
-              </button>
-            </div>
+          // anything. Same Download button as the needsDownload pill.
+          <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-border text-text-primary text-xs rounded backdrop-blur flex items-center gap-3 max-w-[28rem]">
+            <span>Sequence not on this client.</span>
+            <button
+              type="button"
+              className="px-2 py-0.5 rounded bg-accent text-canvas hover:opacity-90 text-xs"
+              onClick={() => startBuild(seqName)}
+            >
+              Download
+            </button>
           </div>
         ) : (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 bg-elevated/95 border border-warning text-warning text-sm rounded-lg shadow-lg backdrop-blur z-20">
+          <div className="absolute top-[68px] left-3 px-3 py-2 bg-elevated/90 border border-warning text-warning text-xs rounded backdrop-blur">
             Cell <code>{cellName}</code> not loaded.
           </div>
         )
