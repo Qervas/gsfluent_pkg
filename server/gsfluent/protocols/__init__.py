@@ -1,8 +1,12 @@
-"""Pure interface contracts for the six gsfluent layers.
-
-No logic lives here — concrete implementations live under core/, storage/,
-observability/, etc., and are wired in composition.py.
-"""
+"""Pure interface contracts for the six gsfluent layers."""
+from gsfluent.protocols.cache import (
+    CacheCodec,
+    CacheMetadata,
+    CodecError,
+    CodecUnsanitizableError,
+    DecodedFrame,
+    SplatFrame,
+)
 from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.storage import (
     Storage,
@@ -14,7 +18,13 @@ from gsfluent.protocols.storage import (
 )
 
 __all__ = [
+    "CacheCodec",
+    "CacheMetadata",
+    "CodecError",
+    "CodecUnsanitizableError",
+    "DecodedFrame",
     "EventEmitter",
+    "SplatFrame",
     "Storage",
     "StorageError",
     "StorageHandle",
