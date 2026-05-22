@@ -798,6 +798,11 @@ def main() -> int:
                 return {"ok": False, "error": err or "unknown_cell",
                         "cell": body.cell, "cells": list(cells)}
             _set_loading(None, None)
+        elif body.cell is not None:
+            # Fast path (cell already in cells). Clear any stale loading
+            # state from a prior failed /set so the SPA doesn't render
+            # an error pill for a click that's no longer the active one.
+            _set_loading(None, None)
 
         with lock:
             if body.cell is not None:
