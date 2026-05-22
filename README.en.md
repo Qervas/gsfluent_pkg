@@ -99,7 +99,7 @@ Bindings:
 |-------------|-------------------|-----------------------------|
 | v1 backend  | `0.0.0.0:7869`    | `your-backend:port` (NAT)   |
 
-Post-sim utilities (ply → npz cache, frames.bin packing) live in
+Post-sim utilities (ply → gsq cache, frames.bin packing) live in
 `server/tools/` and are run by hand over ssh as needed.
 
 Logs land in `/path/to/gsfluent_pkg/work/logs/{v1,supervisor}.log`.
@@ -118,11 +118,11 @@ The Python interpreters are configured via `.env`
 | `frontend/python/`    | Client-side Python: `viser_headless.py`, `sync_daemon.py`, `vkgs_play.py`. |
 | `frontend/patches/`   | Upstream viser rendering patches (no-cull, point precision).            |
 | `server/`             | FastAPI v1 backend. REST routes + runner live under `gsfluent/`.        |
-| `server/tools/`       | Sim wrapper (`run_sim.sh`), PLY → npz converters, fuse, migration.      |
+| `server/tools/`       | Sim wrapper (`run_sim.sh`), PLY → gsq converter (`pack_splats.py`), fuse, migration.      |
 | `server/recipes/`     | Built-in simulation recipe JSONs.                                       |
 | `server/patches/`     | Upstream GaussianFluent sim patches.                                    |
 | `docs/`               | API reference, architecture doc.                                        |
-| `work/`               | Runtime data (gitignored): `library/sequences/<run>/`, `cache/viser/*.npz`. |
+| `work/`               | Runtime data (gitignored): `library/sequences/<run>/`, `cache/viser/*.gsq`. |
 
 ---
 

@@ -35,10 +35,10 @@ the commit you tested against.
 ### Content-Type
 
 - Request bodies: `application/json` unless the endpoint accepts file
-  uploads, in which case it is `multipart/form-data` (model upload,
-  cameras.json, npz upload).
+  uploads (model `.ply`, `cameras.json`), in which case it is
+  `multipart/form-data`.
 - Response bodies: `application/json` for everything except file downloads
-  (frame plys, cached npz, frames.bin), which use `application/octet-stream`.
+  (frame plys, `.gsq` cache, `frames.bin`), which use `application/octet-stream`.
 
 ### Error response shape
 
@@ -926,8 +926,8 @@ List every sequence in the library, newest first by `created_at`.
     "converted_from": null,
     "is_broken": false,
     "cache": {
-      "viser_npz_mtime": 1779266297.33,
-      "viser_npz_bytes": 2910003294,
+      "splats_gsq_mtime": 1779266297.33,
+      "splats_gsq_bytes": 412345678,
       "frames_bin_mtime": null,
       "frames_bin_bytes": null
     }
@@ -951,8 +951,8 @@ List every sequence in the library, newest first by `created_at`.
 | `created_at` | string\|null | ISO-8601 UTC. |
 | `converted_from` | string\|null | `"y-up"` iff frames were converted at import. |
 | `is_broken` | bool | True iff the imported `frames/` symlink is dangling. |
-| `cache.viser_npz_mtime` | float\|null | mtime of `work/cache/viser/<name>.npz`, or `null` if absent. |
-| `cache.viser_npz_bytes` | int\|null | Size of the same file. |
+| `cache.splats_gsq_mtime` | float\|null | mtime of `work/cache/viser/<name>.gsq`, or `null` if absent. |
+| `cache.splats_gsq_bytes` | int\|null | Size of the same file. |
 | `cache.frames_bin_mtime` | float\|null | mtime of `library/sequences/<name>/frames.bin`. |
 | `cache.frames_bin_bytes` | int\|null | Size of `frames.bin`. |
 
@@ -1006,41 +1006,6 @@ curl -X POST ${BACKEND_URL}/api/sequences/import \
   -d '{"folder_path":"/data/external/my_seq","name":"my_seq"}'
 ```
 
-### POST /api/sequences/upload-npz
-
-Upload a pre-built playback `.npz` cache (as produced by
-`server/tools/batch_convert_to_npz.py`) and register it as a sequence in the
-library. Streams to disk; never holds the whole file in memory.
-
-**Request body** (`multipart/form-data`)
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `file` | file | **Required.** `.npz` extension required. 8 GB cap. Must contain a `frames` array of shape `(T, N, 3)`. |
-| `name` | string (form) | Optional. Defaults to the filename without `.npz`. Rejected if it contains `/` or starts with `.`. |
-
-**Response**
-
-Same shape as a single entry from `GET /api/sequences` (the sequence is
-registered with `source: "import"`, `source_path: "upload:<orig_filename>"`).
-
-**Status codes**
-
-| Code | Cause |
-| --- | --- |
-| 409 | Sequence with that name already exists. |
-| 413 | File exceeds 8 GB. |
-| 422 | Wrong extension; invalid sequence name; missing zip magic; `frames` key missing; `frames` shape not `(T, N, 3)`; npz parse failed. |
-| 500 | `write_meta` succeeded but reload returned `None`. |
-
-**curl**
-
-```bash
-curl -X POST ${BACKEND_URL}/api/sequences/upload-npz \
-  -F 'file=@my_seq.npz' \
-  -F 'name=my_seq'
-```
-
 ### GET /api/sequences/{name}/frame/{frame_idx}.ply
 
 Alias of `GET /api/runs/{run_name}/frame/{frame_idx}.ply`. Same bytes, same
@@ -1053,11 +1018,15 @@ URL shape.
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 ```
 
-### GET /api/sequences/{name}/cache/viser.npz
+### GET /api/sequences/{name}/cache/splats.gsq
 
-Serve the `.npz` viser cache as a downloadable artifact. Used by the
-client sync daemon to mirror server-side caches. `FileResponse` supports
-HTTP `Range` so interrupted downloads resume.
+Serve the `.gsq` visual-lossless streamable splat cache (produced by
+`server/tools/pack_splats.py`). `FileResponse` supports HTTP `Range` so
+clients can fetch arbitrary byte spans for progressive playback.
+
+Format: 80-byte header + 16-byte index entry per frame + zstd static
+block + per-frame zstd chunks. See `docs/ARCHITECTURE.md` for the
+on-disk layout.
 
 **Path params**
 
@@ -1067,19 +1036,19 @@ HTTP `Range` so interrupted downloads resume.
 
 **Response**
 
-`application/octet-stream`; the raw `.npz` bytes.
+`application/octet-stream`; the raw `.gsq` bytes.
 
 **Status codes**
 
 | Code | Cause |
 | --- | --- |
 | 400 | Resolved path escapes the cache root (defensive). |
-| 404 | Sequence not found, or the `.npz` cache has not been built yet (run `server/tools/batch_convert_to_npz.py <name>` on the server). |
+| 404 | Sequence not found, or the `.gsq` cache has not been built yet (run `server/tools/pack_splats.py <name>` on the server, or POST `/api/sequences/{name}/cache/build`). |
 
 **curl**
 
 ```bash
-curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/viser.npz"
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
 ```
 
 ### GET /api/sequences/{name}/cache/frames.bin
@@ -1325,21 +1294,24 @@ For a UI client, prefer the WebSocket: a single `subscribe` message gets
 you the log replay, live tail, terminal `status`, and frame stream in one
 socket.
 
-### 4. Downloading the resulting .npz cache
+### 4. Downloading the resulting .gsq cache
 
-After a run finishes, the cache must be built once on the server:
-
-```bash
-ssh ${GSFLUENT_SSH_HOST} \
-  '${CONDA_ROOT}/bin/python /path/to/gsfluent_pkg/server/tools/batch_convert_to_npz.py cluster_6_15_eq_demo'
-```
-
-Then pull it down:
+The cache is built automatically at the end of a successful run by the
+runner. To trigger / inspect it explicitly:
 
 ```bash
-curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/viser.npz"
+# kick off (idempotent — fast-paths if the file already exists):
+curl -X POST ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build
+# poll until done:
+curl ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build-status
 ```
 
-`viser_npz_mtime` / `viser_npz_bytes` in `GET /api/sequences` tell the
-client sync daemon whether its local copy is stale without having to HEAD
-the file. The download supports HTTP `Range` for resume.
+Then pull it down (HTTP `Range` is supported so partial fetches /
+progressive streaming both work):
+
+```bash
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/splats.gsq"
+```
+
+`cache.splats_gsq_mtime` / `splats_gsq_bytes` in `GET /api/sequences`
+tell the client whether the artifact is built without needing a HEAD.

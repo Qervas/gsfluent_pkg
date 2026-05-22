@@ -238,68 +238,6 @@ def _build_gsq_cell_dict(xyz: np.ndarray, quat: np.ndarray, rgb_f16: np.ndarray,
     }
 
 
-def mmap_cell(npz_path: Path) -> dict:
-    """Mmap a sequence .npz and pre-compute its bbox.
-
-    Handles both schemas:
-      v1: has `cov` (n,3,3) — static covariance, splats smear during motion
-      v2: has `quats` (n_frames,n,4) + `scales` (n,3) — per-frame covariance
-          reconstructed in the push loop, ellipsoids rotate with the
-          deformation (sharp during motion). Set `version` field to 2.
-
-    bbox is from frame 0 — for animated sequences the first frame is the
-    rest pose, which is what we want the grid + initial camera framed to.
-    Worst-case frames (splashes, flying debris) would over-zoom-out the
-    initial view if we sized to the union.
-
-    Scaling: bbox and cov are multiplied by _VISER_K / _VISER_K^2
-    respectively so cov stays in float16's normal range when viser
-    casts for WS transport. Frames are mmap'd and multiplied lazily
-    at frame-access time to preserve the OS page-on-demand savings."""
-    d = np.load(npz_path, mmap_mode="r")
-    f0 = np.asarray(d["frames"][0]) * _VISER_K
-    bbox_lo = f0.min(axis=0).astype(np.float32)
-    bbox_hi = f0.max(axis=0).astype(np.float32)
-    # Floor reference for the grid mesh — we want the grid to sit at
-    # or below the lowest splat across the WHOLE sequence, not just
-    # frame 0, so when the animation drops splats lower than the rest
-    # pose (collapse, earthquake displacement, jelly stretch) they
-    # don't sink through the visible ground. Cheap: scan all frame
-    # z-coords once at load. Only z is needed.
-    frames_z = np.asarray(d["frames"][..., 2])
-    floor_z = float(frames_z.min() * _VISER_K)
-    bbox_lo[2] = floor_z
-    K2 = _VISER_K * _VISER_K
-
-    if "quats" in d.files and "scales" in d.files:
-        # v2: precompute K-scaled scales² so push-loop cov reconstruction
-        # is one multiply + one matmul per splat. ~1 ms for 683k splats
-        # with numpy's vectorized einsum on the push thread.
-        scales = np.asarray(d["scales"]).astype(np.float32)   # (n, 3)
-        return {
-            "version": 2,
-            "frames": d["frames"],                            # mmap, raw
-            "quats": d["quats"],                              # mmap, raw
-            "scales_sq": (scales * scales) * K2,              # K² for cov
-            "rgb": d["rgb"],
-            "opacity": d["opacity"],
-            "bbox_lo": bbox_lo,
-            "bbox_hi": bbox_hi,
-        }
-    else:
-        # v1: pre-multiply cov by K². ~24 MB allocation for 683k splats —
-        # cheap, only done once per cell load.
-        return {
-            "version": 1,
-            "frames": d["frames"],                            # mmap, raw
-            "cov": np.asarray(d["cov"]).astype(np.float32) * K2,
-            "rgb": d["rgb"],
-            "opacity": d["opacity"],
-            "bbox_lo": bbox_lo,
-            "bbox_hi": bbox_hi,
-        }
-
-
 def mmap_model_cell(ply_path: Path) -> dict:
     """Parse a single-frame model cell from a 3DGS .ply file.
 
@@ -537,23 +475,18 @@ def main() -> int:
         _xdg = _os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/{_os.getuid()}"
         args.sync_status_file = Path(_xdg) / "gsfluent_sync_status.json"
 
+    # Argument name kept as `--npz_dir` for back-compat with old launchers,
+    # but the directory now holds .gsq cells (npz is fully retired).
     npz_root = Path(args.npz_dir)
-    # Boot-time scan: prefer .gsq over .npz when both exist (smaller +
-    # faster to load). Sequences with only one of the two still load.
-    npz_paths = sorted(npz_root.glob("*.npz"))
     gsq_paths = sorted(npz_root.glob("*.gsq"))
-    cell_paths: dict[str, Path] = {}
-    for p in npz_paths:
-        cell_paths[p.stem] = p
-    for p in gsq_paths:
-        cell_paths[p.stem] = p  # .gsq wins if both present
-    if not cell_paths:
-        print(f"ERROR: no .npz or .gsq in {npz_root}")
+    if not gsq_paths:
+        print(f"ERROR: no .gsq in {npz_root}")
         return 2
 
-    print(f"mmap-loading {len(cell_paths)} cells from {npz_root}...")
+    print(f"loading {len(gsq_paths)} cells from {npz_root}...")
     cells: dict[str, dict] = {}
-    for stem, path in sorted(cell_paths.items()):
+    for path in gsq_paths:
+        stem = path.stem
         # Key cells by their wire-format name (`sequence:<stem>`) so they
         # match what the React workbench sends. Without this, pre-mmap'd
         # cells live under bare names while lazy-loaded ones live under
@@ -563,19 +496,14 @@ def main() -> int:
         # already land under `model:<name>`, so we don't add any here.
         key = f"sequence:{stem}"
         try:
-            cells[key] = (load_cell_gsq(path) if path.suffix == ".gsq"
-                          else mmap_cell(path))
+            cells[key] = load_cell_gsq(path)
         except (KeyError, ValueError, OSError) as e:
-            # A single malformed cell file (missing key / truncated /
-            # bad zstd) shouldn't kill the whole renderer. Skip with
-            # a warning so the remaining cells still load.
             print(f"  {key}: SKIPPED — {type(e).__name__}: {e}")
             continue
         c = cells[key]
-        print(f"  {key}: {c['frames'].shape}  ({path.suffix})  "
-              f"bbox=({c['bbox_lo']}, {c['bbox_hi']})")
+        print(f"  {key}: {c['frames'].shape}  bbox=({c['bbox_lo']}, {c['bbox_hi']})")
     if not cells:
-        print(f"ERROR: every cell file in {npz_root} was malformed")
+        print(f"ERROR: every .gsq in {npz_root} was malformed")
         return 2
 
     def _set_loading(name: str | None, phase: str | None, error: str | None = None) -> None:
@@ -638,18 +566,12 @@ def main() -> int:
 
         def _try_sequence(seq_name: str) -> tuple[bool, str | None]:
             gsq = npz_root / f"{seq_name}.gsq"
-            npz = npz_root / f"{seq_name}.npz"
-            # .gsq wins when both exist (smaller + visually identical).
-            if gsq.is_file():
-                p, loader = gsq, load_cell_gsq
-            elif npz.is_file():
-                p, loader = npz, mmap_cell
-            else:
+            if not gsq.is_file():
                 return False, "not_found"
             _set_loading(name, "parsing")
             try:
-                cells[name] = loader(p)
-                print(f"  loaded sequence cell {name} from {p}")
+                cells[name] = load_cell_gsq(gsq)
+                print(f"  loaded sequence cell {name} from {gsq}")
                 return True, None
             except Exception as e:
                 print(f"  resolve {name}: npz mmap failed: {e}")
@@ -1172,46 +1094,13 @@ def main() -> int:
         """
         if not _SAFE_NAME.match(name):
             return {"ok": False, "error": f"invalid cell name: {name!r}"}
-        u = url.split("?", 1)[0].rstrip("/").lower()
-        suffix = ".gsq" if u.endswith(".gsq") else ".npz"
-        dest = (npz_root / f"{name}{suffix}").resolve()
+        dest = (npz_root / f"{name}.gsq").resolve()
         try:
             dest.relative_to(npz_root.resolve())
         except ValueError:
             return {"ok": False, "error": f"cell path escapes npz_dir: {name!r}"}
-
-        partial = dest.with_suffix(f"{suffix}.partial")
-        if suffix == ".gsq":
-            return _sync_cell_gsq_streaming(name, url, dest, partial)
-
-        # .npz fallback: not streamable, download then load whole.
-        try:
-            with httpx.stream("GET", url, timeout=600.0,
-                              follow_redirects=True, trust_env=False) as r:
-                if r.status_code != 200:
-                    return {"ok": False, "error":
-                            f"download failed: HTTP {r.status_code}"}
-                with open(partial, "wb") as f:
-                    for chunk in r.iter_bytes(chunk_size=1024 * 1024):
-                        f.write(chunk)
-            partial.replace(dest)
-        except Exception as e:
-            partial.unlink(missing_ok=True)
-            return {"ok": False, "error": f"download failed: {e}"}
-
-        try:
-            new_data = mmap_cell(dest)
-        except Exception as e:
-            return {"ok": False, "error": f"load failed: {e}"}
-        with lock:
-            was_new = name not in cells
-            cells[name] = new_data
-            if state["cell"] == name:
-                state["scene_dirty"] = True
-                state["pushed_frame"] = -1
-        return {"ok": True, "cell": name, "added": was_new,
-                "bytes": npz_path.stat().st_size,
-                "n_frames": new_data["frames"].shape[0]}
+        partial = dest.with_suffix(".gsq.partial")
+        return _sync_cell_gsq_streaming(name, url, dest, partial)
 
     @api.post("/reload")
     def reload_cell(cell: str | None = None) -> dict:
@@ -1233,17 +1122,17 @@ def main() -> int:
         # in case the regex misses something exotic.
         if not _SAFE_NAME.match(cell):
             return {"ok": False, "error": f"invalid cell name: {cell!r}"}
-        npz_path = (npz_root / f"{cell}.npz").resolve()
+        gsq_path = (npz_root / f"{cell}.gsq").resolve()
         try:
-            npz_path.relative_to(npz_root.resolve())
+            gsq_path.relative_to(npz_root.resolve())
         except ValueError:
             return {"ok": False, "error": f"cell path escapes npz_dir: {cell!r}"}
-        if not npz_path.is_file():
-            return {"ok": False, "error": f"no .npz at {npz_path}"}
+        if not gsq_path.is_file():
+            return {"ok": False, "error": f"no .gsq at {gsq_path}"}
         try:
-            new_data = mmap_cell(npz_path)
+            new_data = load_cell_gsq(gsq_path)
         except Exception as e:
-            return {"ok": False, "error": f"mmap failed: {e}"}
+            return {"ok": False, "error": f"load failed: {e}"}
         with lock:
             was_new = cell not in cells
             cells[cell] = new_data

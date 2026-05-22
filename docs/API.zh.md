@@ -20,8 +20,8 @@ URL 里没有版本号。FastAPI 在 OpenAPI 里报 `"version": "0.1.0"`(`/docs`
 
 ### Content-Type
 
-- 请求体:除了文件上传都是 `application/json`。上传(model ply、cameras.json、npz)走 `multipart/form-data`。
-- 响应体:除了文件下载(frame ply、npz 缓存、frames.bin)是 `application/octet-stream`,其余都是 `application/json`。
+- 请求体:除了文件上传都是 `application/json`。上传(model `.ply`、`cameras.json`)走 `multipart/form-data`。
+- 响应体:除了文件下载(frame ply、`.gsq` 缓存、`frames.bin`)是 `application/octet-stream`,其余都是 `application/json`。
 
 ### 错误响应
 
@@ -856,8 +856,8 @@ curl -OJ "${BACKEND_URL}/api/runs/cluster_6_15_eq_v3/frame/0.ply"
     "converted_from": null,
     "is_broken": false,
     "cache": {
-      "viser_npz_mtime": 1779266297.33,
-      "viser_npz_bytes": 2910003294,
+      "splats_gsq_mtime": 1779266297.33,
+      "splats_gsq_bytes": 412345678,
       "frames_bin_mtime": null,
       "frames_bin_bytes": null
     }
@@ -881,8 +881,8 @@ curl -OJ "${BACKEND_URL}/api/runs/cluster_6_15_eq_v3/frame/0.ply"
 | `created_at` | string\|null | ISO-8601 UTC。 |
 | `converted_from` | string\|null | import 时做了坐标转换就是 `"y-up"`。 |
 | `is_broken` | bool | 导入 sequence 的 `frames/` 符号链接悬挂时为 true。 |
-| `cache.viser_npz_mtime` | float\|null | `work/cache/viser/<name>.npz` 的 mtime,文件不存在就是 `null`。 |
-| `cache.viser_npz_bytes` | int\|null | 同上,文件大小。 |
+| `cache.splats_gsq_mtime` | float\|null | `work/cache/viser/<name>.gsq` 的 mtime,文件不存在就是 `null`。 |
+| `cache.splats_gsq_bytes` | int\|null | 同上,文件大小。 |
 | `cache.frames_bin_mtime` | float\|null | `library/sequences/<name>/frames.bin` 的 mtime。 |
 | `cache.frames_bin_bytes` | int\|null | 同上,文件大小。 |
 
@@ -934,38 +934,6 @@ curl -X POST ${BACKEND_URL}/api/sequences/import \
   -d '{"folder_path":"/data/external/my_seq","name":"my_seq"}'
 ```
 
-### POST /api/sequences/upload-npz
-
-上传一份预生成的回放 `.npz` 缓存(由 `server/tools/batch_convert_to_npz.py` 产),注册成 library 里的 sequence。落盘是流式的,不会把整个文件一次性塞进内存。
-
-**Request body** (`multipart/form-data`)
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `file` | file | **必填。** `.npz` 扩展名,8 GB 上限,要含一个形状为 `(T, N, 3)` 的 `frames` 数组。 |
-| `name` | string (form) | 可选,缺省取文件名去掉 `.npz`。含 `/` 或以 `.` 开头会被拒。 |
-
-**Response**
-
-和 `GET /api/sequences` 单条同构(sequence 注册为 `source: "import"`、`source_path: "upload:<orig_filename>"`)。
-
-**状态码**
-
-| 状态码 | 触发原因 |
-| --- | --- |
-| 409 | 同名 sequence 已存在。 |
-| 413 | 文件超过 8 GB。 |
-| 422 | 扩展名错;sequence 名不合规;缺 zip magic;无 `frames` 键;`frames` 形状不是 `(T, N, 3)`;npz 解析失败。 |
-| 500 | `write_meta` 成功但重新 `Sequence.load` 返回 None。 |
-
-**curl**
-
-```bash
-curl -X POST ${BACKEND_URL}/api/sequences/upload-npz \
-  -F 'file=@my_seq.npz' \
-  -F 'name=my_seq'
-```
-
 ### GET /api/sequences/{name}/frame/{frame_idx}.ply
 
 `GET /api/runs/{run_name}/frame/{frame_idx}.ply` 的别名,字节和状态码一样。这个 URL 形态存在的意义是让前端 WebSocket bootstrap 不挑路径都能拿到数据。
@@ -976,9 +944,11 @@ curl -X POST ${BACKEND_URL}/api/sequences/upload-npz \
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 ```
 
-### GET /api/sequences/{name}/cache/viser.npz
+### GET /api/sequences/{name}/cache/splats.gsq
 
-下载 sequence 的 `.npz` viser 缓存。客户端侧的同步守护进程拿它把服务端缓存镜像到本地。`FileResponse` 原生支持 HTTP `Range`,断了能续。
+下载 sequence 的 `.gsq` 视觉无损流式 splat 缓存(由 `server/tools/pack_splats.py` 产生)。`FileResponse` 原生支持 HTTP `Range`,客户端可以按字节区间取任意帧做渐进播放。
+
+格式:80 字节 header + 每帧 16 字节索引 + zstd 静态块 + 每帧 zstd 压缩 chunk。完整布局见 `docs/ARCHITECTURE.md`。
 
 **Path params**
 
@@ -988,19 +958,19 @@ curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 
 **Response**
 
-`application/octet-stream`,原始 `.npz` 字节。
+`application/octet-stream`,原始 `.gsq` 字节。
 
 **状态码**
 
 | 状态码 | 触发原因 |
 | --- | --- |
 | 400 | 解析后路径逃出 cache 根(防御性)。 |
-| 404 | sequence 不存在,或还没跑过 `server/tools/batch_convert_to_npz.py <name>`。 |
+| 404 | sequence 不存在,或 `.gsq` 还没建(在服务器跑 `python server/tools/pack_splats.py <name>`,或 POST `/api/sequences/{name}/cache/build`)。 |
 
 **curl**
 
 ```bash
-curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/viser.npz"
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
 ```
 
 ### GET /api/sequences/{name}/cache/frames.bin
@@ -1233,19 +1203,23 @@ done
 
 UI 客户端建议直接走 WebSocket:一条 `subscribe` 消息就够,log 回放、实时追加、终态 `status`、帧流都拿得到。
 
-### 4. 拉生成出来的 .npz 缓存
+### 4. 拉生成出来的 .gsq 缓存
 
 run 跑完之后,缓存要在服务端先构一次:
 
-```bash
-ssh ${GSFLUENT_SSH_HOST} \
-  '${CONDA_ROOT}/bin/python /path/to/gsfluent_pkg/server/tools/batch_convert_to_npz.py cluster_6_15_eq_demo'
-```
-
-然后下载:
+缓存在 run 跑完时由 runner 自动建好。手动触发或查状态:
 
 ```bash
-curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/viser.npz"
+# 启动构建(已建好就立刻返回 done):
+curl -X POST ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build
+# 轮询:
+curl ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build-status
 ```
 
-`GET /api/sequences` 里的 `viser_npz_mtime` / `viser_npz_bytes` 是给客户端的同步守护进程用的,不发 HEAD 也能判断本地副本过没过期。下载支持 HTTP `Range`,可以断点续传。
+然后下载(支持 HTTP `Range`,可断点续传 / 边下边播):
+
+```bash
+curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/splats.gsq"
+```
+
+`GET /api/sequences` 里的 `cache.splats_gsq_mtime` / `splats_gsq_bytes` 让客户端不发 HEAD 就能判断 artifact 是否已构建。

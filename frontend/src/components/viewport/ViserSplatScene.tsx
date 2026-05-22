@@ -263,16 +263,12 @@ export function ViserSplatScene() {
         // state "building" / "idle" — keep polling.
       }
 
-      // Pick which artifact to download: prefer the smaller .gsq if
-      // the backend built it. Fall back to the .npz on 404 (older
-      // builds, build flow regression, etc.). Both decoders live in
-      // viser_headless and are picked by URL suffix in /sync_cell.
+      // Download the .gsq directly. The npz format is retired — the
+      // build flow on the server only produces .gsq, and viser_headless
+      // only decodes .gsq.
       const origin = apiBase || window.location.origin;
       const seqEnc = encodeURIComponent(name);
-      const gsqUrl = `${origin}/api/sequences/${seqEnc}/cache/splats.gsq`;
-      const npzUrl = `${origin}/api/sequences/${seqEnc}/cache/viser.npz`;
-      const head = await fetch(gsqUrl, { method: "HEAD" }).catch(() => null);
-      const downloadUrl = head && head.ok ? gsqUrl : npzUrl;
+      const downloadUrl = `${origin}/api/sequences/${seqEnc}/cache/splats.gsq`;
       setBuildState("syncing");
       const r3 = await fetch(
         `${controlUrl}/sync_cell?name=${seqEnc}&url=${encodeURIComponent(downloadUrl)}`,

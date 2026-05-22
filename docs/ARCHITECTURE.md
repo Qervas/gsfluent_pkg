@@ -61,7 +61,7 @@ client-side.
 - **Owns**: the library API surface, the WS frame pump, the runner that
   spawns sim subprocesses.
 - **Does NOT own**: viewer rendering (client-side), per-cell viser
-  caches (built by `server/tools/sequence_to_viser_npz.py`, served by
+  caches (built by `server/tools/pack_splats.py`, served by
   `frontend/python/viser_headless.py`).
 - Process management: `server/supervise.sh up|stop|status` — a small
   shell supervisor (no systemd, no docker) that respawns the backend
@@ -71,12 +71,19 @@ client-side.
 
 - `fuse_to_full_ply.py` — sim_*.ply + reference 3DGS → frame_*.ply.
   K-NN skinning and per-frame Kabsch rotation behind flags.
+- `pack_splats.py` — frame_*.ply → `splats.gsq` (visual-lossless
+  streamable splat cache: int16-quantized xyz + axis-vec quats per
+  frame, fp16 rgb/scales + uint8 opacity static, zstd-compressed
+  per-frame chunks. ~3× smaller than the retired `.npz` format.
+  Format spec in the pack_splats.py docstring). Served on demand
+  via `/api/sequences/{name}/cache/splats.gsq` and streamed by
+  viser_headless's `/sync_cell`.
+- `pack_sim_splats.py` — same encode but reads raw `sim_*.ply` instead
+  of fused frame plys. Produces a "no-fuse" A/B sequence for
+  comparison. Run manually; not part of the default build flow.
 - `pack_sequence.py` — frame_*.ply → `frames.bin` (GSSQ int16-quantized
-  xyz). Read by `gsfluent/core/frame_stream.py:PackedReader` for the
-  Points-mode WS stream. ~30× smaller on disk than per-frame plies.
-- `sequence_to_viser_npz.py`, `batch_convert_to_npz.py` — build the
-  per-sequence `.npz` files in `work/cache/viser/` that the client's
-  `viser_headless.py` mmaps for Splats-mode playback.
+  xyz). Used by Points mode (`gsfluent/core/frame_stream.py:PackedReader`,
+  WS stream). ~30× smaller on disk than per-frame plies.
 - `run_sim.sh` — sim launcher invoked by the v1 backend's runner.
 - `migrate_to_library.py`, `check_recipe_compat.py` — one-shot utilities.
 
@@ -92,8 +99,10 @@ client-side.
 - `viser_headless.py` — viser splat renderer on `:8091` + FastAPI
   control sidecar on `:8092`. The SPA drives sequence / frame / camera
   via the control API; viser handles WebGL rendering.
-- `sync_daemon.py` — mirrors the server's sequence library + npz cache
-  onto the local machine. The SPA's outliner walks the local copy.
+- `sync_daemon.py` — legacy bulk-mirror tool. Not used by the current
+  flow (the SPA streams individual `.gsq` files on demand via
+  `viser_headless`'s `/sync_cell`). Kept for occasional manual library
+  mirroring; not started by `npm start`.
 - `vkgs_play.py` — viewer-specific adapter for the vkgs native renderer
   (Z-up→Y-up rotation, launch wrapper). Operates on a copy in
   `work/cache/vkgs_yup/`; never mutates library frames.
@@ -191,9 +200,46 @@ work/library/sequences/<name>/
 
 ```
 work/cache/
-  ├── viser/<name>.npz           ← Splats-mode playback
+  ├── viser/<name>.gsq           ← Splats-mode streamable playback
   └── vkgs_yup/<name>/frames/    ← rotated copies for the vkgs native viewer
 ```
+
+### `.gsq` on-disk format (visual-lossless splat stream)
+
+```
+header  (80 B)
+  magic           "GSQ1"
+  version         u32         (= 1)
+  n_splats        u32
+  n_frames        u32
+  fps_hint        f32
+  bbox_min, max   f32[3] each   (for int16 dequantization)
+  static_offset   u64           (byte offset of static block)
+  static_size     u32           (compressed bytes)
+  reserved        u8[24]
+
+frame_index  (16 B × n_frames)
+  for each frame: { offset u64, size u32, _reserved u32 }
+
+static block  (zstd-compressed)
+  rgb       f16[n_splats, 3]   (3DGS linear color, HDR)
+  opacity   u8[n_splats]       (0..255 ⇒ 0..1)
+  scales    f16[n_splats, 3]   (linear stddev per axis)
+
+frame chunks  (zstd-compressed each, byte-range addressable)
+  xyz       i16[n_splats, 3]   (dequant via bbox)
+  quat_xyz  i16[n_splats, 3]   (axis-vec; qw = sqrt(1 - x²-y²-z²))
+```
+
+Properties:
+- **Streamable**: each frame chunk's bytes are self-contained, so a
+  partial download can render frames 0..K as soon as their bytes
+  land. See `viser_headless._sync_cell_gsq_streaming`.
+- **Visual-lossless**: int16 position quantum is ~bbox-span/65535
+  (≈ 1 mm at scene scale); quat axis-vec quantum is ~3e-5; fp16
+  for rgb/scales is below visible threshold.
+- **Compact**: ~3× smaller than the retired fp32 .npz for the same
+  visual quality (12 B/splat/frame for xyz+quat vs 28 B before).
 
 Caches are **never** returned by the library API and **never** indexed
 as sequences. The viewer wrappers know how to derive them.
@@ -215,7 +261,7 @@ as sequences. The viewer wrappers know how to derive them.
 │  viser_headless                                             │
 │    127.0.0.1:8091 (splat WS)    ◄── iframe in SPA           │
 │    127.0.0.1:8092 (control API) ◄── fetch from SPA          │
-│    mmap → work/cache/viser/*.npz                            │
+│    streams ← /sync_cell → work/cache/viser/*.gsq            │
 │                                                             │
 └────────────────────────────┬────────────────────────────────┘
                              │ HTTP (/api/*, /api/stream WS)

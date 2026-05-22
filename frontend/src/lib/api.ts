@@ -199,15 +199,6 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ folder_path, name, convert_y_up: !!convertYUp }),
       }).then(j<SequenceItem>),
-    uploadNpz: (npz: File, name?: string) => {
-      const fd = new FormData();
-      fd.append("file", npz);
-      if (name) fd.append("name", name);
-      return f("/api/sequences/upload-npz", {
-        method: "POST",
-        body: fd,
-      }).then(j<SequenceItem>);
-    },
     delete: (name: string) =>
       f(`/api/sequences/${encodeURIComponent(name)}`, { method: "DELETE" }).then(
         j<{ deleted: string }>,

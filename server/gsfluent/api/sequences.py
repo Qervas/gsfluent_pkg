@@ -19,7 +19,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -35,11 +35,11 @@ from .runs import get_run_frame as _get_run_frame
 
 router = APIRouter(prefix="/api/sequences", tags=["sequences"])
 
-# Where derived caches live. The viser .npz cache is built by
-# `server/tools/batch_convert_to_npz.py` and consumed by `frontend/python/viser_headless.py`.
-# Under the split-topology deployment, the server holds the canonical
-# copy and client-side `frontend/python/sync_daemon.py` mirrors files here onto
-# the client's local cache.
+# Where derived caches live. The viser .gsq cache is built by
+# `server/tools/pack_splats.py` and consumed by
+# `frontend/python/viser_headless.py`. Under the split-topology deployment
+# the server holds the canonical copy and the SPA streams it on demand
+# through viser_headless's /sync_cell.
 _VISER_CACHE = PKG_ROOT / "work" / "cache" / "viser"
 
 
@@ -102,14 +102,11 @@ def _sequence_dict(seq: Sequence) -> dict:
                       for r in runner.list_runs())
         if is_live:
             d["frame_count"] = seq.frame_count()
-    # Cache descriptor: lets the client sync daemon detect staleness
-    # without having to download anything to check. Both files are
-    # optional — viser.npz only exists after batch_convert_to_npz.py
-    # has run; frames.bin only exists after server/tools/pack_sequence.py has
-    # run. Missing → field stays null and the daemon skips that file.
+    # Cache descriptor: lets the SPA detect what's already built without
+    # having to HEAD-probe each artifact. splats.gsq only exists after
+    # pack_splats.py has run; frames.bin only exists after
+    # server/tools/pack_sequence.py has run. Missing → field stays null.
     d["cache"] = {
-        "viser_npz_mtime":  _stat_mtime(_VISER_CACHE / f"{seq.name}.npz"),
-        "viser_npz_bytes":  _stat_size(_VISER_CACHE / f"{seq.name}.npz"),
         "splats_gsq_mtime": _stat_mtime(_VISER_CACHE / f"{seq.name}.gsq"),
         "splats_gsq_bytes": _stat_size(_VISER_CACHE / f"{seq.name}.gsq"),
         "frames_bin_mtime": _stat_mtime(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
@@ -213,124 +210,6 @@ def import_endpoint(req: ImportRequest):
     return _sequence_dict(seq)
 
 
-@router.post("/upload-npz")
-async def upload_npz(
-    file: UploadFile = File(..., description="A pre-built .npz playback cache"),
-    name: str | None = Form(None, description="Sequence name (defaults to basename without .npz)"),
-):
-    """Accept a drag-dropped .npz from the workbench and register it as
-    a Sequence in the library — the client-local sibling of POST
-    /api/models/upload but for sequence playback caches instead of
-    .ply models. After this returns, the new sequence shows up in
-    /api/sequences and is mmap'd by viser_headless on its next /reload.
-
-    Validation strategy:
-      1. Magic-byte sniff (PK\\x03\\x04 = zip header used by .npz).
-      2. Stream the upload to a temp file under work/cache/viser/.
-      3. Open with np.load(mmap_mode="r") to verify shape — derives
-         frame_count from the first per-frame array's axis 0 and
-         n_splats from axis 1. Works for both v1 (cov) and v2 (quats)
-         schemas because both have `frames: (T, N, 3)`.
-      4. Atomic rename to <name>.npz, then write a stub _meta.json
-         under work/library/sequences/<name>/ so the outliner shows
-         the sequence with provenance.
-
-    Size cap: 8 GB (our largest production .npz is ~3 GB; doubled for
-    headroom). Upload streams to disk via UploadFile's spooled buffer
-    — never holds the whole file in process memory.
-    """
-    import shutil
-    import tempfile
-    import numpy as np
-
-    fname = file.filename or ""
-    if not fname.lower().endswith(".npz"):
-        raise HTTPException(422, "file must have a .npz extension")
-    seq_name = (name or fname[: -len(".npz")]).strip()
-    if not seq_name or "/" in seq_name or seq_name.startswith("."):
-        raise HTTPException(422, f"invalid sequence name: {seq_name!r}")
-
-    _VISER_CACHE.mkdir(parents=True, exist_ok=True)
-    final_path = _VISER_CACHE / f"{seq_name}.npz"
-
-    if Sequence.exists(seq_name) or final_path.exists():
-        raise HTTPException(
-            409,
-            f"sequence already exists: {seq_name}. "
-            f"Delete it first or upload under a different name.",
-        )
-
-    SIZE_CAP = 8 * 1024 * 1024 * 1024  # 8 GB
-    tmp = tempfile.NamedTemporaryFile(
-        prefix=f"{seq_name}.", suffix=".npz.partial",
-        dir=str(_VISER_CACHE), delete=False,
-    )
-    try:
-        total = 0
-        while True:
-            chunk = await file.read(4 * 1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > SIZE_CAP:
-                raise HTTPException(
-                    413, f"upload exceeds {SIZE_CAP // (1024**3)} GB cap",
-                )
-            tmp.write(chunk)
-        tmp.flush()
-        tmp.close()
-
-        with open(tmp.name, "rb") as f:
-            magic = f.read(4)
-        if magic != b"PK\x03\x04":
-            raise HTTPException(422, "file is not a valid .npz (zip header missing)")
-
-        # numpy defaults to refusing object arrays (allow_pickle defaults
-        # False since 1.16.4) — anything weird in the payload will raise
-        # below rather than execute.
-        try:
-            d = np.load(tmp.name, mmap_mode="r")
-            keys = set(d.files)
-            if "frames" not in keys:
-                raise HTTPException(422, "npz is missing the 'frames' array")
-            frames_shape = d["frames"].shape
-            if len(frames_shape) != 3 or frames_shape[2] != 3:
-                raise HTTPException(
-                    422,
-                    f"'frames' has shape {frames_shape}; expected (T, N, 3)",
-                )
-            frame_count = int(frames_shape[0])
-            n_splats = int(frames_shape[1])
-            del d
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(422, f"npz parse failed: {e}")
-
-        shutil.move(tmp.name, final_path)
-    except HTTPException:
-        try:
-            Path(tmp.name).unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-    Sequence.write_meta(
-        name=seq_name,
-        source="import",
-        source_path=f"upload:{fname}",
-        model_ref=None,
-        frame_count=frame_count,
-        n_splats=n_splats,
-        coord_convention="z-up",
-        first_frame_full=True,
-    )
-    seq = Sequence.load(seq_name)
-    if seq is None:
-        raise HTTPException(500, "write_meta succeeded but Sequence.load returned None")
-    return _sequence_dict(seq)
-
-
 @router.get("/{name}/frame/{frame_idx}.ply")
 async def get_frame(name: str, frame_idx: int):
     """Re-exposes /api/runs/{name}/frame/{idx}.ply under the sequences
@@ -346,7 +225,7 @@ def get_splats_gsq(name: str):
     Produced by `server/tools/pack_splats.py` as a smaller, byte-range
     addressable alternative to the .npz cache. Typical size: 0.4-1 GB
     vs 2.9 GB for the npz on the same sequence (~3-7× smaller). Same
-    Range support semantics as the npz endpoint — FileResponse handles
+    Range support via FileResponse — interrupted downloads resume
     it natively.
 
     Falls through to 404 with a build hint if the .gsq doesn't exist
@@ -360,8 +239,7 @@ def get_splats_gsq(name: str):
         raise HTTPException(
             404,
             f".gsq not built for '{name}'. Run "
-            f"`python server/tools/pack_splats.py {name}` on the server, "
-            f"or fall back to /api/sequences/{name}/cache/viser.npz.",
+            f"`python server/tools/pack_splats.py {name}` on the server.",
         )
     target = path.resolve()
     cache_root = _VISER_CACHE.resolve()
@@ -376,46 +254,9 @@ def get_splats_gsq(name: str):
     )
 
 
-@router.get("/{name}/cache/viser.npz")
-def get_viser_cache(name: str):
-    """Serve the .npz viser cache file as a downloadable artifact.
-
-    Used by the client sync daemon (`frontend/python/sync_daemon.py`) to mirror the
-    server's cache onto the client, where `frontend/python/viser_headless.py`
-    mmaps it for Splats-mode playback. The split-topology rationale:
-    pushing per-frame xyz over WAN at 30 fps is ~2 Gbps (683k splats ×
-    12 B × 30) — infeasible. A one-time .npz download (~1-2 GB) then
-    local playback is the only path that scales.
-
-    FastAPI's FileResponse handles Range requests natively, so
-    interrupted downloads resume cleanly.
-    """
-    if not Sequence.exists(name):
-        raise HTTPException(404, f"sequence not found: {name}")
-    path = _VISER_CACHE / f"{name}.npz"
-    if not path.is_file():
-        raise HTTPException(
-            404,
-            f"viser cache not built for sequence '{name}'. "
-            "Run `python server/tools/batch_convert_to_npz.py {name}` on the server.",
-        )
-    # Path-traversal defense: confirm the resolved path is inside the cache.
-    target = path.resolve()
-    cache_root = _VISER_CACHE.resolve()
-    try:
-        target.relative_to(cache_root)
-    except ValueError:
-        raise HTTPException(400, f"refusing to serve outside cache: {name}")
-    return FileResponse(
-        target,
-        media_type="application/octet-stream",
-        filename=f"{name}.npz",
-    )
-
-
 # ── cache build (on-demand) ─────────────────────────────────────────────────
 # When the client selects a sequence whose viser .npz hasn't been built yet,
-# it POSTs /cache/build to kick off batch_convert_to_npz.py server-side. The
+# it POSTs /cache/build to kick off pack_splats.py server-side. The
 # old flow was "tell the user to ssh in and run the script themselves",
 # which is hostile UX. Now the backend owns the lifecycle and the client
 # polls /cache/build-status until done, then downloads the artifact.
@@ -479,11 +320,8 @@ def build_viser_cache(name: str) -> dict:
     if not Sequence.exists(name):
         raise HTTPException(404, f"sequence not found: {name}")
 
-    # Fast path: cache already on disk. .gsq is the canonical artifact;
-    # an .npz alone (from before the format switch) counts too so the
-    # SPA can fall through to it.
-    if (_VISER_CACHE / f"{name}.gsq").is_file() \
-       or (_VISER_CACHE / f"{name}.npz").is_file():
+    # Fast path: cache already on disk.
+    if (_VISER_CACHE / f"{name}.gsq").is_file():
         return {"name": name, "state": "done",
                 "note": "cache already exists on disk"}
 
@@ -523,9 +361,8 @@ def get_viser_cache_build_status(name: str) -> dict:
         job = _build_jobs.get(name)
         if job is not None:
             return dict(job)
-    # No job tracked → reflect disk state. Either artifact counts.
-    if (_VISER_CACHE / f"{name}.gsq").is_file() \
-       or (_VISER_CACHE / f"{name}.npz").is_file():
+    # No job tracked → reflect disk state.
+    if (_VISER_CACHE / f"{name}.gsq").is_file():
         return {"name": name, "state": "done", "note": "cache exists (no job tracked)"}
     return {"name": name, "state": "idle"}
 

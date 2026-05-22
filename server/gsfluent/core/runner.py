@@ -5,7 +5,7 @@ next to the canonical sim core. One Run = one subprocess spawn of a shell
 wrapper (`server/tools/run_sim.sh` by default) that orchestrates:
     1. The canonical MPM sim (`gs_simulation_building.py`)
     2. The fuse step (`server/tools/fuse_to_full_ply.py`)
-After the run exits cleanly, runner.py kicks off `batch_convert_to_npz.py`
+After the run exits cleanly, runner.py kicks off `pack_splats.py`
 to rebuild the .npz cache so the client sync daemon picks it up.
 
 The wrapper path + interpreter are env-overridable so the runner doesn't
@@ -375,7 +375,7 @@ async def _drain(run: Run, run_dir: Path) -> None:
 
     # On a successful run, rebuild the .npz cache so the client sync
     # daemon notices the new sequence on its next poll. We invoke
-    # batch_convert_to_npz.py as a separate subprocess (rather than
+    # pack_splats.py as a separate subprocess (rather than
     # importing it) so any plyfile / numpy work it does runs in its own
     # process — keeps the API server's memory profile clean. Logged to
     # run.log so failures are visible in the same WS replay.

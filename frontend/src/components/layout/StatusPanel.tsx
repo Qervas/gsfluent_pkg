@@ -74,11 +74,11 @@ function deriveStage(state: string, logTail: string): string {
   // Order matters — later steps are tagged with text that may also
   // appear in earlier logs (e.g. "fuse" appears in "drained io
   // futures" before fuse runs), so check from latest stage backwards.
-  if (logTail.includes("[runner] .npz cache built")) return "done";
+  if (logTail.includes("[runner] .gsq cache built")) return "done";
   if (logTail.includes("[npz] writing"))             return "writing npz";
-  if (logTail.includes("[npz] reading"))             return "packing npz";
-  if (logTail.includes("[runner] building .npz"))    return "packing npz";
-  if (logTail.includes("run_sim.sh done:"))          return "packing npz";
+  if (logTail.includes("[npz] reading"))             return "packing gsq";
+  if (logTail.includes("[runner] building .gsq"))    return "packing gsq";
+  if (logTail.includes("run_sim.sh done:"))          return "packing gsq";
   if (logTail.includes("step 2: fuse"))              return "fusing";
   if (logTail.includes("[PhaseA-SUMMARY]"))          return "fuse drain";
   if (logTail.includes("[PhaseA]") || logTail.includes("step 1: MPM"))

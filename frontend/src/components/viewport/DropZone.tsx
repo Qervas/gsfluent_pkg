@@ -4,7 +4,7 @@ import { Loader2, Check } from "lucide-react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 
-type DragKind = "ply" | "npz" | "mixed" | "unknown";
+type DragKind = "ply" | "unknown";
 
 // SubtleCrypto SHA-256 of a File. Hex-encoded to match the server's
 // hashlib.sha256(content).hexdigest() format so /api/models/check_hash
@@ -48,7 +48,10 @@ function safeToast(message: string, kind: "info" | "success" | "error") {
  * Window-level drag-drop overlay for both model and sequence uploads.
  *
  * - `.ply` (optionally with a sibling `cameras.json`) → POST /api/models/upload
- * - `.npz` (a pre-built playback cache) → POST /api/sequences/upload-npz
+ * (Pre-built playback caches (.gsq) are no longer drag-droppable — they
+ *  are produced server-side by the sim/fuse/pack_splats pipeline and
+ *  streamed on demand. If you ever need to import an externally-built
+ *  one, add a new endpoint that mirrors /api/models/upload.)
  *
  * The overlay sniffs the dragged file's extension during dragenter so
  * the hint can tell the user what's about to happen *before* they let
@@ -62,7 +65,7 @@ export function DropZone() {
   const [isOver, setIsOver] = useState(false);
   const [dragKind, setDragKind] = useState<DragKind>("unknown");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | "ply" | "npz">(null);
+  const [busy, setBusy] = useState<null | "ply">(null);
   // Multi-phase upload state. The ply path goes through five stages
   // and the overlay labels each one so the user never sees a static
   // "Uploading…" while the browser is actually hashing or gzipping.
@@ -91,12 +94,7 @@ export function DropZone() {
     let dragCounter = 0;
 
     const classify = (names: string[]): DragKind => {
-      const hasPly = names.some((n) => n.endsWith(".ply"));
-      const hasNpz = names.some((n) => n.endsWith(".npz"));
-      if (hasPly && hasNpz) return "mixed";
-      if (hasPly) return "ply";
-      if (hasNpz) return "npz";
-      return "unknown";
+      return names.some((n) => n.endsWith(".ply")) ? "ply" : "unknown";
     };
 
     const onEnter = (e: DragEvent) => {
@@ -109,15 +107,11 @@ export function DropZone() {
       // overlay can at least say "file" when names are absent.
       const items = Array.from(e.dataTransfer.items ?? []);
       const types = items.map((it) => (it.type || "").toLowerCase());
-      // Some browsers report empty type for .npz / .ply. Use a best
-      // effort here; final routing happens at drop time when File.name
-      // is available.
-      const hint = types.some((t) => t.includes("zip") || t.includes("octet"))
-        ? "npz"
-        : types.some((t) => t.includes("ply"))
-        ? "ply"
-        : "unknown";
-      setDragKind(hint as DragKind);
+      // Browsers don't always report a useful MIME for .ply; treat the
+      // hint as ply when there's any plausible signal, unknown otherwise.
+      const hint: DragKind =
+        types.some((t) => t.includes("ply")) ? "ply" : "unknown";
+      setDragKind(hint);
       setIsOver(true);
     };
     const onOver = (e: DragEvent) => {
@@ -144,39 +138,11 @@ export function DropZone() {
       const lowered = files.map((f) => f.name.toLowerCase());
       const kind = classify(lowered);
 
-      if (kind === "mixed") {
-        setError(
-          "Mixed drop: drop .ply files OR a .npz, not both at the same time.",
-        );
-        setTimeout(() => setError(null), 5000);
-        return;
-      }
-
       if (kind === "unknown") {
         setError(
-          `Unsupported drop: ${files.map((f) => f.name).join(", ")} ` +
-            `(expected .ply or .npz)`,
+          `Unsupported drop: ${files.map((f) => f.name).join(", ")} (expected .ply)`,
         );
         setTimeout(() => setError(null), 5000);
-        return;
-      }
-
-      if (kind === "npz") {
-        const npz = files.find((f) => f.name.toLowerCase().endsWith(".npz"))!;
-        setBusy("npz");
-        setPhase("uploading");
-        try {
-          await api.sequences.uploadNpz(npz);
-          qc.invalidateQueries({ queryKey: ["sequences"] });
-        } catch (err) {
-          setError(
-            `sequence upload failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          setTimeout(() => setError(null), 6000);
-        } finally {
-          setBusy(null);
-          setPhase(null);
-        }
         return;
       }
 
@@ -299,40 +265,19 @@ function DropPreview({
   // pipeline they're about to enter. Browsers don't always reveal the
   // file name on dragenter, so "unknown" still renders a neutral hint
   // and lets the post-drop classify() catch malformed drags.
-  const palette =
-    kind === "npz"
-      ? {
-          border: "border-violet-400",
-          bg: "bg-violet-400/10",
-          fg: "text-violet-300",
-        }
-      : kind === "mixed"
-      ? {
-          border: "border-error",
-          bg: "bg-error/10",
-          fg: "text-error",
-        }
-      : {
-          border: "border-accent",
-          bg: "bg-accent/10",
-          fg: "text-accent",
-        };
+  const palette = {
+    border: "border-accent",
+    bg: "bg-accent/10",
+    fg: "text-accent",
+  };
 
-  const title =
-    kind === "npz"
-      ? "Drop .npz to register as sequence"
-      : kind === "ply"
-      ? "Drop .ply (optionally with cameras.json) to upload model"
-      : kind === "mixed"
-      ? "Drop one type at a time: .ply OR .npz"
-      : "Drop .ply (model) or .npz (sequence)";
+  const title = kind === "ply"
+    ? "Drop .ply (optionally with cameras.json) to upload model"
+    : "Drop .ply to upload a model";
 
-  const sub =
-    kind === "ply" && convertYUp
-      ? "Y-up source: will convert to Z-up at import"
-      : kind === "npz"
-      ? "Will be mmap'd by the viser playback worker"
-      : null;
+  const sub = kind === "ply" && convertYUp
+    ? "Y-up source: will convert to Z-up at import"
+    : null;
 
   return (
     <div

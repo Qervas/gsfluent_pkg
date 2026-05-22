@@ -94,7 +94,7 @@ bash server/supervise.sh stop    # 停掉
 |-------------|-------------------|---------------------------|
 | v1 backend  | `0.0.0.0:7869`    | `your-backend:port` (NAT) |
 
-仿真后处理(把 ply 转 npz 缓存、打包 frames.bin)在 `server/tools/` 下,
+仿真后处理(把 ply 转 gsq 缓存、打包 frames.bin)在 `server/tools/` 下,
 按需 ssh 进服务器手动跑。
 
 日志在 `/path/to/gsfluent_pkg/work/logs/{v1,supervisor}.log`。
@@ -113,11 +113,11 @@ Python 解释器在 `.env` 里通过 `GSFLUENT_API_PYTHON` / `GSFLUENT_SIM_PYTHO
 | `frontend/python/`  | 客户端跑的 Python:`viser_headless.py`、`sync_daemon.py`、`vkgs_play.py`。 |
 | `frontend/patches/` | 上游 viser 包的渲染补丁(no-cull、point precision)。                |
 | `server/`           | FastAPI v1 backend,只在服务器跑。REST 路由 + runner 在 `gsfluent/`。 |
-| `server/tools/`     | 仿真包装(`run_sim.sh`)、PLY → npz 转换、fuse、迁移等服务端脚本。   |
+| `server/tools/`     | 仿真包装(`run_sim.sh`)、PLY → gsq 转换(`pack_splats.py`)、fuse、迁移等服务端脚本。   |
 | `server/recipes/`   | 内置仿真 recipe JSON。                                               |
 | `server/patches/`   | 上游 GaussianFluent 仿真补丁。                                       |
 | `docs/`             | API 参考、架构文档。                                                 |
-| `work/`             | 运行时数据(已 gitignore):`library/sequences/<run>/`、`cache/viser/*.npz`。 |
+| `work/`             | 运行时数据(已 gitignore):`library/sequences/<run>/`、`cache/viser/*.gsq`。 |
 
 ---
 
