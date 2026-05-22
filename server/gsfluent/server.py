@@ -1,127 +1,13 @@
-import os
-import platform
-import shutil
-import socket
-import subprocess
-import sys
-from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
 
 from ._paths import PKG_ROOT  # re-exported; legacy `from ..server import PKG_ROOT` still works
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup hooks land here as Phase 1 grows (recipe scan, model registry, ...).
-    yield
-    # Shutdown hooks land here.
-
-
 def create_app() -> FastAPI:
-    app = FastAPI(title="gsfluent", version="0.1.0", lifespan=lifespan)
-    # CORS: allow any localhost/127.0.0.1 port (vite dev :5173, vite
-    # preview :4173, and any user-chosen port). Also accept the
-    # GSFLUENT_EXTRA_CORS_ORIGINS env var (comma-separated) so deploys
-    # behind a public-IP port-mapping can let the SPA hit the API
-    # directly without a tunnel, e.g.:
-    #   GSFLUENT_EXTRA_CORS_ORIGINS=${BACKEND_URL}
-    extra = [
-        o.strip()
-        for o in os.environ.get("GSFLUENT_EXTRA_CORS_ORIGINS", "").split(",")
-        if o.strip()
-    ]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-        allow_origins=extra,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_credentials=False,
-    )
+    """Backward-compatible entry point. Delegates to composition.build_app().
 
-    @app.get("/api/health")
-    async def health():
-        return {"status": "ok", "pkg_root": str(PKG_ROOT)}
-
-    @app.get("/api/gpu-check")
-    async def gpu_check():
-        """Probe the host's NVIDIA GPU(s) via nvidia-smi. Used as a
-        deployment-time handshake: confirms (1) nvidia-smi is reachable
-        from this process (so the container was started with `--gpus all`
-        or the host has the CUDA toolkit on PATH), and (2) at least one
-        GPU is visible. Returns the raw CSV rows for the caller to
-        inspect."""
-        smi = shutil.which("nvidia-smi")
-        if smi is None:
-            return {
-                "ok": False,
-                "error": "nvidia-smi not on PATH",
-                "hint": (
-                    "If running in Docker: was the container started with "
-                    "`--gpus all` and is the nvidia-container-toolkit "
-                    "installed on the host? On bare metal: install the "
-                    "NVIDIA driver + CUDA toolkit so nvidia-smi is on PATH."
-                ),
-            }
-        try:
-            # Note: `cuda_version` was historically queryable but newer
-            # drivers (565+) reject it. Stick to fields available in
-                # both old and new nvidia-smi.
-            out = subprocess.check_output(
-                [smi,
-                 "--query-gpu=index,name,driver_version,memory.total,memory.free",
-                 "--format=csv,noheader"],
-                text=True, timeout=5,
-            ).strip()
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "nvidia-smi timed out (>5s)"}
-        except subprocess.CalledProcessError as e:
-            return {"ok": False, "error": f"nvidia-smi exit {e.returncode}",
-                    "stderr": (e.stderr or "").strip()}
-        return {
-            "ok": True,
-            "gpus": [line.strip() for line in out.splitlines() if line.strip()],
-        }
-
-    @app.get("/api/system")
-    async def system_info():
-        """Container/host introspection. Useful before submitting the
-        first sim run — confirms the backend is the version + env the
-        deployer expects. No secrets exposed."""
-        return {
-            "hostname":      socket.gethostname(),
-            "platform":      platform.platform(),
-            "python":        sys.version.split()[0],
-            "pkg_root":      str(PKG_ROOT),
-            "sim_script":    os.environ.get("GSFLUENT_SIM_SCRIPT_RUNNER", "<default>"),
-            "sim_home":      os.environ.get("GSFLUENT_SIM_HOME", "<default>"),
-            "in_container":  Path("/.dockerenv").exists(),
-        }
-
-    from .api import (
-        recipes as recipes_api,
-        models as models_api,
-        runs as runs_api,
-        sequences as sequences_api,
-        stream as stream_api,
-        schemas as schemas_api,
-    )
-    app.include_router(recipes_api.router)
-    app.include_router(models_api.router)
-    app.include_router(runs_api.router)
-    app.include_router(sequences_api.router)
-    app.include_router(stream_api.router)
-    app.include_router(schemas_api.router)
-
-    @app.get("/")
-    async def root():
-        return {
-            "service": "gsfluent",
-            "version": "0.1.0",
-            "hint": "API-only backend. The SPA runs locally — see README.",
-            "endpoints": ["/api/health", "/api/system", "/api/recipes", "/docs"],
-        }
-
-    return app
+    Existing callers (tests, ASGI servers) keep working unchanged.
+    """
+    from gsfluent.composition import build_app
+    from gsfluent.config import AppConfig
+    return build_app(AppConfig.from_env())
