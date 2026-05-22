@@ -161,26 +161,46 @@ def encode_sequence_to_gsq(seq_name: str, out_path: Path) -> None:
         if (i + 1) % 25 == 0 or i + 1 == n_frames:
             print(f"    {i+1}/{n_frames}  ({time.time()-t0:.1f}s)", flush=True)
 
-    # NaN sanitization — sim particles that escape the bbox can produce
-    # NaN xyz. K-NN fuse propagates them. Forward-fill from the prior
-    # frame so the splat freezes in place instead of crashing the
-    # WASM splat sorter.
-    nan_mask = np.isnan(xyz_all).any(axis=2)
-    if nan_mask.any():
-        n_bad = int(nan_mask.sum())
-        print(f"  sanitizing {n_bad} NaN positions (forward-fill)")
-        if nan_mask[0].any():
-            # Nothing earlier; clamp NaNs to the centroid of finite frame-0 points.
-            finite = ~nan_mask[0]
-            ctr = xyz_all[0][finite].mean(axis=0) if finite.any() else np.zeros(3, dtype=np.float32)
-            xyz_all[0][nan_mask[0]] = ctr
+    # Sanitization. The viser WASM splat sorter does an in-place radix
+    # sort over float positions; any NaN/Inf causes "memory access out
+    # of bounds" because IEEE compare with NaN never returns ordered.
+    # Likewise bad quats yield a non-pos-def cov which the sorter then
+    # can index into a swap that overflows. Treat both:
+    bad_xyz = ~np.isfinite(xyz_all).all(axis=2)   # (T,N), catches NaN AND ±Inf
+    if bad_xyz.any():
+        n_bad = int(bad_xyz.sum())
+        print(f"  sanitizing {n_bad} non-finite positions (forward-fill)")
+        if bad_xyz[0].any():
+            # Frame 0 has nothing earlier to fall back on; clamp to
+            # centroid of finite frame-0 points (or origin if no finite).
+            good = ~bad_xyz[0]
+            ctr = (xyz_all[0][good].mean(axis=0) if good.any()
+                   else np.zeros(3, dtype=np.float32))
+            xyz_all[0][bad_xyz[0]] = ctr
         for t in range(1, n_frames):
-            bad = nan_mask[t]
-            if bad.any():
-                xyz_all[t][bad] = xyz_all[t - 1][bad]
+            b = bad_xyz[t]
+            if b.any():
+                xyz_all[t][b] = xyz_all[t - 1][b]
+
+    # Quats: replace any non-finite or zero-norm quat with identity
+    # (w=1, xyz=0). One-shot rather than forward-fill — bad quats
+    # usually mean the fuse Kabsch hit a degenerate K-NN cluster and
+    # forward-fill won't make it better.
+    qn2 = (quat_all * quat_all).sum(axis=-1)             # (T,N)
+    bad_q = (~np.isfinite(qn2)) | (qn2 < 1e-12)
+    if bad_q.any():
+        n_bad = int(bad_q.sum())
+        print(f"  sanitizing {n_bad} bad quats (→ identity)")
+        quat_all[bad_q] = np.array([1, 0, 0, 0], dtype=np.float32)
 
     bbox_min = xyz_all.reshape(-1, 3).min(axis=0).astype(np.float32)
     bbox_max = xyz_all.reshape(-1, 3).max(axis=0).astype(np.float32)
+    # Belt-and-suspenders: if some axis still has zero/inf span, sanity-clip.
+    if not (np.isfinite(bbox_min).all() and np.isfinite(bbox_max).all()):
+        raise SystemExit(
+            f"non-finite bbox after sanitization: {bbox_min}..{bbox_max} — "
+            f"every frame had bad data on at least one axis"
+        )
 
     print(f"  quantizing  bbox={bbox_min.tolist()}..{bbox_max.tolist()}")
     xyz_q = _quantize_xyz(xyz_all, bbox_min, bbox_max)
