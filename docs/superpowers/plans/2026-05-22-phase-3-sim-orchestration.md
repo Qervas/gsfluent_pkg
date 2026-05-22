@@ -1297,7 +1297,88 @@ git commit -m "phase-3: sim_engines/mpm.py — MPMSimulationEngine (PG-aware spa
 
 ---
 
-### Task 6: core/sim_engines/mock.py — MockSimulationEngine
+### Task 6: Relocate MockSimulationEngine to core/sim_engines/mock.py
+
+**Files:**
+- Move: `server/tests/fixtures/mock_sim_engine.py` → `server/gsfluent/core/sim_engines/mock.py`
+- Modify: `server/gsfluent/core/sim_engines/__init__.py`
+- Modify: all `server/tests/` files importing the old path
+
+Phase 2 placed `MockSimulationEngine` under `server/tests/fixtures/mock_sim_engine.py` because the `core/sim_engines/` directory did not yet exist. Task 4 above creates that directory, so the spec's component table location (`core/sim_engines/mock.py`) is now reachable. Relocate the fixture so the import path matches the spec and so Task 7 (which evolves the mock with configurable failures) edits a single canonical file.
+
+- [ ] **Step 1: Move the file with git mv to preserve history**
+
+```bash
+cd /home/frankyin/Desktop/work/gsfluent_pkg
+git mv server/tests/fixtures/mock_sim_engine.py server/gsfluent/core/sim_engines/mock.py
+```
+
+Expected: `git status` shows `renamed: server/tests/fixtures/mock_sim_engine.py -> server/gsfluent/core/sim_engines/mock.py`.
+
+- [ ] **Step 2: Re-export from the sim_engines package**
+
+Open `server/gsfluent/core/sim_engines/__init__.py` and add `MockSimulationEngine` to the re-exports alongside the MPM symbols from Task 5:
+
+```python
+"""Concrete SimulationEngine implementations."""
+from gsfluent.core.sim_engines.mock import MockSimulationEngine
+from gsfluent.core.sim_engines.mpm import (
+    MPMErrorPattern,
+    MPMSimulationEngine,
+    classify_stderr,
+    load_error_patterns,
+)
+
+__all__ = [
+    "MockSimulationEngine",
+    "MPMErrorPattern",
+    "MPMSimulationEngine",
+    "classify_stderr",
+    "load_error_patterns",
+]
+```
+
+- [ ] **Step 3: grep + update all import references across `server/tests/`**
+
+Find every file that imports the old path:
+
+```bash
+cd /home/frankyin/Desktop/work/gsfluent_pkg
+grep -rn "tests.fixtures.mock_sim_engine\|from tests\.fixtures\.mock_sim_engine\|fixtures/mock_sim_engine" server/tests/
+```
+
+For each match, rewrite the import. Example transformation:
+
+```python
+# before
+from tests.fixtures.mock_sim_engine import MockSimulationEngine
+
+# after
+from gsfluent.core.sim_engines.mock import MockSimulationEngine
+```
+
+Known call sites from Phase 2: `server/tests/integration/test_phase2_e2e_smoke.py`, plus any ad-hoc smoke scripts referenced in Phase 2 Task 10's verification step.
+
+- [ ] **Step 4: Run the full test suite to confirm no broken imports**
+
+```bash
+cd /home/frankyin/Desktop/work/gsfluent_pkg/server
+PYTHONPATH=. python -m pytest tests/ -v --tb=short 2>&1 | tail -30
+```
+
+Expected: every Phase 2 test that previously imported from `tests.fixtures.mock_sim_engine` now resolves through `gsfluent.core.sim_engines.mock` and passes. No ImportError lines.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /home/frankyin/Desktop/work/gsfluent_pkg
+git add server/gsfluent/core/sim_engines/__init__.py server/tests/
+git commit -m "phase-3: relocate MockSimulationEngine to core/sim_engines/mock.py"
+```
+
+---
+
+### Task 7: core/sim_engines/mock.py — MockSimulationEngine
 
 **Files:**
 - Create: `server/gsfluent/core/sim_engines/mock.py`
@@ -1590,7 +1671,7 @@ git commit -m "phase-3: sim_engines/mock.py — MockSimulationEngine (configurab
 
 ---
 
-### Task 7: tests/fixtures/mock_sim.sh — configurable fake sim script
+### Task 8: tests/fixtures/mock_sim.sh — configurable fake sim script
 
 **Files:**
 - Create: `server/tests/fixtures/__init__.py`
@@ -1750,7 +1831,7 @@ git commit -m "phase-3: tests/fixtures/mock_sim.sh — configurable fake sim bin
 
 ---
 
-### Task 8: Slim server/tools/run_sim.sh to a 20-line conda-activate shim
+### Task 9: Slim server/tools/run_sim.sh to a 20-line conda-activate shim
 
 **Files:**
 - Modify: `server/tools/run_sim.sh` (197 lines -> ~25 lines)
@@ -1826,7 +1907,7 @@ git commit -m "phase-3: tools/run_sim.sh — shrink to 25-line conda-activate sh
 
 ---
 
-### Task 9: Add PG-aware spawn + signal escalation to AsyncioRunManager
+### Task 10: Add PG-aware spawn + signal escalation to AsyncioRunManager
 
 **Files:**
 - Modify: `server/gsfluent/core/run_manager.py` (Phase 2's `AsyncioRunManager`)
@@ -2161,7 +2242,7 @@ git commit -m "phase-3: run_manager — spawn_in_new_pg (start_new_session=True)
 
 ---
 
-### Task 10: Wall-time enforcement in AsyncioRunManager
+### Task 11: Wall-time enforcement in AsyncioRunManager
 
 **Files:**
 - Modify: `server/gsfluent/core/run_manager.py`
@@ -2350,7 +2431,7 @@ git commit -m "phase-3: run_manager — run_with_wall_time helper (asyncio.wait_
 
 ---
 
-### Task 11: Strict Pydantic + cap checking in api/runs.py
+### Task 12: Strict Pydantic + cap checking in api/runs.py
 
 **Files:**
 - Modify: `server/gsfluent/api/runs.py`
@@ -2753,7 +2834,7 @@ git commit -m "phase-3: api/runs.py — strict Pydantic StartRunRequest + check_
 
 ---
 
-### Task 12: Wire MPMSimulationEngine into composition.py
+### Task 13: Wire MPMSimulationEngine into composition.py
 
 **Files:**
 - Modify: `server/gsfluent/composition.py`
@@ -2853,7 +2934,7 @@ git commit -m "phase-3: composition.py — wire MPMSimulationEngine (require_gpu
 
 ---
 
-### Task 13: Integration test — cancel kills the process group
+### Task 14: Integration test — cancel kills the process group
 
 **Files:**
 - Create: `server/tests/integration/__init__.py`
@@ -3144,7 +3225,7 @@ git commit -m "phase-3: integration/test_cancel_kills_pg — verify SIGTERM-to-P
 
 ---
 
-### Task 14: Integration test — SIGTERM-ignoring sim gets SIGKILL
+### Task 15: Integration test — SIGTERM-ignoring sim gets SIGKILL
 
 **Files:**
 - Create: `server/tests/integration/test_sigterm_ignoring_sim_gets_sigkill.py`
@@ -3279,7 +3360,7 @@ git commit -m "phase-3: integration/test_sigterm_ignoring_sim_gets_sigkill — S
 
 ---
 
-### Task 15: Integration test — wall-time enforced
+### Task 16: Integration test — wall-time enforced
 
 **Files:**
 - Create: `server/tests/integration/test_wall_time_enforced.py`
@@ -3422,7 +3503,7 @@ git commit -m "phase-3: integration/test_wall_time_enforced — asyncio.wait_for
 
 ---
 
-### Task 16: Integration test — recipe rejected early (no subprocess spawn)
+### Task 17: Integration test — recipe rejected early (no subprocess spawn)
 
 **Files:**
 - Create: `server/tests/integration/test_recipe_rejected_early.py`
@@ -3566,7 +3647,7 @@ git commit -m "phase-3: integration/test_recipe_rejected_early — over-cap and 
 
 ---
 
-### Task 17: Integration test — sim error classification (parametrized)
+### Task 18: Integration test — sim error classification (parametrized)
 
 **Files:**
 - Create: `server/tests/integration/test_sim_error_classification.py`
@@ -3718,7 +3799,7 @@ git commit -m "phase-3: integration/test_sim_error_classification — parametriz
 
 ---
 
-### Task 18: Phase 3 verification + branch handoff
+### Task 19: Phase 3 verification + branch handoff
 
 **Files:**
 - No file edits in this task.

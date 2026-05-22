@@ -2868,6 +2868,7 @@ direct runner.start_run() calls to Depends(get_run_manager).submit().
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -2877,6 +2878,9 @@ from gsfluent.core.state import (
     RunStateStore,
     is_pid_alive_with_starttime,
 )
+from gsfluent.protocols.cache import CacheCodec
+from gsfluent.protocols.fuse import Fuser
+from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.runs import (
     CapExceededError,
     RecoveryReport,
@@ -2887,7 +2891,8 @@ from gsfluent.protocols.runs import (
     TERMINAL_RUN_STATES,
     ValidationError,
 )
-from gsfluent.protocols.sim import ModelRef, ValidatedRecipe
+from gsfluent.protocols.sim import ModelRef, SimulationEngine, ValidatedRecipe
+from gsfluent.protocols.storage import Storage
 
 
 def _runner_state_to_run_state(legacy: str) -> RunState:
@@ -2904,11 +2909,68 @@ def _runner_state_to_run_state(legacy: str) -> RunState:
 class AsyncioRunManager:
     """RunManager Protocol shim over the existing core.runner module functions.
 
-    Construction:
-        mgr = AsyncioRunManager(state_store=RunStateStore(state_dir=...))
+    Construction (Phase 2; Phase-2 callers should pass the new collaborators
+    even though the shim doesn't dispatch through them yet — Phase 3 wires
+    them up):
+        mgr = AsyncioRunManager(
+            sim_engine=sim_engine,
+            fuser=fuser,
+            cache_codec=cache_codec,
+            storage=storage,
+            obs=obs,
+            state_store=RunStateStore(state_dir=...),
+            wall_time_cap_sec=cfg.caps.wall_time_sec,
+            particle_count_cap=cfg.caps.particle_count,
+        )
+
+    Attribute names are part of the cross-plan contract — Phase 3 and Phase 6
+    reference `_state`, `_obs`, `_procs`, `_futures` directly. The full
+    construction signature is reserved at Phase 2 even though several
+    collaborators (sim_engine, fuser, cache_codec, storage) are stub /
+    optional here; Phase 3 populates them when the manager owns the
+    lifecycle directly instead of delegating to runner.py.
+
+    | Attribute                | Purpose                                          |
+    |--------------------------|--------------------------------------------------|
+    | `_sim`                   | SimulationEngine (Phase 3 owns; Phase 2 stub)    |
+    | `_fuser`                 | Fuser (Phase 3 owns; Phase 2 stub)               |
+    | `_codec`                 | CacheCodec (Phase 3 owns; Phase 2 stub)          |
+    | `_storage`               | Storage (Phase 3 owns; Phase 2 stub)             |
+    | `_obs`                   | EventEmitter — emits structured run.* events     |
+    | `_state`                 | RunStateStore — persisted lifecycle records      |
+    | `_procs`                 | run_id -> live subprocess (populated Phase 3)    |
+    | `_futures`               | run_id -> completion Future; resolved by         |
+    |                          | `_run_to_completion` callback. `wait_for(rid)`   |
+    |                          | awaits this.                                     |
+    | `_tasks`                 | run_id -> asyncio.Task running `_run_to_completion` |
+    | `_wall_time_cap_sec`     | Backend wall-time cap from CapConfig             |
+    | `_particle_count_cap`    | Backend particle-count cap from CapConfig        |
     """
 
-    def __init__(self, state_store: RunStateStore) -> None:
+    def __init__(
+        self,
+        sim_engine: SimulationEngine,
+        fuser: Fuser,
+        cache_codec: CacheCodec,
+        storage: Storage,
+        obs: EventEmitter,
+        state_store: RunStateStore,
+        wall_time_cap_sec: int,
+        particle_count_cap: int,
+    ) -> None:
+        self._sim = sim_engine
+        self._fuser = fuser
+        self._codec = cache_codec
+        self._storage = storage
+        self._obs = obs
+        self._state = state_store
+        self._procs: dict[RunId, asyncio.subprocess.Process] = {}
+        self._futures: dict[RunId, asyncio.Future[None]] = {}
+        self._tasks: dict[RunId, asyncio.Task[None]] = {}
+        self._wall_time_cap_sec = wall_time_cap_sec
+        self._particle_count_cap = particle_count_cap
+        # Phase 2 keeps the legacy state_store alias for back-compat with the
+        # shim's submit/cancel/status/recover_on_boot bodies below.
         self._state_store = state_store
 
     async def submit(
@@ -3029,6 +3091,30 @@ class AsyncioRunManager:
             interrupted=interrupted,
             terminal_already=terminal_already,
         )
+
+    async def wait_for(self, run_id: RunId) -> RunStatus:
+        """Block until the run reaches a terminal state, then return final status.
+
+        Used by tests + observability flows that want to assert on completion.
+        Implementation: each submitted run has an asyncio.Future kept in
+        self._futures; wait_for awaits it. The Future is resolved by the
+        run-completion callback in _run_to_completion.
+        """
+        if run_id not in self._futures:
+            raise KeyError(f"unknown run_id: {run_id}")
+        await self._futures[run_id]
+        return await self.status(run_id)
+```
+
+Add a corresponding test step in `server/tests/runs/test_asyncio_run_manager.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_wait_for_blocks_until_terminal(run_manager, model_ref):
+    rid = await run_manager.submit({"particle_count": 100, "wall_time_sec": 30},
+                                    model=model_ref)
+    status = await run_manager.wait_for(rid)
+    assert status.state in TERMINAL_RUN_STATES
 ```
 
 - [ ] **Step 4: Run tests, confirm pass**
