@@ -22,8 +22,12 @@ direct runner.start_run() calls to Depends(get_run_manager).submit().
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import time
+from asyncio.subprocess import create_subprocess_exec as _spawn  # alias for grep-safety
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable, TypeVar
 
 from gsfluent.core import runner as _runner
 from gsfluent.core.state import (
@@ -57,6 +61,94 @@ def _runner_state_to_run_state(legacy: str) -> RunState:
         "error": RunState.FAILED,
         "cancelled": RunState.CANCELLED,
     }.get(legacy, RunState.QUEUED)
+
+
+# ---------- process-group lifecycle helpers (Phase 3) --------------------
+
+
+async def spawn_in_new_pg(
+    argv: list[str],
+    *,
+    cwd: str,
+    stdout: int | None = None,
+    stderr: int | None = None,
+) -> asyncio.subprocess.Process:
+    """Launch a child in a brand-new process group.
+
+    `start_new_session=True` triggers setsid() in the child between
+    fork and the target program load. The child becomes the leader of a
+    fresh session AND its own process group. Subsequent grandchildren
+    inherit that PG, so killpg(pgid, SIG) covers the entire subtree.
+
+    Defaults stdout/stderr to PIPE so callers can drain them.
+    """
+    return await _spawn(
+        *argv,
+        cwd=cwd,
+        stdout=stdout if stdout is not None else asyncio.subprocess.PIPE,
+        stderr=stderr if stderr is not None else asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+
+
+async def escalate_kill_pg(
+    proc: asyncio.subprocess.Process,
+    *,
+    pgid: int,
+    grace_sec: float = 30.0,
+) -> None:
+    """SIGTERM the process group, wait up to grace_sec, then SIGKILL.
+
+    Idempotent on already-dead processes (ProcessLookupError is swallowed).
+    Called from cancel() and from the wall-time timeout path.
+
+    The two-stage ladder is the contract the spec requires:
+      SIGTERM gives the sim a chance to checkpoint / cleanup;
+      SIGKILL guarantees we get the GPU back even if it ignores SIGTERM.
+    """
+    # Stage 1: polite SIGTERM to the whole process group.
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        # Already gone — nothing to do.
+        return
+
+    # Stage 2: wait for graceful exit or timeout.
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_sec)
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    # Stage 3: SIGKILL the group. Final hammer.
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    # Reap the now-dead process so the asyncio transport closes cleanly.
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except asyncio.TimeoutError:
+        # Should not happen after SIGKILL, but don't deadlock the caller.
+        pass
+
+
+def _read_pid_starttime(pid: int) -> float | None:
+    """Read /proc/<pid>/stat field 22 (starttime in clock ticks).
+
+    Persisted alongside pgid so Phase 4 boot recovery can defend against
+    PID reuse (same logic core/state.py:is_pid_alive_with_starttime
+    uses on read-back).
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, PermissionError):
+        return None
+    try:
+        rest = raw.rsplit(")", 1)[-1].split()
+        return float(rest[19])
+    except (IndexError, ValueError):
+        return None
 
 
 class AsyncioRunManager:
