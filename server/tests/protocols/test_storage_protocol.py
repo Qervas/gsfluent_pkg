@@ -1,0 +1,78 @@
+"""Conformance tests for the Storage Protocol.
+
+Any concrete Storage impl must pass these tests. Concrete impls land
+in Phase 2 (FilesystemStorage). Phase 1 uses an in-memory stub to
+verify the contract shape.
+"""
+import io
+from typing import AsyncIterator
+
+import pytest
+
+from gsfluent.protocols.storage import Storage, StorageStat
+
+
+class _InMemoryStorage:
+    """Stub Storage impl backed by a dict[str, bytes] — for protocol shape verification."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, bytes] = {}
+        self._mtime: dict[str, float] = {}
+
+    async def put(self, key: str, src, metadata: dict[str, str]) -> dict:
+        body = src.read()
+        self._data[key] = body
+        self._mtime[key] = 0.0  # deterministic for tests
+        return {"key": key, "size": len(body)}
+
+    async def get(self, key: str) -> AsyncIterator[bytes]:
+        async def _gen():
+            yield self._data[key]
+        return _gen()
+
+    async def get_range(self, key: str, start: int, end: int | None) -> AsyncIterator[bytes]:
+        sl = self._data[key][start:end]
+        async def _gen():
+            yield sl
+        return _gen()
+
+    async def stat(self, key: str) -> StorageStat | None:
+        if key not in self._data:
+            return None
+        return StorageStat(
+            size=len(self._data[key]),
+            mtime=self._mtime[key],
+            etag=f'"{len(self._data[key])}-{int(self._mtime[key])}"',
+        )
+
+    async def exists(self, key: str) -> bool:
+        return key in self._data
+
+
+def test_stub_satisfies_storage_protocol() -> None:
+    stub: Storage = _InMemoryStorage()
+    assert isinstance(stub, Storage)
+
+
+@pytest.mark.asyncio
+async def test_put_then_stat_returns_size_and_etag() -> None:
+    s = _InMemoryStorage()
+    await s.put("a.gsq", io.BytesIO(b"abc"), {})
+    st = await s.stat("a.gsq")
+    assert st is not None
+    assert st.size == 3
+    assert st.etag.startswith('"3-')
+
+
+@pytest.mark.asyncio
+async def test_stat_returns_none_for_missing_key() -> None:
+    s = _InMemoryStorage()
+    assert (await s.stat("nope.gsq")) is None
+
+
+@pytest.mark.asyncio
+async def test_exists_reflects_put() -> None:
+    s = _InMemoryStorage()
+    assert (await s.exists("a")) is False
+    await s.put("a", io.BytesIO(b"x"), {})
+    assert (await s.exists("a")) is True
