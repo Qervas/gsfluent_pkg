@@ -100,3 +100,101 @@ jobs:
           name: frontend-dist
           path: frontend2/dist
           retention-days: 7
+
+  gsfluent-unit:
+    name: gsfluent unit + protocol conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install gsfluent dev deps
+        working-directory: server
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Run unit + conformance tests
+        working-directory: server
+        run: |
+          PYTHONPATH=. pytest \
+            tests/protocols/ tests/observability/ tests/core/ \
+            tests/codecs/ tests/sim_engines/ tests/storage/ \
+            tests/fusers/ tests/runs/ tests/api/ \
+            tests/test_config.py tests/test_composition.py \
+            -v --tb=short
+
+      - name: Re-run baseline tests (no-regression gate)
+        working-directory: server
+        run: |
+          PYTHONPATH=. pytest \
+            tests/test_cells.py tests/test_coord_convert.py \
+            tests/test_frame_stream.py tests/test_health.py \
+            tests/test_library_smoke.py tests/test_models.py \
+            tests/test_recipes.py tests/test_runner.py \
+            tests/test_runs_api.py tests/test_schemas.py \
+            tests/test_sequences_import.py tests/test_zup_invariant.py \
+            -v --tb=short
+
+  gsfluent-integration:
+    name: gsfluent integration (mock_sim)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install gsfluent dev deps
+        working-directory: server
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Run integration tests (uses mock_sim.sh, no GPU required)
+        working-directory: server
+        run: PYTHONPATH=. pytest tests/integration/ -v --tb=short
+
+  gsfluent-lint:
+    name: gsfluent ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install gsfluent dev deps
+        working-directory: server
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: ruff check
+        working-directory: server
+        run: ruff check gsfluent/ tests/
+
+  gsfluent-typecheck:
+    name: gsfluent mypy --strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install gsfluent dev deps
+        working-directory: server
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: mypy --strict gsfluent/ (scoped to bulletproofing-slice modules)
+        working-directory: server
+        run: mypy
