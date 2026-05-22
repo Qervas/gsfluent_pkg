@@ -25,6 +25,7 @@ from gsfluent.config import AppConfig
 from gsfluent.core.codecs.gsq import GSQCodec
 from gsfluent.core.fusers.knn_kabsch import KNNKabschFuser
 from gsfluent.core.run_manager import AsyncioRunManager
+from gsfluent.core.sim_engines.mpm import MPMSimulationEngine
 from gsfluent.core.state import RunStateStore
 from gsfluent.observability.jsonlog import StdlibJSONEmitter
 from gsfluent.protocols.cache import CacheCodec
@@ -140,19 +141,19 @@ def build_app(cfg: AppConfig) -> FastAPI:
     fuser: Fuser = KNNKabschFuser(k=8)
     state_store = RunStateStore(state_dir=cfg.work_dir / "_state" / "runs")
 
-    # Phase 2 shim placeholder: MPMSimulationEngine lands in Phase 3 and
-    # replaces this. The Phase 2 shim delegates to core.runner module
-    # functions and never dispatches through `sim_engine`, so a placeholder
-    # that raises on use is the safest fail-loud Phase 3-trigger.
-    class _DeferredSimEngine:
-        async def run(self, *a, **kw):
-            raise NotImplementedError(
-                "Phase 3 wires MPMSimulationEngine here; Phase 2's shim still "
-                "delegates to core.runner module functions and must not call this."
-            )
+    # Phase 3: real MPMSimulationEngine (the deferred placeholder is gone).
+    # Honor GSFLUENT_REQUIRE_GPU (default "1") so CI / tests on CPU-only hosts
+    # can drop preflight without rebuilding the composition root.
+    sim_engine = MPMSimulationEngine(
+        sim_home=cfg.sim_home,
+        sim_python=cfg.sim_python,
+        sim_env=cfg.sim_env,
+        require_gpu=os.environ.get("GSFLUENT_REQUIRE_GPU", "1") == "1",
+        sim_fast=os.environ.get("GSFLUENT_SIM_FAST", "0") == "1",
+    )
 
     run_mgr: RunManager = AsyncioRunManager(
-        sim_engine=_DeferredSimEngine(),
+        sim_engine=sim_engine,
         fuser=fuser,
         cache_codec=cache_codec,
         storage=storage,
