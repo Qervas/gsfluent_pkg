@@ -7,6 +7,14 @@ from gsfluent.protocols.cache import (
     DecodedFrame,
     SplatFrame,
 )
+from gsfluent.protocols.fuse import (
+    Correspondence,
+    FuseDegenerateClusterError,
+    FuseError,
+    FuseNonFiniteInputError,
+    Fuser,
+    ParticleFrame,
+)
 from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.storage import (
     Storage,
@@ -22,8 +30,14 @@ __all__ = [
     "CacheMetadata",
     "CodecError",
     "CodecUnsanitizableError",
+    "Correspondence",
     "DecodedFrame",
     "EventEmitter",
+    "FuseDegenerateClusterError",
+    "FuseError",
+    "FuseNonFiniteInputError",
+    "Fuser",
+    "ParticleFrame",
     "SplatFrame",
     "Storage",
     "StorageError",
