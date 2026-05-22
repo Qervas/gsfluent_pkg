@@ -208,25 +208,213 @@ total, all annotated.
 
 ## Manual verifications
 
+The five manual verifications below split into two buckets:
+
+- **Deferred to deployment** (Tasks 13, 14, 15): require a real
+  systemd-installed backend running as the `gsfluent` user under
+  `/opt/gsfluent`. The current dev box has systemd available
+  (`systemd 259, Fedora 44`) but the unit is not installed there
+  (and would need root + ownership reshuffling). The exact runbook is
+  preserved in the plan file at `docs/superpowers/plans/2026-05-22-phase-7-done-sweep.md`
+  and the unit-file syntax was verified with `systemd-analyze verify`
+  (see Task 15 below).
+- **Executed in-band** (Tasks 16, 17): use the FastAPI TestClient
+  (in-process composition root) and the existing integration suite as
+  reproducible proxies for the live-service checks.
+
+Automated coverage for each manual scenario exists in the test suite,
+so the live verifications are operator-facing acceptance, not
+correctness signals.
+
 ### Kill -9 mid-sim → interrupted
 
-(Task 13 output.)
+Status: **deferred to deployment** — requires a real
+systemd-supervised backend with a running sim subprocess that can be
+SIGKILLed via `systemctl kill -s KILL` or by killing the unit's MainPID.
+
+Automated equivalent: `tests/integration/test_restart_mid_run_recovers.py`
+(5 tests, all green):
+- `test_restart_marks_dead_in_flight_run_as_interrupted` — Flow C
+  contract: in-flight run without live PID → marked `interrupted` with
+  `error.kind = internal.backend_restarted`.
+- `test_restart_preserves_terminal_records_across_boots` — terminal
+  runs untouched.
+- `test_restart_reattaches_truly_live_run` — live PID + matching
+  start-time → re-attach.
+- `test_no_orphan_subprocesses_referenced_after_recovery` — recovery
+  does not retain references to dead PIDs.
+- `test_no_orphan_via_ps_after_recovery` — sanity check that ps shows
+  no orphaned sim processes after the reconciliation pass.
+
+The kill-9 / restart / recover loop is the exact path these tests
+exercise; the live verification only adds "systemd restarted the
+service automatically and the next boot saw the persisted state".
+
+Runbook for live verification (preserved from plan Task 13):
+
+```bash
+# 1. Find the long-running recipe and submit it.
+PORT=7869
+RUN_ID=$(curl -s -X POST "http://127.0.0.1:${PORT}/api/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"run_name":"kill9_test","model_path":"/opt/gsfluent/models/jelly","recipe_source":"jelly","recipe_data":{"material":"jelly","wall_time_sec":120},"particles":100000}' \
+    | jq -r '.run_id')
+
+# 2. Wait until the run is `started`, then SIGKILL the backend.
+sleep 10
+MAIN_PID=$(systemctl show -p MainPID --value gsfluent-backend.service)
+sudo kill -9 "$MAIN_PID"
+
+# 3. systemd restarts. Read the run record.
+sleep 8
+curl -s "http://127.0.0.1:${PORT}/api/runs/${RUN_ID}" | jq '.state, .error.kind'
+# Expected: "interrupted", "internal.backend_restarted"
+```
 
 ### Happy-path journalctl event chain
 
-(Task 14 output.)
+Status: **deferred to deployment** — requires a live backend writing
+events to journald via systemd's stdout-capture.
+
+Automated equivalent: `tests/observability/test_event_taxonomy.py`
+(4 tests, all green):
+- `test_happy_path_emits_full_lifecycle` — exact event sequence
+  `run.queued → run.started → run.preflight_ok → sim.started → sim.completed
+   → run.simmed → run.fused → run.packed → run.completed` verified
+  in-process.
+- `test_every_event_carries_run_id_and_sequence_name` — context
+  threading via `EventEmitter.child()` verified.
+- `test_sim_error_emits_error_sim_event_and_run_failed` — Flow D
+  taxonomy (`error.sim.*` + `run.failed`).
+- `test_cancel_emits_cancelling_and_cancelled` — Flow B taxonomy
+  (`run.cancelling` + `run.cancelled`).
+
+The integration test captures the same events the live journal would
+show; live verification only adds the journald routing layer.
+
+Runbook for live verification (preserved from plan Task 14):
+
+```bash
+SINCE=$(date -Iseconds)
+# ... submit a happy-path recipe via curl, wait for completion ...
+sudo journalctl -u gsfluent-backend --since "$SINCE" -o cat \
+    | grep -E '"event":' \
+    | jq -c "select(.run_id == \"$RUN_ID\") | {ts, event}"
+```
 
 ### Fresh systemd install
 
-(Task 15 output.)
+Status: **partially executed** — the unit file was syntax-validated
+in-band; full install (`systemctl link` + `enable` + `start`) is
+deferred to deployment.
+
+Executed:
+
+```
+$ systemd-analyze verify deploy/gsfluent-backend.dev.service
+(exit 0, no output)
+
+$ systemd-analyze verify deploy/gsfluent-backend.service
+gsfluent-backend.service: Command /opt/gsfluent/.venv/bin/uvicorn is not executable: Aucun fichier ou dossier de ce nom
+```
+
+The prod unit (`gsfluent-backend.service`) references `/opt/gsfluent/.venv/bin/uvicorn`
+which doesn't exist on this dev box — that's *expected* (the unit is
+configured for the production deploy target). The dev unit
+(`gsfluent-backend.dev.service`) validates clean, confirming all the
+unit-file syntax (Type=notify, WatchdogSec=30s, KillMode=mixed,
+ProtectSystem=strict, ReadWritePaths) parses correctly under
+systemd 259.
+
+Deferred:
+
+- `systemctl link "$(pwd)/deploy/gsfluent-backend.service"`
+- `systemctl enable --now gsfluent-backend.service`
+- `systemctl status gsfluent-backend.service` showing
+  `Active: active (running)`
+- `systemctl show -p NRestarts --value` showing `0`
+- 2-minute watchdog-firing observation
+
+All deferred steps require root + a configured `gsfluent` user +
+the repo checked out at `/opt/gsfluent`. The Phase 4 deploy README
+covers the exact install procedure.
 
 ### Cap-violating recipe rejected without subprocess
 
-(Task 16 output.)
+Status: **executed in-band** via FastAPI TestClient against the
+composition root.
+
+```
+$ PYTHONPATH=. python -c "
+... # builds app from composition.build_app(AppConfig.from_env())
+client.post('/api/runs', json={
+    'run_name': 'cap_test_violation',
+    'model_path': str(tmp),
+    'recipe_source': 'jelly',
+    'recipe_data': {'material': 'jelly', 'wall_time_sec': 60},
+    'particles': 800000,
+})
+"
+
+State dir count before: 0
+Status: 422
+{
+  "detail": {
+    "error": {
+      "kind": "cap_exceeded.particle_count",
+      "message": "Particle count 800000 exceeds limit 500000 (set GSFLUENT_MAX_PARTICLE_COUNT to raise)",
+      "details": {
+        "requested": 800000,
+        "limit": 500000
+      },
+      "trace_id": "74151fcc654e4d81b02dd715b21e2311"
+    }
+  }
+}
+State dir count after: 0
+Delta: 0
+```
+
+Cap-violating recipe (`particles=800000`, default limit `500000`)
+rejected with HTTP 422; structured error envelope matches the spec
+shape (`kind`, `message`, `details`, `trace_id`); no run-state file
+created (`work/_state/runs/` count delta = 0); no subprocess spawned
+(TestClient is in-process, no fork happens by construction). The
+cap-check fires at the API boundary *before* `state.create_run_record()`
+per spec line 401.
 
 ### Streaming cache hit
 
-(Task 17 output.)
+Status: **executed in-band** via the integration suite.
+
+```
+$ pytest tests/integration/test_streaming_cache_hit.py -v
+tests/integration/test_streaming_cache_hit.py::test_second_sync_uses_head_and_skips_body PASSED
+tests/integration/test_streaming_cache_hit.py::test_local_etag_matches_server_etag PASSED
+======== 2 passed in 0.20s =========
+```
+
+- `test_second_sync_uses_head_and_skips_body` — second `_sync_cell_gsq_streaming`
+  call issues a HEAD, sees the ETag match the on-disk cache, and skips
+  the body download. Emits `cell.cache.hit` event.
+- `test_local_etag_matches_server_etag` — the server's
+  `_gsq_etag(size, mtime)` is byte-identical to what the client
+  computes for the same file, so HEAD→304 logic round-trips.
+
+Runbook for live verification (preserved from plan Task 17):
+
+```bash
+SEQ_NAME=<some-cached-sequence>
+curl -s -X POST "http://127.0.0.1:8092/set" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\": \"$SEQ_NAME\"}"
+sleep 5
+curl -s -X POST "http://127.0.0.1:8092/set" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\": \"$SEQ_NAME\"}"
+# Inspect viser_headless's event stream for cell.cache.hit on the
+# second call.
+```
 
 ---
 
