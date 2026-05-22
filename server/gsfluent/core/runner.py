@@ -483,13 +483,18 @@ def _write_sequence_meta(run_name: str, run_dir: Path) -> None:
 
 
 async def _rebuild_npz(run_name: str, run_dir: Path, log_path: Path) -> None:
-    """Invoke `server/tools/batch_convert_to_npz.py <run_name>` as a subprocess.
+    """Invoke `server/tools/pack_splats.py <run_name>` to build the .gsq cache.
 
-    Output is appended to the same run.log so a WS subscriber sees the
-    cache build progress as part of the run timeline. We don't fail the
-    run if the rebuild fails — the sequence still exists on disk, just
-    isn't viser-playable until the cache is built manually."""
-    converter = PKG_ROOT / "server" / "tools" / "batch_convert_to_npz.py"
+    Function name kept for back-compat; since 2026-05-22 the cache is .gsq
+    (visual-lossless quantized + zstd, ~3× smaller than .npz, streamable).
+    pack_splats reads frame_*.ply directly so this must run BEFORE the
+    runner's frame cleanup step.
+
+    Output is appended to the run.log so a WS subscriber sees the cache
+    build progress as part of the run timeline. We don't fail the run if
+    the rebuild fails — the sequence still exists on disk, just isn't
+    viser-playable until the cache is built manually."""
+    converter = PKG_ROOT / "server" / "tools" / "pack_splats.py"
     if not converter.is_file():
         return
     cmd = [sys.executable, str(converter), run_name]
@@ -497,21 +502,21 @@ async def _rebuild_npz(run_name: str, run_dir: Path, log_path: Path) -> None:
         proc = await _spawn(*cmd, stdout=PIPE, stderr=STDOUT, cwd=str(PKG_ROOT))
     except Exception as e:
         with log_path.open("a") as fh:
-            fh.write(f"[runner] npz rebuild spawn failed: {e}\n")
+            fh.write(f"[runner] cache build spawn failed: {e}\n")
         return
     assert proc.stdout is not None
     with log_path.open("a", buffering=1) as fh:
-        fh.write(f"[runner] building .npz cache for {run_name}…\n")
+        fh.write(f"[runner] building .gsq cache for {run_name}…\n")
         async for raw in proc.stdout:
             line = raw.decode(errors="replace").rstrip()
             if line:
-                fh.write(f"[npz] {line}\n")
+                fh.write(f"[gsq] {line}\n")
     rc = await proc.wait()
     with log_path.open("a") as fh:
         if rc == 0:
-            fh.write(f"[runner] .npz cache built for {run_name}\n")
+            fh.write(f"[runner] .gsq cache built for {run_name}\n")
         else:
-            fh.write(f"[runner] .npz cache build exited {rc} for {run_name}\n")
+            fh.write(f"[runner] .gsq cache build exited {rc} for {run_name}\n")
 
 
 async def wait_for_run(run_id: str) -> None:
