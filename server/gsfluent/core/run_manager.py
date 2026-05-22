@@ -316,6 +316,16 @@ class AsyncioRunManager:
             sequence_name=run_name,
         ))
 
+        # Per-run logger: bind run_id + sequence_name once so every
+        # downstream emit() in this run's scope auto-attaches that context.
+        # (Phase 6: required by the structured-observability invariant.)
+        run_obs = self._obs.child(run_id=rid, sequence_name=run_name)
+        run_obs.emit(
+            "run.queued",
+            particle_count=particles,
+            wall_time_cap=self._wall_time_cap_sec,
+        )
+
         # Background task drives the engine end-to-end. Holding the Future
         # in self._futures lets wait_for() block on it from tests + ops.
         loop = asyncio.get_event_loop()
@@ -323,7 +333,7 @@ class AsyncioRunManager:
         self._futures[rid] = fut
 
         task = asyncio.create_task(
-            self._run_to_completion(rid, recipe, model, run_name, fut)
+            self._run_to_completion(rid, recipe, model, run_name, fut, run_obs)
         )
         self._tasks[rid] = task
         return rid
@@ -335,8 +345,15 @@ class AsyncioRunManager:
         model: ModelRef,
         run_name: str,
         fut: asyncio.Future[None],
+        run_obs: EventEmitter,
     ) -> None:
-        """Background task: drive sim_engine.run() through to terminal state."""
+        """Background task: drive sim_engine.run() through to terminal state.
+
+        `run_obs` is the per-run emitter built by submit() (already bound
+        to run_id + sequence_name via obs.child()). Every event emitted in
+        this run's scope flows through it so journalctl + the SSE feed see
+        the same context on every line.
+        """
         # Wall-time cap: prefer recipe-supplied value, clamp to configured cap.
         recipe_wall = int(recipe.get("wall_time_sec", self._wall_time_cap_sec))
         wall_time = min(recipe_wall, self._wall_time_cap_sec)
@@ -346,9 +363,14 @@ class AsyncioRunManager:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Spying EventEmitter: intercepts sim.spawned to capture pid/pgid/
-        # pid_starttime and persist them onto the RunStateRecord.
+        # pid_starttime and persist them onto the RunStateRecord. Wraps
+        # run_obs (NOT self._obs) so the sim.* events also carry the bound
+        # run_id + sequence_name context. Also tracks whether the engine
+        # already emitted an error.* event so the unified except block
+        # below avoids double-emitting (spec invariant: one event per
+        # error at its boundary).
         mgr = self
-        outer_obs = self._obs.child(run_id=run_id) if hasattr(self._obs, "child") else self._obs
+        engine_error_emitted: set[str] = set()
 
         class _PidCapturingEmitter:
             def __init__(self, inner):
@@ -356,6 +378,8 @@ class AsyncioRunManager:
 
             def emit(self, event: str, **context):
                 self._inner.emit(event, **context)
+                if event.startswith("error."):
+                    engine_error_emitted.add(event)
                 if event == "sim.spawned":
                     pid = context.get("pid")
                     pgid = context.get("pgid")
@@ -377,12 +401,26 @@ class AsyncioRunManager:
                     return _PidCapturingEmitter(self._inner.child(**context))
                 return self
 
-        spying = _PidCapturingEmitter(outer_obs)
+        spying = _PidCapturingEmitter(run_obs)
+
+        # Preflight: catch env-missing errors early so the lifecycle event
+        # chain reflects whether the engine ever got to run. preflight() is
+        # best-effort here — engines that defer all checks to run() can
+        # no-op it.
+        try:
+            await self._sim.preflight()
+            run_obs.emit("run.preflight_ok")
+        except Exception:
+            # Re-raise so the unified except below records the failure with
+            # the right error.kind mapping.
+            raise
 
         # Mark STARTED before the engine fires up.
         rec = self._state_store.read(run_id)
         if rec is not None:
             self._state_store.write(rec.transition(state=RunState.STARTED))
+        started_at = time.time()
+        run_obs.emit("run.started", started_at=started_at)
 
         try:
             # Wall-time cap: on timeout we issue escalate_kill_pg against the
@@ -411,6 +449,16 @@ class AsyncioRunManager:
                 wall_time_sec=wall_time,
                 on_timeout=_on_timeout,
             )
+            # Lifecycle: sim done -> emit run.simmed. (Fuse + pack stages
+            # historically lived in the engine itself; if a future engine
+            # decomposes them back into the run manager those stages would
+            # also emit run.fused / run.packed here.)
+            run_obs.emit(
+                "run.simmed",
+                n_frames=result.n_frames,
+                duration_sec=result.duration_sec,
+            )
+
             # Success path.
             rec = self._state_store.read(run_id)
             if rec is not None:
@@ -419,9 +467,8 @@ class AsyncioRunManager:
                     finished_at=time.time(),
                     paths={"frames_dir": str(result.frames_dir)},
                 ))
-            self._obs.emit(
+            run_obs.emit(
                 "run.completed",
-                run_id=run_id,
                 n_frames=result.n_frames,
                 duration_sec=result.duration_sec,
             )
@@ -435,7 +482,12 @@ class AsyncioRunManager:
                     finished_at=time.time(),
                     error={"kind": "sim.wall_time_exceeded", "message": str(e)},
                 ))
-            self._obs.emit("run.failed", run_id=run_id, kind="sim.wall_time_exceeded")
+            run_obs.emit(
+                "error.sim.wall_time_exceeded",
+                wall_time_sec=wall_time,
+                message=str(e),
+            )
+            run_obs.emit("run.failed", kind="sim.wall_time_exceeded")
             if not fut.done():
                 fut.set_result(None)
         except asyncio.CancelledError:
@@ -447,7 +499,7 @@ class AsyncioRunManager:
                     state=RunState.CANCELLED,
                     finished_at=time.time(),
                 ))
-            self._obs.emit("run.cancelled", run_id=run_id)
+            run_obs.emit("run.cancelled")
             if not fut.done():
                 fut.set_result(None)
             raise
@@ -478,7 +530,46 @@ class AsyncioRunManager:
                     finished_at=time.time(),
                     error={"kind": mapped_kind, "message": str(e)},
                 ))
-            self._obs.emit("run.failed", run_id=run_id, kind=mapped_kind, error=str(e))
+            # Boundary event: one structured emit per error per spec invariant.
+            # MPMSimulationEngine already emits its own classified
+            # error.sim.* events from inside run(); only mirror an
+            # error.* event from the run manager when the engine did NOT
+            # have a chance to do so itself (typically preflight() and
+            # internal failures).
+            internal_kind = f"internal.{kind.lower()}"
+            if mapped_kind == internal_kind:
+                run_obs.emit(
+                    "error.internal",
+                    where="run_to_completion",
+                    error_type=kind,
+                    message=str(e),
+                )
+            elif mapped_kind in {
+                "sim.env_missing",
+                "sim.interpreter_missing",
+                "sim.gpu_unavailable",
+            }:
+                # Preflight-class errors: the engine raised before its own
+                # error.sim.* emission path, so the run manager mirrors it.
+                run_obs.emit(
+                    f"error.{mapped_kind}",
+                    message=str(e),
+                )
+            else:
+                # sim.gpu_oom / sim.unstable_recipe / sim.crashed: the
+                # MPM engine already emits the matching error.sim.* event
+                # from inside run() before raising. Spec invariant
+                # requires exactly one error event per failure: only
+                # mirror here when the engine did not (typical for test
+                # mocks that raise a typed SimError without emitting,
+                # see _OomSim in the taxonomy test).
+                expected_event = f"error.{mapped_kind}"
+                if expected_event not in engine_error_emitted:
+                    run_obs.emit(
+                        expected_event,
+                        message=str(e),
+                    )
+            run_obs.emit("run.failed", kind=mapped_kind, error=str(e))
             if not fut.done():
                 fut.set_result(None)
         finally:
@@ -502,6 +593,13 @@ class AsyncioRunManager:
         # Mark CANCELLING before tearing things down so a crash during
         # cancel still leaves a discoverable in-flight state.
         self._state_store.write(rec.transition(state=RunState.CANCELLING))
+        # Bind sequence_name so the emit matches the per-run logger contract
+        # other lifecycle events use.
+        cancel_obs = self._obs.child(
+            run_id=run_id,
+            sequence_name=rec.sequence_name,
+        ) if hasattr(self._obs, "child") else self._obs
+        cancel_obs.emit("run.cancelling")
 
         # Modern path: we own the task + pgid -> escalate signal ladder.
         task = self._tasks.get(run_id)
