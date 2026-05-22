@@ -18,12 +18,12 @@ from unittest.mock import patch
 
 import pytest
 
+from gsfluent.api.health import HealthStatus
 from gsfluent.composition import (
     WATCHDOG_INTERVAL_SEC,
     _should_send_watchdog,
     _watchdog_loop,
 )
-from gsfluent.api.health import HealthStatus
 
 
 def test_should_send_watchdog_true_when_ok():
@@ -43,8 +43,9 @@ def test_should_send_watchdog_false_when_down():
 @pytest.mark.asyncio
 async def test_watchdog_loop_emits_ping_when_status_ok(tmp_path: Path):
     """One iteration with status=ok and NOTIFY_SOCKET-mocked notify: ping seen."""
-    from gsfluent.observability.jsonlog import StdlibJSONEmitter
     import io
+
+    from gsfluent.observability.jsonlog import StdlibJSONEmitter
 
     stream = io.StringIO()
     obs = StdlibJSONEmitter(stream=stream)
@@ -74,8 +75,9 @@ async def test_watchdog_loop_emits_ping_when_status_ok(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_watchdog_loop_emits_suppressed_when_status_down(tmp_path: Path):
     """status=down -> we record a backend.watchdog.suppressed event but skip notify."""
-    from gsfluent.observability.jsonlog import StdlibJSONEmitter
     import io
+
+    from gsfluent.observability.jsonlog import StdlibJSONEmitter
 
     stream = io.StringIO()
     obs = StdlibJSONEmitter(stream=stream)
@@ -111,8 +113,9 @@ async def test_watchdog_loop_emits_suppressed_when_status_down(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_watchdog_loop_emits_ping_when_status_degraded(tmp_path: Path):
     """status=degraded -> ping is still sent (alive but worried)."""
-    from gsfluent.observability.jsonlog import StdlibJSONEmitter
     import io
+
+    from gsfluent.observability.jsonlog import StdlibJSONEmitter
 
     stream = io.StringIO()
     obs = StdlibJSONEmitter(stream=stream)

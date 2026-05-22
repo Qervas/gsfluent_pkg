@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 from plyfile import PlyData, PlyElement
 
-
 # Required full-3DGS attribute set, mirrors library._FULL_3DGS_ATTRS.
 _FULL_DTYPE = [
     ("x", "f4"), ("y", "f4"), ("z", "f4"),
@@ -93,7 +92,7 @@ def test_import_sequence_happy_path(tmp_path, monkeypatch):
 
 def test_import_sequence_explicit_name(tmp_path, monkeypatch):
     _isolate(monkeypatch, tmp_path)
-    from gsfluent.core.library import import_sequence, Sequence
+    from gsfluent.core.library import Sequence, import_sequence
 
     src = tmp_path / "raw_dump"
     src.mkdir()

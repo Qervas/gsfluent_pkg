@@ -26,7 +26,6 @@ from plyfile import PlyData, PlyElement
 from gsfluent.core.coord_convert import convert_full_3dgs_ply
 from gsfluent.core.frame_stream import parse_frame_xyz, parse_static_attrs
 
-
 _FULL_DTYPE = [
     ("x", "f4"), ("y", "f4"), ("z", "f4"),
     ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),

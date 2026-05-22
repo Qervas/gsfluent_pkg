@@ -21,15 +21,15 @@ import os
 import signal
 import time
 from asyncio.subprocess import create_subprocess_exec as _spawn  # alias for grep-safety
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, TypeVar
+from typing import TypeVar
 
 from gsfluent.core import runner as _runner
 from gsfluent.core.recovery import RecoveryDecision, classify_recovery
 from gsfluent.core.state import (
     RunStateRecord,
     RunStateStore,
-    is_pid_alive_with_starttime,
 )
 from gsfluent.protocols.cache import CacheCodec
 from gsfluent.protocols.fuse import Fuser
@@ -41,7 +41,6 @@ from gsfluent.protocols.runs import (
     RunId,
     RunState,
     RunStatus,
-    TERMINAL_RUN_STATES,
     ValidationError,
 )
 from gsfluent.protocols.sim import (
@@ -150,7 +149,7 @@ async def run_with_wall_time(
     """
     try:
         return await asyncio.wait_for(coro_factory(), timeout=wall_time_sec)
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as e:
         try:
             on_timeout()
         except Exception:
@@ -160,7 +159,7 @@ async def run_with_wall_time(
             pass
         raise SimWallTimeExceededError(
             f"Run exceeded wall-time cap of {wall_time_sec}s"
-        )
+        ) from e
 
 
 def _read_pid_starttime(pid: int) -> float | None:
@@ -257,8 +256,10 @@ class AsyncioRunManager:
         particles = recipe.get("_particles", 0)
         try:
             particles = int(particles)
-        except (TypeError, ValueError):
-            raise ValidationError(f"recipe '_particles' must be int; got {particles!r}")
+        except (TypeError, ValueError) as e:
+            raise ValidationError(
+                f"recipe '_particles' must be int; got {particles!r}"
+            ) from e
         if particles < 0:
             raise CapExceededError(f"particles must be >= 0; got {particles}")
 
@@ -508,8 +509,12 @@ class AsyncioRunManager:
             kind = type(e).__name__
             # Map common SimError subclasses to spec error.kind strings.
             from gsfluent.protocols.sim import (
-                GPUUnavailableError, SimCrashedError, SimEnvMissingError,
-                SimGpuOomError, SimInterpreterMissingError, SimUnstableRecipeError,
+                GPUUnavailableError,
+                SimCrashedError,
+                SimEnvMissingError,
+                SimGpuOomError,
+                SimInterpreterMissingError,
+                SimUnstableRecipeError,
             )
             kind_map = {
                 SimGpuOomError: "sim.gpu_oom",

@@ -6,12 +6,12 @@ events, recovers in-flight runs on boot. Concrete: AsyncioRunManager
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, NewType, Protocol, runtime_checkable
+from typing import Any, NewType, Protocol, runtime_checkable
 
 from gsfluent.protocols.sim import ModelRef, ValidatedRecipe
-
 
 RunId = NewType("RunId", str)
 """Opaque run identifier. Implementation defines format (ULID, UUIDv7, etc.)."""

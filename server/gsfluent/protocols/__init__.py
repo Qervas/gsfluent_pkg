@@ -17,6 +17,7 @@ from gsfluent.protocols.fuse import (
 )
 from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.runs import (
+    TERMINAL_RUN_STATES,
     CapExceededError,
     RecoveryReport,
     RunEvent,
@@ -24,15 +25,14 @@ from gsfluent.protocols.runs import (
     RunManager,
     RunState,
     RunStatus,
-    TERMINAL_RUN_STATES,
     ValidationError,
 )
 from gsfluent.protocols.sim import (
     GPUUnavailableError,
     ModelRef,
     SimCrashedError,
-    SimError,
     SimEnvMissingError,
+    SimError,
     SimGpuOomError,
     SimInterpreterMissingError,
     SimResult,

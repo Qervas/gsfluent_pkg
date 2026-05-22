@@ -10,10 +10,10 @@ import pytest
 from plyfile import PlyData, PlyElement
 
 from gsfluent.core.codecs.gsq import (
-    GSQCodec,
-    MAGIC,
     HEADER_SIZE,
     INDEX_ENTRY_SIZE,
+    MAGIC,
+    GSQCodec,
 )
 from gsfluent.protocols.cache import (
     CacheCodec,
@@ -43,10 +43,17 @@ def _write_full_3dgs_frame(path: Path, n: int = 10, *, seed: int = 0) -> None:
     verts["x"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["y"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["z"] = rng.uniform(-1, 1, n).astype(np.float32)
-    verts["f_dc_0"] = 0.0; verts["f_dc_1"] = 0.0; verts["f_dc_2"] = 0.0
+    verts["f_dc_0"] = 0.0
+    verts["f_dc_1"] = 0.0
+    verts["f_dc_2"] = 0.0
     verts["opacity"] = 1.0
-    verts["scale_0"] = -1.0; verts["scale_1"] = -1.0; verts["scale_2"] = -1.0
-    verts["rot_0"] = 1.0; verts["rot_1"] = 0.0; verts["rot_2"] = 0.0; verts["rot_3"] = 0.0
+    verts["scale_0"] = -1.0
+    verts["scale_1"] = -1.0
+    verts["scale_2"] = -1.0
+    verts["rot_0"] = 1.0
+    verts["rot_1"] = 0.0
+    verts["rot_2"] = 0.0
+    verts["rot_3"] = 0.0
     PlyData([PlyElement.describe(verts, "vertex")], text=False).write(path)
 
 

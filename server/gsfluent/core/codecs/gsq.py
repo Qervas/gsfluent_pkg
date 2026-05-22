@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import struct
 import time
+from collections.abc import AsyncIterator, Iterable, Sequence
 from pathlib import Path
-from typing import AsyncIterator, BinaryIO, Iterable, Sequence
+from typing import BinaryIO
 
 import numpy as np
 import zstandard as zstd
@@ -56,8 +57,10 @@ def _norm_quats(qw, qx, qy, qz):
     qn[qn == 0] = 1.0
     qw, qx, qy, qz = qw / qn, qx / qn, qy / qn, qz / qn
     flip = qw < 0
-    qw[flip] = -qw[flip]; qx[flip] = -qx[flip]
-    qy[flip] = -qy[flip]; qz[flip] = -qz[flip]
+    qw[flip] = -qw[flip]
+    qx[flip] = -qx[flip]
+    qy[flip] = -qy[flip]
+    qz[flip] = -qz[flip]
     return qw, qx, qy, qz
 
 
@@ -204,7 +207,7 @@ class GSQCodec:
                 good = ~bad_xyz[0]
                 if not good.any():
                     raise CodecUnsanitizableError(
-                        f"frame 0 has no finite positions; cannot encode"
+                        "frame 0 has no finite positions; cannot encode"
                     )
                 ctr = xyz_all[0][good].mean(axis=0)
                 xyz_all[0][bad_xyz[0]] = ctr

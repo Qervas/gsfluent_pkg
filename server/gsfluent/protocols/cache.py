@@ -10,14 +10,12 @@ their own keys.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from typing import (
     Any,
-    AsyncIterator,
     BinaryIO,
-    Iterable,
     Protocol,
-    Sequence,
     runtime_checkable,
 )
 

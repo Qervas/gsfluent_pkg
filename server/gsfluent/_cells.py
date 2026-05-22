@@ -49,7 +49,7 @@ class CellRef:
         return _paths.sequence_dir_for(self.name)
 
     @classmethod
-    def parse_wire(cls, s: str) -> "CellRef":
+    def parse_wire(cls, s: str) -> CellRef:
         if ":" not in s:
             raise ValueError(f"missing ':' in cell wire: {s!r}")
         kind, _, name = s.partition(":")

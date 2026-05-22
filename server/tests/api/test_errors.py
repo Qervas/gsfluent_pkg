@@ -8,8 +8,8 @@ from fastapi import HTTPException
 from gsfluent.api.errors import (
     api_error_envelope,
     new_trace_id,
-    raise_validation_error,
     raise_cap_exceeded,
+    raise_validation_error,
 )
 from gsfluent.protocols.runs import CapExceededError, ValidationError
 

@@ -8,8 +8,9 @@ without importing concrete impls.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator, BinaryIO, Protocol, runtime_checkable
+from typing import BinaryIO, Protocol, runtime_checkable
 
 
 class StorageError(Exception):

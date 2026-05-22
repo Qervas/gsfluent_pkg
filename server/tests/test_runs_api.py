@@ -1,7 +1,7 @@
 def _isolate(monkeypatch, tmp_path):
     """Redirect runner.FUSED_DIR + library.SEQUENCES_DIR to tmp paths so
     tests don't pick up real production data sitting in work/library/."""
-    from gsfluent.core import runner, library
+    from gsfluent.core import library, runner
     monkeypatch.setattr(library, "LIBRARY_ROOT", tmp_path / "library")
     monkeypatch.setattr(library, "SEQUENCES_DIR", tmp_path / "library" / "sequences")
     monkeypatch.setattr(library, "MODELS_DIR", tmp_path / "library" / "models")

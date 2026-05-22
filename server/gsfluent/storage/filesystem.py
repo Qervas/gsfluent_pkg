@@ -11,13 +11,12 @@ concurrent reads don't share offsets.
 """
 from __future__ import annotations
 
-import os
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator, BinaryIO
+from typing import BinaryIO
 
 from gsfluent.core.library_io import atomic_write_bytes
 from gsfluent.protocols.storage import (
-    Storage,
     StorageHandle,
     StorageNotFoundError,
     StorageStat,
@@ -136,10 +135,10 @@ class FilesystemStorage:
         end=None means to EOF. Reads in `_READ_CHUNK`-sized blocks so a large
         cache file streams without loading the whole thing into RAM.
         """
-        async def _gen():
+        async def _gen() -> AsyncIterator[bytes]:
             with open(path, "rb") as f:
                 f.seek(start)
-                remaining = (end - start) if end is not None else None
+                remaining: int | None = (end - start) if end is not None else None
                 while True:
                     chunk_size = _READ_CHUNK if remaining is None else min(_READ_CHUNK, remaining)
                     if chunk_size <= 0:

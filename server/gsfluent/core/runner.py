@@ -39,7 +39,6 @@ from asyncio.subprocess import PIPE, STDOUT
 from asyncio.subprocess import create_subprocess_exec as _spawn  # alias for grep-safety
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from ..server import PKG_ROOT
 from . import library as lib
@@ -99,10 +98,10 @@ FUSED_DIR = lib.SEQUENCES_DIR
 class Run:
     id: str
     name: str
-    proc: Optional[asyncio.subprocess.Process] = None
+    proc: asyncio.subprocess.Process | None = None
     state: str = "queued"
     log_lines: list[str] = field(default_factory=list)
-    drain_task: Optional[asyncio.Task] = None
+    drain_task: asyncio.Task | None = None
 
 
 _RUNS: dict[str, Run] = {}
@@ -486,7 +485,7 @@ def _write_sequence_meta(run_name: str, run_dir: Path) -> None:
         n_splats, bbox = lib.read_ply_bbox_and_count(frame0)
     else:
         n_splats, bbox = None, None
-    model_ref: Optional[str] = None
+    model_ref: str | None = None
     manifest_path = run_dir / "manifest.json"
     if manifest_path.is_file():
         try:

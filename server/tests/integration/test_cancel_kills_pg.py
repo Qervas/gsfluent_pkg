@@ -16,13 +16,13 @@ from pathlib import Path
 
 import pytest
 
+from gsfluent.core.limits import CapConfig
 from gsfluent.core.run_manager import (
     AsyncioRunManager,
     escalate_kill_pg,
     spawn_in_new_pg,
 )
 from gsfluent.core.state import RunStateStore
-from gsfluent.core.limits import CapConfig
 from gsfluent.observability.jsonlog import StdlibJSONEmitter
 from gsfluent.protocols.runs import RunState
 from gsfluent.protocols.sim import ModelRef

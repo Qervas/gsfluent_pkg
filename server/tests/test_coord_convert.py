@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 from plyfile import PlyData, PlyElement
 
-
 # --- 1. Pure array math ----------------------------------------------------
 
 

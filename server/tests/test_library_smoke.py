@@ -9,7 +9,6 @@ import pytest
 
 from gsfluent.core.library import LIBRARY_ROOT, Model, Sequence
 
-
 pytestmark = pytest.mark.skipif(
     not LIBRARY_ROOT.is_dir(),
     reason=(

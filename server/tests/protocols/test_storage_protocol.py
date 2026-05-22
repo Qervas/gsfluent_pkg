@@ -5,7 +5,7 @@ in Phase 2 (FilesystemStorage). Phase 1 uses an in-memory stub to
 verify the contract shape.
 """
 import io
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 

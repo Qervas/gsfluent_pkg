@@ -1,5 +1,5 @@
 """Conformance tests for the RunManager Protocol."""
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 

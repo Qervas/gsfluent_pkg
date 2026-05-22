@@ -7,11 +7,11 @@ field 22 (process start time).
 from __future__ import annotations
 
 import json
-import os
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Iterator
+from typing import Any
 
 from gsfluent.protocols.runs import TERMINAL_RUN_STATES, RunState
 
@@ -30,10 +30,10 @@ class RunStateRecord:
     submitted_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
-    error: dict | None = None
+    error: dict[str, Any] | None = None
     paths: dict[str, str] = field(default_factory=dict)
 
-    def transition(self, **changes) -> "RunStateRecord":
+    def transition(self, **changes: Any) -> RunStateRecord:
         return replace(self, **changes)
 
     def is_terminal(self) -> bool:
@@ -45,7 +45,7 @@ class RunStateRecord:
         return json.dumps(d, separators=(",", ":"))
 
     @classmethod
-    def from_json(cls, raw: str) -> "RunStateRecord":
+    def from_json(cls, raw: str) -> RunStateRecord:
         d = json.loads(raw)
         d["state"] = RunState(d["state"])
         return cls(**d)
@@ -108,7 +108,7 @@ def is_pid_alive_with_starttime(pid: int, expected_starttime: float) -> bool:
     Linux-only /proc unavailable).
     """
     try:
-        with open(f"/proc/{pid}/stat", "r") as f:
+        with open(f"/proc/{pid}/stat") as f:
             raw = f.read()
     except (FileNotFoundError, ProcessLookupError, PermissionError):
         return False

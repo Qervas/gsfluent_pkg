@@ -4,7 +4,8 @@ Phase 2 will implement GSQCodec against this contract. Phase 1 verifies
 the Protocol shape with an in-memory stub.
 """
 import io
-from typing import AsyncIterator, BinaryIO, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
+from typing import BinaryIO
 
 import pytest
 
@@ -100,7 +101,9 @@ def _write_minimal_3dgs_frame(path: Path, n: int = 4, seed: int = 0) -> None:
     verts["y"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["z"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["opacity"] = 1.0
-    verts["scale_0"] = -1.0; verts["scale_1"] = -1.0; verts["scale_2"] = -1.0
+    verts["scale_0"] = -1.0
+    verts["scale_1"] = -1.0
+    verts["scale_2"] = -1.0
     verts["rot_0"] = 1.0
     PlyData([PlyElement.describe(verts, "vertex")], text=False).write(path)
 

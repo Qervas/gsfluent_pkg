@@ -29,7 +29,6 @@ from gsfluent.protocols.sim import (
     SimResult,
 )
 
-
 # --- in-memory test doubles ---
 
 

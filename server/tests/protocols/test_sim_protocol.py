@@ -7,8 +7,8 @@ from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.sim import (
     GPUUnavailableError,
     ModelRef,
-    SimError,
     SimEnvMissingError,
+    SimError,
     SimInterpreterMissingError,
     SimResult,
     SimulationEngine,

@@ -20,6 +20,7 @@ from .test_streaming_cache_hit import _write_minimal_gsq
 def test_range_206_returns_byte_suffix(tmp_path: Path, monkeypatch) -> None:
     """Server-side: Range: bytes=N- returns body[N:] with status 206."""
     from fastapi.testclient import TestClient
+
     from gsfluent.api import sequences as seq_api
     from gsfluent.core import library as lib
     from gsfluent.server import create_app
@@ -51,6 +52,7 @@ def test_range_resume_round_trip(tmp_path: Path, monkeypatch) -> None:
     """End-to-end: write partial prefix, send Range, concat with response,
     confirm assembled body equals the original."""
     from fastapi.testclient import TestClient
+
     from gsfluent.api import sequences as seq_api
     from gsfluent.core import library as lib
     from gsfluent.server import create_app
@@ -87,6 +89,7 @@ def test_range_ignored_returns_200_full_body(tmp_path: Path, monkeypatch) -> Non
     test pins the server's CURRENT behavior (FastAPI honors Range) so a
     regression surfaces immediately."""
     from fastapi.testclient import TestClient
+
     from gsfluent.api import sequences as seq_api
     from gsfluent.core import library as lib
     from gsfluent.server import create_app

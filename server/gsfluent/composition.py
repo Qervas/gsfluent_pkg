@@ -43,7 +43,6 @@ from gsfluent.protocols.runs import RunManager
 from gsfluent.protocols.storage import Storage
 from gsfluent.storage.filesystem import FilesystemStorage
 
-
 # Watchdog heartbeat interval. systemd's WatchdogSec=30s leaves a 2x
 # safety margin: if any single heartbeat misses, the next one still
 # fires before systemd kills the process.
@@ -67,8 +66,12 @@ def _current_health_status(*, cfg: AppConfig, state_store):
     """In-process health probe: builds the same status discriminator the
     /api/health endpoint reports, without going through HTTP."""
     import time as _time
+
     from gsfluent.api.health import (
-        _gpu_reachable, _disk_free_pct, _last_successful_run_at, _derive_status,
+        _derive_status,
+        _disk_free_pct,
+        _gpu_reachable,
+        _last_successful_run_at,
     )
     return _derive_status(
         sim_home_exists=cfg.sim_home.is_dir(),
@@ -322,12 +325,22 @@ def build_app(cfg: AppConfig) -> FastAPI:
     # Mount existing routers (unchanged in Phase 1; Phase 3+ will rewire
     # them through Depends() against the new Protocols).
     from gsfluent.api import (
-        recipes as recipes_api,
         models as models_api,
+    )
+    from gsfluent.api import (
+        recipes as recipes_api,
+    )
+    from gsfluent.api import (
         runs as runs_api,
-        sequences as sequences_api,
-        stream as stream_api,
+    )
+    from gsfluent.api import (
         schemas as schemas_api,
+    )
+    from gsfluent.api import (
+        sequences as sequences_api,
+    )
+    from gsfluent.api import (
+        stream as stream_api,
     )
     app.include_router(recipes_api.router)
     app.include_router(models_api.router)

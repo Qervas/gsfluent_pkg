@@ -20,7 +20,6 @@ import subprocess
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -28,7 +27,6 @@ from pydantic import BaseModel, Field
 from gsfluent.config import AppConfig
 from gsfluent.core.state import RunStateStore
 from gsfluent.protocols.runs import TERMINAL_RUN_STATES, RunState
-
 
 # --- contract types ---
 
@@ -54,7 +52,7 @@ class HealthResponse(BaseModel):
     disk_free_pct: float = Field(
         ..., ge=0.0, le=100.0,
         description="Free disk on work_dir's filesystem")
-    last_successful_run_at: Optional[float] = Field(
+    last_successful_run_at: float | None = Field(
         None, description="POSIX ts of most-recent COMPLETED run, or null if none"
     )
     active_run_count: int = Field(
@@ -106,9 +104,9 @@ def _disk_free_pct(work_dir: Path) -> float:
     return round(usage.free / usage.total * 100.0, 2)
 
 
-def _last_successful_run_at(state_store: RunStateStore) -> Optional[float]:
+def _last_successful_run_at(state_store: RunStateStore) -> float | None:
     """POSIX ts of the most-recently-COMPLETED run, or None."""
-    best: Optional[float] = None
+    best: float | None = None
     for record in state_store.scan():
         if record.state == RunState.COMPLETED and record.finished_at is not None:
             if best is None or record.finished_at > best:
@@ -126,7 +124,7 @@ def _derive_status(
     sim_home_exists: bool,
     disk_free_pct: float,
     gpu_reachable: bool,
-    last_successful_run_at: Optional[float],
+    last_successful_run_at: float | None,
     now: float,
 ) -> HealthStatus:
     """Spec Section 3 Flow C status derivation."""

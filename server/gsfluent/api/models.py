@@ -97,7 +97,7 @@ async def upload(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(422, f"failed to gunzip uploaded ply: {e}")
+            raise HTTPException(422, f"failed to gunzip uploaded ply: {e}") from e
     elif ply_encoding != "identity":
         raise HTTPException(422, f"unsupported ply_encoding: {ply_encoding!r}")
 
@@ -122,7 +122,7 @@ async def upload(
         try:
             parsed = json.loads(cam_bytes)
         except json.JSONDecodeError as e:
-            raise HTTPException(422, f"cameras.json is not valid JSON: {e}")
+            raise HTTPException(422, f"cameras.json is not valid JSON: {e}") from e
         if not isinstance(parsed, list):
             raise HTTPException(422, "cameras.json must be a JSON list")
 
@@ -136,7 +136,7 @@ async def upload(
         # plyfile parse errors during the conversion pass: client should
         # see a 422 not 500 — the bytes they uploaded weren't a valid ply.
         if convert_y_up and ("ply" in msg.lower() or "header" in msg.lower()):
-            raise HTTPException(422, f"failed to parse ply for conversion: {msg}")
+            raise HTTPException(422, f"failed to parse ply for conversion: {msg}") from e
         raise
     return {"name": name, "path": str(path)}
 
@@ -153,9 +153,9 @@ async def register(req: RegisterRequest):
             Path(req.path), convert_y_up=req.convert_y_up,
         )
     except FileNotFoundError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     except FileExistsError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
     return {"name": name, "path": str(path), "mode": mode}
 
 

@@ -30,7 +30,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -55,9 +55,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-from .library_io import (
+from .library_io import (  # noqa: E402 (re-exports kept below to avoid cycles)
     atomic_write_json as _atomic_write_json,
+)
+from .library_io import (  # noqa: E402
     read_json_tolerant as _read_json_tolerant,
+)
+from .library_io import (  # noqa: E402
     read_ply_bbox_and_count as _read_ply_bbox_and_count,
 )
 
@@ -88,40 +92,40 @@ class _ModelMeta(BaseModel):
     name: str
     kind: str = Field(default="model")
     source: str  # "upload" | "register" | "import"
-    source_path: Optional[str] = None
-    n_splats: Optional[int] = None
-    bbox: Optional[list[list[float]]] = None  # [[xmin,ymin,zmin],[xmax,ymax,zmax]]
+    source_path: str | None = None
+    n_splats: int | None = None
+    bbox: list[list[float]] | None = None  # [[xmin,ymin,zmin],[xmax,ymax,zmax]]
     coord_convention: str = Field(default="z-up")
-    imported_at: Optional[str] = None
+    imported_at: str | None = None
     # Phase 4: Y-up source rewritten at import. Audit-only; downstream
     # code reads `coord_convention` (which is always "z-up") for
     # routing decisions.
-    converted_from: Optional[str] = None  # "y-up" | None
+    converted_from: str | None = None  # "y-up" | None
     # Content-hash of the originally uploaded ply bytes (pre-conversion).
     # Lets the upload endpoint skip transport on re-drops via
     # /api/models/check_hash. Legacy uploads pre-dedup carry None — the
     # first re-drop misses the cache, hits the upload path, and the new
     # meta written includes the hash so subsequent drops do skip.
-    sha256: Optional[str] = None
+    sha256: str | None = None
 
 
 class _SequenceMeta(BaseModel):
     name: str
     kind: str = Field(default="sequence")
     source: str  # "sim" | "import"
-    source_path: Optional[str] = None
-    model_ref: Optional[str] = None
+    source_path: str | None = None
+    model_ref: str | None = None
     frame_count: int = 0
     fps_hint: int = 24
-    n_splats: Optional[int] = None
-    bbox_initial: Optional[list[list[float]]] = None
+    n_splats: int | None = None
+    bbox_initial: list[list[float]] | None = None
     coord_convention: str = Field(default="z-up")
     first_frame_full: bool = True
-    created_at: Optional[str] = None
+    created_at: str | None = None
     # Phase 4: when set, frames in this sequence were rewritten from
     # the labelled axis convention into z-up at import time. Audit-only;
     # display/playback code should never branch on this.
-    converted_from: Optional[str] = None  # "y-up" | None
+    converted_from: str | None = None  # "y-up" | None
 
 
 # --- Registered-externals index --------------------------------------------
@@ -168,7 +172,7 @@ def unregister_external(name: str) -> bool:
     return True
 
 
-def get_registered_path(name: str) -> Optional[Path]:
+def get_registered_path(name: str) -> Path | None:
     """Resolve a registered-external name to its on-disk path, or None."""
     for x in _load_registered():
         if x.get("name") == name:
@@ -189,7 +193,7 @@ class Model:
 
     KIND: ClassVar[str] = "model"
 
-    def __init__(self, name: str, path: Path, meta: Optional[dict] = None):
+    def __init__(self, name: str, path: Path, meta: dict | None = None):
         self.name = name
         self.path = path
         self.meta = meta
@@ -220,7 +224,7 @@ class Model:
         return ext is not None and ext.is_dir()
 
     @classmethod
-    def load(cls, name: str) -> Optional["Model"]:
+    def load(cls, name: str) -> Model | None:
         if not cls.exists(name):
             return None
         path = cls._resolve_path(name)
@@ -252,7 +256,7 @@ class Model:
         return sorted(names)
 
     @classmethod
-    def find_by_hash(cls, sha256: str) -> Optional["Model"]:
+    def find_by_hash(cls, sha256: str) -> Model | None:
         """Scan library models for one whose meta carries this sha256.
 
         Returns the first match (there should only be one). Returns None if
@@ -288,14 +292,14 @@ class Model:
         name: str,
         *,
         source: str,
-        source_path: Optional[str] = None,
-        n_splats: Optional[int] = None,
-        bbox: Optional[list[list[float]]] = None,
+        source_path: str | None = None,
+        n_splats: int | None = None,
+        bbox: list[list[float]] | None = None,
         coord_convention: str = "z-up",
-        imported_at: Optional[str] = None,
-        path: Optional[Path] = None,
-        converted_from: Optional[str] = None,
-        sha256: Optional[str] = None,
+        imported_at: str | None = None,
+        path: Path | None = None,
+        converted_from: str | None = None,
+        sha256: str | None = None,
     ) -> Path:
         """Write `_meta.json` for the model.
 
@@ -372,13 +376,13 @@ class Model:
 
     # ---- ply discovery ----
 
-    def highest_iteration_ply(self) -> Optional[Path]:
+    def highest_iteration_ply(self) -> Path | None:
         """Locate `<path>/point_cloud/iteration_<N>/point_cloud.ply` with
         the highest N. Returns None if no candidate exists."""
         pc_root = self.path / "point_cloud"
         if not pc_root.is_dir():
             return None
-        best: Optional[tuple[int, Path]] = None
+        best: tuple[int, Path] | None = None
         for it in pc_root.iterdir():
             if not it.is_dir():
                 continue
@@ -402,7 +406,7 @@ class Sequence:
 
     KIND: ClassVar[str] = "sequence"
 
-    def __init__(self, name: str, path: Path, meta: Optional[dict] = None):
+    def __init__(self, name: str, path: Path, meta: dict | None = None):
         self.name = name
         self.path = path
         self.meta = meta
@@ -414,7 +418,7 @@ class Sequence:
         return (SEQUENCES_DIR / name).is_dir()
 
     @classmethod
-    def load(cls, name: str) -> Optional["Sequence"]:
+    def load(cls, name: str) -> Sequence | None:
         if not cls.exists(name):
             return None
         path = SEQUENCES_DIR / name
@@ -441,16 +445,16 @@ class Sequence:
         name: str,
         *,
         source: str,
-        source_path: Optional[str] = None,
-        model_ref: Optional[str] = None,
+        source_path: str | None = None,
+        model_ref: str | None = None,
         frame_count: int = 0,
         fps_hint: int = 24,
-        n_splats: Optional[int] = None,
-        bbox_initial: Optional[list[list[float]]] = None,
+        n_splats: int | None = None,
+        bbox_initial: list[list[float]] | None = None,
         coord_convention: str = "z-up",
         first_frame_full: bool = True,
-        created_at: Optional[str] = None,
-        converted_from: Optional[str] = None,
+        created_at: str | None = None,
+        converted_from: str | None = None,
     ) -> Path:
         target_dir = SEQUENCES_DIR / name
         payload = _SequenceMeta(
@@ -579,9 +583,9 @@ def _is_full_3dgs_ply(ply_path: Path) -> tuple[bool, list[str]]:
 
 def import_sequence(
     folder_path: Path,
-    name: Optional[str] = None,
+    name: str | None = None,
     convert_y_up: bool = False,
-) -> "Sequence":
+) -> Sequence:
     """Register an external folder of `frame_*.ply` as a Sequence.
 
     Symlinks `<library>/sequences/<name>/frames` -> `folder_path`. No frames
@@ -677,7 +681,7 @@ def import_sequence(
         # the on-disk Z-up data, not the original Y-up source.
         converted_frame0 = frames_out / frame0.name
         n_splats, bbox = read_ply_bbox_and_count(converted_frame0)
-        meta_converted_from: Optional[str] = "y-up"
+        meta_converted_from: str | None = "y-up"
     else:
         # Symlink frames/ -> source folder. No fallback to copy — explicit
         # error is better than a 100GB silent copy on Windows-without-admin.
@@ -697,7 +701,7 @@ def import_sequence(
                 pass
             raise OSError(
                 f"failed to create symlink {frames_link} -> {folder_path}: {e}"
-            )
+            ) from e
         n_splats, bbox = read_ply_bbox_and_count(frame0)
         meta_converted_from = None
 

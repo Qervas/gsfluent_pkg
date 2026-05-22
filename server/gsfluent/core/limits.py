@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from gsfluent.protocols.runs import CapExceededError
-
 
 DEFAULT_MAX_PARTICLE_COUNT = 500_000
 DEFAULT_MAX_WALL_TIME_SEC = 3600  # 1 hour
@@ -32,7 +32,7 @@ class CapConfig:
     max_recipe_bytes: int = DEFAULT_MAX_RECIPE_BYTES
 
     @classmethod
-    def from_env(cls) -> "CapConfig":
+    def from_env(cls) -> CapConfig:
         return cls(
             max_particle_count=int(
                 os.environ.get("GSFLUENT_MAX_PARTICLE_COUNT", DEFAULT_MAX_PARTICLE_COUNT)
@@ -46,7 +46,7 @@ class CapConfig:
         )
 
 
-def check_recipe_caps(recipe: dict, cfg: CapConfig) -> None:
+def check_recipe_caps(recipe: dict[str, Any], cfg: CapConfig) -> None:
     """Validate recipe against caps. Raises CapExceededError on first violation."""
     particle_count = int(recipe.get("particle_count", 0))
     if particle_count > cfg.max_particle_count:

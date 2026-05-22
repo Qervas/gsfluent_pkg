@@ -14,11 +14,11 @@ import numpy as np
 import pytest
 from plyfile import PlyData, PlyElement
 
-from gsfluent.core.codecs.gsq import GSQCodec, MAGIC
+from gsfluent.core.codecs.gsq import MAGIC, GSQCodec
 from gsfluent.core.fusers.knn_kabsch import KNNKabschFuser
+from gsfluent.core.sim_engines.mock import MockSimulationEngine
 from gsfluent.protocols.sim import ModelRef
 from gsfluent.storage.filesystem import FilesystemStorage
-from gsfluent.core.sim_engines.mock import MockSimulationEngine
 
 
 class _NullEmitter:
@@ -42,7 +42,9 @@ def _write_reference_ply(path: Path, n: int = 50, seed: int = 42) -> None:
     verts["y"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["z"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["opacity"] = 0.5
-    verts["scale_0"] = -1.0; verts["scale_1"] = -1.0; verts["scale_2"] = -1.0
+    verts["scale_0"] = -1.0
+    verts["scale_1"] = -1.0
+    verts["scale_2"] = -1.0
     verts["rot_0"] = 1.0
     PlyData([PlyElement.describe(verts, "vertex")], text=False).write(path)
 

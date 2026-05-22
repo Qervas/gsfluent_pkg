@@ -8,6 +8,8 @@ from gsfluent.protocols.fuse import (
     FuseError,
     Fuser,
     ParticleFrame,
+)
+from gsfluent.protocols.fuse import (
     SplatFrame as FusedSplatFrame,
 )
 

@@ -3,6 +3,7 @@ at this layer; the Phase 6 Playwright E2E test exercises the full path."""
 import numpy as np
 import pytest
 from plyfile import PlyData, PlyElement
+
 from gsfluent.core.frame_stream import parse_frame_xyz, parse_static_attrs
 
 

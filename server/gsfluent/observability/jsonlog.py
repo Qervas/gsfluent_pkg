@@ -66,7 +66,7 @@ class StdlibJSONEmitter:
         if callable(flush):
             flush()
 
-    def child(self, **context: Any) -> "StdlibJSONEmitter":
+    def child(self, **context: Any) -> StdlibJSONEmitter:
         merged = {**self._context, **context}
         return StdlibJSONEmitter(
             stream=self._stream,
@@ -78,19 +78,27 @@ class StdlibJSONEmitter:
 # Adapter that bridges stdlib `logging` calls to our EventEmitter.
 # Phase 6 will use this when auditing the codebase for `print()` and
 # stdlib `logging.info()` calls that should become structured events.
-class RunLogAdapter(logging.LoggerAdapter):
+class RunLogAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
     """LoggerAdapter that auto-attaches run context to stdlib log records.
 
     Use when calling into third-party libraries that use stdlib logging:
         run_log = RunLogAdapter(logging.getLogger("gsfluent.runner"),
                                 extra={"run_id": run_id})
         run_log.info("sim started")  # JSON output includes run_id
+
+    Note: stdlib `LoggerAdapter` was made generic in 3.11; on 3.10 it
+    isn't parametrizable, hence the type: ignore on the class line.
+    Liskov override on `process` is also intentional — we narrow `kwargs`
+    to `dict[str, Any]` because that's what stdlib actually passes in
+    practice, and Python's own typeshed has the same divergence.
     """
 
-    def process(self, msg: Any, kwargs: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    def process(  # type: ignore[override]
+        self, msg: Any, kwargs: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any]]:
         # The JsonFormatter (below) reads the extra dict directly.
         if "extra" in kwargs:
-            merged = {**self.extra, **kwargs["extra"]}
+            merged = {**(self.extra or {}), **kwargs["extra"]}
         else:
             merged = dict(self.extra) if self.extra else {}
         kwargs["extra"] = merged

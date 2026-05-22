@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from plyfile import PlyData, PlyElement
@@ -25,7 +24,11 @@ from scipy.spatial import cKDTree
 
 from gsfluent.core.coord_convert import (
     rotate_normals_y_up_to_z_up as _rotate_norm,
+)
+from gsfluent.core.coord_convert import (
     rotate_positions_y_up_to_z_up as _rotate_pos,
+)
+from gsfluent.core.coord_convert import (
     rotate_quaternions_y_up_to_z_up as _rotate_quat,
 )
 from gsfluent.protocols.fuse import (
@@ -36,7 +39,6 @@ from gsfluent.protocols.fuse import (
     ParticleFrame,
     SplatFrame,
 )
-
 
 # ---- math helpers copied verbatim from tools/fuse_to_full_ply.py -----------
 
@@ -56,10 +58,13 @@ def _cov6_to_quat_logscale(cov6: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n = cov6.shape[0]
     C = np.empty((n, 3, 3), dtype=cov6.dtype)
     C[:, 0, 0] = cov6[:, 0]
-    C[:, 0, 1] = cov6[:, 1]; C[:, 1, 0] = cov6[:, 1]
-    C[:, 0, 2] = cov6[:, 2]; C[:, 2, 0] = cov6[:, 2]
+    C[:, 0, 1] = cov6[:, 1]
+    C[:, 1, 0] = cov6[:, 1]
+    C[:, 0, 2] = cov6[:, 2]
+    C[:, 2, 0] = cov6[:, 2]
     C[:, 1, 1] = cov6[:, 3]
-    C[:, 1, 2] = cov6[:, 4]; C[:, 2, 1] = cov6[:, 4]
+    C[:, 1, 2] = cov6[:, 4]
+    C[:, 2, 1] = cov6[:, 4]
     C[:, 2, 2] = cov6[:, 5]
     eigvals, eigvecs = np.linalg.eigh(C)
     eigvals = eigvals[:, ::-1]
@@ -126,7 +131,8 @@ def _norm_xyz_to_origin_cube(
     Returns (normalized_xyz, center, extent) — the same convention the sim's
     transform2origin uses on the reference data.
     """
-    aabb_min = xyz.min(0); aabb_max = xyz.max(0)
+    aabb_min = xyz.min(0)
+    aabb_max = xyz.max(0)
     center = (aabb_min + aabb_max) / 2.0
     extent = float((aabb_max - aabb_min).max())
     if extent == 0.0:
@@ -387,7 +393,9 @@ class KNNKabschFuser:
         sy = (sy - 1.0) * extent + center[1]
         sz = (sz - 1.0) * extent + center[2]
         # Center at origin.
-        sx -= center[0]; sy -= center[1]; sz -= center[2]
+        sx -= center[0]
+        sy -= center[1]
+        sz -= center[2]
         stacked = np.stack([sx, sy, sz], axis=1)
         # Y-up -> Z-up.
         return _rotate_pos(stacked)

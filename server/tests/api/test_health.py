@@ -191,6 +191,7 @@ def test_gpu_reachable_false_when_nvidia_smi_absent() -> None:
 
 def test_gpu_reachable_false_on_timeout() -> None:
     import subprocess
+
     from gsfluent.api.health import _gpu_reachable
     with patch("subprocess.run",
                side_effect=subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=2)):

@@ -30,9 +30,8 @@ from pathlib import Path
 # (model dirs under MODELS_DIR, registered-index entries, etc.).
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
-from . import library as lib
-from ..server import PKG_ROOT
-from .library import MODELS_DIR, Model, read_ply_bbox_and_count
+from . import library as lib  # noqa: E402 (regex sits above; library import is heavy)
+from .library import MODELS_DIR, Model, read_ply_bbox_and_count  # noqa: E402
 
 _log = logging.getLogger(__name__)
 
@@ -208,8 +207,9 @@ def register_local_model(
     # Past this branch the function returns a different (mode, path)
     # contract; the caller (api/models.register) surfaces the mode.
     if convert_y_up:
-        from .coord_convert import convert_full_3dgs_ply
         import shutil as _sh
+
+        from .coord_convert import convert_full_3dgs_ply
 
         if MODELS_DIR.exists() and (MODELS_DIR / name).exists():
             raise FileExistsError(
@@ -335,8 +335,9 @@ def _ensure_cameras_json(model_dir: Path, ply_path: Path) -> None:
         return
 
     import math
-    from plyfile import PlyData
+
     import numpy as np
+    from plyfile import PlyData
 
     v = PlyData.read(str(ply_path))["vertex"].data
     x = np.asarray(v["x"], dtype=np.float64)

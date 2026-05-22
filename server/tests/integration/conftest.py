@@ -11,12 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from gsfluent.core.limits import CapConfig
 from gsfluent.core.run_manager import AsyncioRunManager
 from gsfluent.core.sim_engines.mock import MockSimulationEngine
 from gsfluent.core.state import RunStateStore
-from gsfluent.core.limits import CapConfig
 from gsfluent.observability.jsonlog import StdlibJSONEmitter
-
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
 MOCK_SIM_SH = FIXTURE_DIR / "mock_sim.sh"
@@ -71,6 +70,7 @@ class SubprocessMockSimulationEngine:
         import asyncio
         import os
         import time
+
         from gsfluent.core.run_manager import spawn_in_new_pg
         from gsfluent.protocols.sim import SimCrashedError, SimResult
 

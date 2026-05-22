@@ -148,7 +148,7 @@ def test_lifespan_sends_sd_notify_ready_when_socket_present(
             for _ in range(10):
                 try:
                     data, _ = listener.recvfrom(4096)
-                except socket.timeout:
+                except TimeoutError:
                     break
                 if b"READY=1" in data:
                     ready_seen = True

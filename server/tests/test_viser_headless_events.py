@@ -19,7 +19,6 @@ import json
 import sys
 from pathlib import Path
 
-
 _HEADLESS_FILE = (
     Path(__file__).resolve().parents[2]
     / "frontend" / "python" / "viser_headless.py"

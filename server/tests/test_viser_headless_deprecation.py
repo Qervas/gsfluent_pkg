@@ -18,7 +18,6 @@ import sys
 import warnings
 from pathlib import Path
 
-
 _HEADLESS_DIR = Path(__file__).resolve().parents[2] / "frontend" / "python"
 
 

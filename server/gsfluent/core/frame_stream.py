@@ -80,9 +80,15 @@ def parse_static_attrs(ply_path: Path) -> dict | None:
     quats /= norms
     qw, qx, qy, qz = quats.T
     R = np.empty((n, 3, 3), dtype=np.float32)
-    R[:, 0, 0] = 1 - 2 * (qy * qy + qz * qz);  R[:, 0, 1] = 2 * (qx * qy - qz * qw);  R[:, 0, 2] = 2 * (qx * qz + qy * qw)
-    R[:, 1, 0] = 2 * (qx * qy + qz * qw);      R[:, 1, 1] = 1 - 2 * (qx * qx + qz * qz);  R[:, 1, 2] = 2 * (qy * qz - qx * qw)
-    R[:, 2, 0] = 2 * (qx * qz - qy * qw);      R[:, 2, 1] = 2 * (qy * qz + qx * qw);      R[:, 2, 2] = 1 - 2 * (qx * qx + qy * qy)
+    R[:, 0, 0] = 1 - 2 * (qy * qy + qz * qz)
+    R[:, 0, 1] = 2 * (qx * qy - qz * qw)
+    R[:, 0, 2] = 2 * (qx * qz + qy * qw)
+    R[:, 1, 0] = 2 * (qx * qy + qz * qw)
+    R[:, 1, 1] = 1 - 2 * (qx * qx + qz * qz)
+    R[:, 1, 2] = 2 * (qy * qz - qx * qw)
+    R[:, 2, 0] = 2 * (qx * qz - qy * qw)
+    R[:, 2, 1] = 2 * (qy * qz + qx * qw)
+    R[:, 2, 2] = 1 - 2 * (qx * qx + qy * qy)
     rgb = np.clip(
         np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=1) * _SH_C0 + 0.5,
         0, 1
@@ -143,7 +149,7 @@ class PackedReader:
         self.bbox_lo = np.array(bbox[0:3], dtype=np.float32)
         self.bbox_hi = np.array(bbox[3:6], dtype=np.float32)
         # body[frame_idx, splat_idx, axis] -> int16
-        body_bytes = (n_frames * n_splats * 3 * 2)
+        (n_frames * n_splats * 3 * 2)
         body_arr = np.frombuffer(self._mm, dtype=np.int16,
                                  count=n_frames * n_splats * 3,
                                  offset=_PACKED_HEADER_SIZE)
@@ -152,7 +158,7 @@ class PackedReader:
         self._inv_q = (self.bbox_hi - self.bbox_lo).astype(np.float32) / 65535.0
 
     @classmethod
-    def maybe_open(cls, seq_dir: Path) -> "PackedReader | None":
+    def maybe_open(cls, seq_dir: Path) -> PackedReader | None:
         """Open `<seq_dir>/frames.bin` if it exists; else return None.
         Callers fall back to per-frame ply reads on None."""
         p = seq_dir / "frames.bin"

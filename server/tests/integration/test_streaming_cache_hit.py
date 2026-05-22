@@ -102,6 +102,7 @@ def real_gsq(tmp_path: Path) -> dict:
 def test_second_sync_uses_head_and_skips_body(real_gsq, tmp_path: Path, monkeypatch) -> None:
     """First request downloads; second request hits HEAD and skips body."""
     from fastapi.testclient import TestClient
+
     from gsfluent.api import sequences as seq_api
     from gsfluent.core import library as lib
     from gsfluent.server import create_app

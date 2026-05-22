@@ -1,6 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
+
 from gsfluent.server import create_app
+
 
 @pytest.fixture
 def client():

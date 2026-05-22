@@ -13,9 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from gsfluent.core import library as lib
 from gsfluent.api import sequences as seq_api
-
+from gsfluent.core import library as lib
 
 # --------- fixtures ---------------------------------------------------------
 

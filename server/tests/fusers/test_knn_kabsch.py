@@ -37,7 +37,9 @@ def _write_full_3dgs_ply(path: Path, n: int = 10, seed: int = 0) -> None:
     verts["y"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["z"] = rng.uniform(-1, 1, n).astype(np.float32)
     verts["opacity"] = 0.5
-    verts["scale_0"] = -1.0; verts["scale_1"] = -1.0; verts["scale_2"] = -1.0
+    verts["scale_0"] = -1.0
+    verts["scale_1"] = -1.0
+    verts["scale_2"] = -1.0
     verts["rot_0"] = 1.0
     PlyData([PlyElement.describe(verts, "vertex")], text=False).write(path)
 
@@ -78,7 +80,8 @@ def test_rotmat_to_quat_identity_round_trip() -> None:
 
 def test_rotmat_to_quat_90deg_z_rotation() -> None:
     """90 deg rotation about Z axis: quat = (cos(45), 0, 0, sin(45))."""
-    c = np.cos(np.pi / 4); s = np.sin(np.pi / 4)
+    c = np.cos(np.pi / 4)
+    s = np.sin(np.pi / 4)
     R = np.array([[[0, -1, 0], [1, 0, 0], [0, 0, 1]]], dtype=np.float32)
     q = _rotmat_to_quat(R)
     np.testing.assert_allclose(q[0], [c, 0.0, 0.0, s], atol=1e-5)

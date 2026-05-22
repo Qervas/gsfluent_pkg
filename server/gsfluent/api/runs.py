@@ -26,12 +26,13 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError as PydanticValidationError,
     field_validator,
+)
+from pydantic import (
+    ValidationError as PydanticValidationError,
 )
 
 from ..api.errors import (
-    api_error_envelope,
     new_trace_id,
     raise_cap_exceeded,
     raise_validation_error,
@@ -40,7 +41,7 @@ from ..core import library as lib
 from ..core import runner
 from ..core.library import Sequence
 from ..core.limits import CapConfig, check_recipe_caps
-from ..protocols.runs import CapExceededError, ValidationError
+from ..protocols.runs import CapExceededError
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -264,7 +265,7 @@ def delete_history(run_name: str):
         try:
             legacy.relative_to(runner.FUSED_DIR.resolve())
         except ValueError:
-            raise HTTPException(400, f"refusing to delete outside library: {run_name}")
+            raise HTTPException(400, f"refusing to delete outside library: {run_name}") from None
         if not legacy.exists():
             raise HTTPException(404, f"run not found: {run_name}")
         if not legacy.is_dir():
@@ -277,7 +278,7 @@ def delete_history(run_name: str):
         try:
             shutil.rmtree(legacy)
         except OSError as e:
-            raise HTTPException(500, f"failed to delete run dir: {e}")
+            raise HTTPException(500, f"failed to delete run dir: {e}") from e
         return {"deleted": run_name}
 
     # Path-traversal defense for the library path.
@@ -286,7 +287,7 @@ def delete_history(run_name: str):
     try:
         target.relative_to(seq_root)
     except ValueError:
-        raise HTTPException(400, f"refusing to delete outside library: {run_name}")
+        raise HTTPException(400, f"refusing to delete outside library: {run_name}") from None
 
     for r in runner.list_runs():
         if r.name == run_name and r.state == "running":
@@ -391,7 +392,7 @@ async def get_run_frame(run_name: str, frame_idx: int):
     try:
         target_dir.relative_to(fused_root)
     except ValueError:
-        raise HTTPException(400, f"refusing to read outside FUSED_DIR: {run_name}")
+        raise HTTPException(400, f"refusing to read outside FUSED_DIR: {run_name}") from None
     if not target_dir.is_dir():
         raise HTTPException(404, f"run not found: {run_name}")
     candidates = [

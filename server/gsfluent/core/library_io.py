@@ -12,7 +12,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 _log = logging.getLogger(__name__)
 
@@ -51,7 +50,7 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
         raise
 
 
-def read_json_tolerant(path: Path) -> Optional[dict]:
+def read_json_tolerant(path: Path) -> dict | None:
     """Read a JSON file returning a dict, or None on missing/corrupt/non-dict.
 
     Tolerance is the point: callers iterate over many entries, and a single
@@ -72,13 +71,13 @@ def read_json_tolerant(path: Path) -> Optional[dict]:
 
 def read_ply_bbox_and_count(
     ply_path: Path,
-) -> tuple[Optional[int], Optional[list[list[float]]]]:
+) -> tuple[int | None, list[list[float]] | None]:
     """Read a .ply and return (n_splats, bbox). Tolerant of unreadable files —
     returns (None, None) on any failure so callers can degrade gracefully.
     """
     try:
-        from plyfile import PlyData
         import numpy as np
+        from plyfile import PlyData
 
         v = PlyData.read(str(ply_path))["vertex"].data
         n = int(v.shape[0])

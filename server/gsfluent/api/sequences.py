@@ -17,7 +17,6 @@ import threading
 import time
 from pathlib import Path
 from threading import Lock
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
@@ -27,6 +26,7 @@ from ..core import library as lib
 from ..core import runner
 from ..core.library import Sequence, import_sequence
 from ..server import PKG_ROOT
+
 # Frame-serving handler is shared with /api/runs/{name}/frame/{idx}.ply
 # so the two URL shapes return the exact same bytes for the same args.
 # Imported at the top (was originally a late-import inside the function
@@ -115,7 +115,7 @@ def _sequence_dict(seq: Sequence) -> dict:
     return d
 
 
-def _stat_mtime(p: Path) -> Optional[float]:
+def _stat_mtime(p: Path) -> float | None:
     """`p.stat().st_mtime` or None if the file doesn't exist. Used by the
     sequence-list payload so the client sync daemon can compare against
     its local copy without a full HEAD round-trip per file."""
@@ -125,7 +125,7 @@ def _stat_mtime(p: Path) -> Optional[float]:
         return None
 
 
-def _stat_size(p: Path) -> Optional[int]:
+def _stat_size(p: Path) -> int | None:
     """`p.stat().st_size` or None if the file doesn't exist."""
     try:
         return p.stat().st_size
@@ -169,7 +169,7 @@ def list_sequences():
 
 class ImportRequest(BaseModel):
     folder_path: str
-    name: Optional[str] = None
+    name: str | None = None
     convert_y_up: bool = False
 
 
@@ -189,23 +189,23 @@ def import_endpoint(req: ImportRequest):
     try:
         seq = import_sequence(folder, name=req.name, convert_y_up=req.convert_y_up)
     except FileExistsError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
     except (ImportError, ValueError) as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     except FileNotFoundError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     except NotADirectoryError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     except Exception as e:
         # Surface plyfile parse errors as 422, disk-full as 500.
         # plyfile raises a generic ValueError/Exception subclass for
         # malformed input; the message tells us which.
         msg = str(e)
         if "ply" in msg.lower() or "header" in msg.lower():
-            raise HTTPException(422, f"failed to parse ply: {msg}")
+            raise HTTPException(422, f"failed to parse ply: {msg}") from e
         if isinstance(e, OSError):
-            raise HTTPException(500, f"disk error during import: {msg}")
-        raise HTTPException(500, f"import failed: {msg}")
+            raise HTTPException(500, f"disk error during import: {msg}") from e
+        raise HTTPException(500, f"import failed: {msg}") from e
 
     return _sequence_dict(seq)
 
@@ -277,7 +277,7 @@ def get_splats_gsq(name: str, request: Request):
     try:
         target.relative_to(cache_root)
     except ValueError:
-        raise HTTPException(400, f"refusing to serve outside cache: {name}")
+        raise HTTPException(400, f"refusing to serve outside cache: {name}") from None
 
     st = target.stat()
     etag = _gsq_etag(st.st_size, st.st_mtime)
@@ -433,7 +433,7 @@ def get_frames_bin_cache(name: str):
     try:
         target.relative_to(seq_root)
     except ValueError:
-        raise HTTPException(400, f"refusing to serve outside library: {name}")
+        raise HTTPException(400, f"refusing to serve outside library: {name}") from None
     return FileResponse(
         target,
         media_type="application/octet-stream",
@@ -460,7 +460,7 @@ def delete_sequence(name: str):
     try:
         target.relative_to(seq_root)
     except ValueError:
-        raise HTTPException(400, f"refusing to delete outside library: {name}")
+        raise HTTPException(400, f"refusing to delete outside library: {name}") from None
 
     for r in runner.list_runs():
         if r.name == name and r.state == "running":

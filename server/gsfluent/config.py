@@ -7,7 +7,7 @@ they never read os.environ directly.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from gsfluent._paths import PKG_ROOT
@@ -30,7 +30,7 @@ class AppConfig:
     caps: CapConfig
 
     @classmethod
-    def from_env(cls) -> "AppConfig":
+    def from_env(cls) -> AppConfig:
         sim_home_str = os.environ.get("GSFLUENT_SIM_HOME", "")
         sim_python = os.environ.get("GSFLUENT_SIM_PYTHON", "python")
         sim_env = os.environ.get("GSFLUENT_SIM_ENV") or None

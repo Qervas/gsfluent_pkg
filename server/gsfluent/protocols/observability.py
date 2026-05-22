@@ -24,7 +24,7 @@ class EventEmitter(Protocol):
         callers should not double-emit on retry."""
         ...
 
-    def child(self, **context: Any) -> "EventEmitter":
+    def child(self, **context: Any) -> EventEmitter:
         """Return a derived emitter that auto-attaches `context` to every
         emit(). Per-event kwargs take precedence over child context."""
         ...

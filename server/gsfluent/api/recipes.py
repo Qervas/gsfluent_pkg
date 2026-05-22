@@ -31,7 +31,7 @@ def get_endpoint(name: str):
     try:
         loaded = rec.load_recipe(name)
     except rec.RecipeReadError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
     if loaded is None:
         raise HTTPException(404, f"recipe '{name}' not found")
     data, source = loaded
@@ -44,7 +44,7 @@ def save_endpoint(name: str, req: SaveRecipeRequest):
     try:
         path, payload = rec.save_user_recipe(name, req.data, based_on=req.based_on)
     except ValueError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     return {"name": name, "source": "user", "data": payload}
 
 
@@ -64,5 +64,5 @@ def delete_user_recipe(name: str):
     try:
         p.unlink()
     except OSError as e:
-        raise HTTPException(500, f"failed to delete: {e}")
+        raise HTTPException(500, f"failed to delete: {e}") from e
     return {"deleted": name}
