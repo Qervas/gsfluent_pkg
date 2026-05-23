@@ -1,0 +1,584 @@
+"""Per-cell sliding-window decode of a .gsq splat sequence.
+
+Replaces the original "decode the whole .gsq into RAM" model that
+viser_headless used to follow. A 1.2 GB .gsq with 200k splats × 150
+frames cost ~2 GB resident in dequantized float32 arrays — multiplied
+by the LRU cap (5 cells) that was 10 GB worst case.
+
+The SplatRing keeps the source bytes on disk and decodes a small ring
+buffer (default K=32, configurable via ``GSFLUENT_DECODE_WINDOW_FRAMES``)
+of frames around the current playback cursor. A background daemon
+thread services decode requests posted to a queue. The render loop
+calls ``get_frame(i)`` to read; if the frame is not in the ring it
+returns None and the render loop is expected to HOLD (stutter) rather
+than skip — a load-bearing invariant explained in the project notes.
+
+Two exemptions to the no-skip rule live above this class:
+  - Initial seek: render frame 0 when it is ready.
+  - Scrub jump: ``request_window(idx)`` clears the ring and seeds a
+    fresh K/2-wide window around ``idx``.
+
+This module is intentionally free of viser/uvicorn imports so unit
+tests can import it directly. Only ``numpy`` + the stdlib are used.
+"""
+from __future__ import annotations
+
+import os
+import struct as _struct
+import threading
+from collections import OrderedDict
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+
+
+# Decoded frame value: (xyz, quat).
+FrameTuple = tuple[np.ndarray, np.ndarray]
+
+
+def _read_window_size_from_env(default: int = 32) -> int:
+    """Resolve GSFLUENT_DECODE_WINDOW_FRAMES with a safe fallback."""
+    raw = os.environ.get("GSFLUENT_DECODE_WINDOW_FRAMES")
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    if v <= 0:
+        return default
+    return v
+
+
+def _parse_gsq_header(buf: bytes) -> dict:
+    """Inline copy of viser_headless.parse_gsq_header.
+
+    Vendored here so the ring module has no upward dependency on
+    viser_headless (which itself imports viser/uvicorn).
+    """
+    if len(buf) < 80:
+        raise ValueError(f"short header: {len(buf)} bytes")
+    if buf[:4] != b"GSQ1":
+        raise ValueError(f"not a .gsq: magic={buf[:4]!r}")
+    (version, n_splats, n_frames) = _struct.unpack_from("<III", buf, 4)
+    if version != 1:
+        raise ValueError(f"unsupported .gsq version {version}")
+    (fps_hint,) = _struct.unpack_from("<f", buf, 16)
+    bbox_min = np.frombuffer(buf[20:32], dtype=np.float32).copy()
+    bbox_max = np.frombuffer(buf[32:44], dtype=np.float32).copy()
+    (static_offset, static_size) = _struct.unpack_from("<QI", buf, 44)
+
+    index_end = 80 + n_frames * 16
+    if len(buf) < index_end:
+        raise ValueError(
+            f"header read but index incomplete: have {len(buf)} need {index_end}"
+        )
+    frame_index = []
+    for i in range(n_frames):
+        off, sz, _r = _struct.unpack_from("<QII", buf, 80 + i * 16)
+        frame_index.append((off, sz))
+    return {
+        "version": version,
+        "n_splats": n_splats,
+        "n_frames": n_frames,
+        "fps_hint": fps_hint,
+        "bbox_min": bbox_min,
+        "bbox_max": bbox_max,
+        "static_offset": static_offset,
+        "static_size": static_size,
+        "frame_index": frame_index,
+    }
+
+
+def _dequantize_frame(
+    blob: bytes,
+    n_splats: int,
+    bbox_min: np.ndarray,
+    span: np.ndarray,
+) -> FrameTuple:
+    """Inline copy of viser_headless._gsq_dequantize_frame."""
+    import zstandard as _zstd
+
+    raw = _zstd.ZstdDecompressor().decompress(blob)
+    xyz_i16 = np.frombuffer(raw[: n_splats * 3 * 2], dtype=np.int16).reshape(
+        n_splats, 3
+    )
+    quat_i16 = np.frombuffer(
+        raw[n_splats * 3 * 2 : n_splats * 3 * 2 * 2], dtype=np.int16
+    ).reshape(n_splats, 3)
+    xyz = bbox_min + (xyz_i16.astype(np.float32) + 32768.0) / 65535.0 * span
+    qxyz = quat_i16.astype(np.float32) / 32767.0
+    qw = np.sqrt(np.clip(1.0 - (qxyz * qxyz).sum(axis=1), 0.0, 1.0))
+    quat = np.empty((n_splats, 4), dtype=np.float32)
+    quat[:, 0] = qw
+    quat[:, 1:4] = qxyz
+    return xyz, quat
+
+
+def _decode_static_block(
+    fh, header: dict
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Decode the static (rgb, opacity, scales) block from an open file."""
+    import zstandard as _zstd
+
+    fh.seek(header["static_offset"])
+    raw = fh.read(header["static_size"])
+    blob = _zstd.ZstdDecompressor().decompress(raw)
+    n_sp = header["n_splats"]
+    rgb_bytes = n_sp * 3 * 2
+    rgb_f16 = np.frombuffer(blob[:rgb_bytes], dtype=np.float16).reshape(n_sp, 3).copy()
+    opacity_u8 = np.frombuffer(blob[rgb_bytes : rgb_bytes + n_sp], dtype=np.uint8).copy()
+    scales_f16 = np.frombuffer(
+        blob[rgb_bytes + n_sp : rgb_bytes + n_sp + n_sp * 3 * 2],
+        dtype=np.float16,
+    ).reshape(n_sp, 3).copy()
+    return rgb_f16, opacity_u8, scales_f16
+
+
+class SplatRing:
+    """A per-cell ring buffer of decoded (xyz, quat) frames.
+
+    Owns:
+      - A path to the source .gsq file (only opened when decoding).
+      - Frame index + bbox (parsed once at construction).
+      - A small ring of decoded frames keyed by absolute frame index.
+      - One daemon decoder thread serving requests from a deque.
+
+    Thread-safety: ``has_frame`` / ``get_frame`` / ``request_*`` /
+    ``advance`` / ``close`` are all safe to call concurrently with the
+    decoder thread. Internal mutation is serialized through ``_lock``.
+
+    The class is intentionally NOT a context manager — viser_headless'
+    cell LRU eviction path calls ``close()`` explicitly so the lifecycle
+    is observable and a misuse can't silently leak threads.
+    """
+
+    # ---------- construction / shutdown ----------
+
+    def __init__(
+        self,
+        gsq_path: Path,
+        window_size: int | None = None,
+        prefetch_ahead: int = 4,
+    ) -> None:
+        """Open and parse the .gsq header at ``gsq_path``.
+
+        Decodes the static block (rgb, opacity, scales) eagerly because
+        it's small (~6 MB for 200k splats) and required for every render.
+        Frames are NOT decoded here — request frame 0 separately if you
+        want it warm immediately (the constructor schedules that for you).
+        """
+        self._path = Path(gsq_path)
+        if window_size is None:
+            window_size = _read_window_size_from_env()
+        if window_size <= 0:
+            raise ValueError(f"window_size must be > 0, got {window_size}")
+        self._window_size = int(window_size)
+        self._prefetch_ahead = max(1, int(prefetch_ahead))
+
+        # Parse header + frame index from disk. Cheap (~80 + 16 × n_frames
+        # bytes) and lets every later op compare against ``n_frames``.
+        with open(self._path, "rb") as f:
+            head_buf = f.read(80)
+            if len(head_buf) < 80:
+                raise ValueError(f"{self._path}: short header")
+            (n_frames_peek,) = _struct.unpack_from("<I", head_buf, 12)
+            idx_buf = f.read(n_frames_peek * 16)
+            self._header = _parse_gsq_header(head_buf + idx_buf)
+
+            # Decode the static block once. Render loop reads from
+            # ``static`` directly, no decode path on the hot tick.
+            rgb_f16, opacity_u8, scales_f16 = _decode_static_block(f, self._header)
+
+        bbox_min = self._header["bbox_min"]
+        bbox_max = self._header["bbox_max"]
+        self._span = (bbox_max - bbox_min).astype(np.float32)
+        self._span[self._span == 0] = 1.0
+
+        self._static = {
+            "rgb_f16": rgb_f16,
+            "opacity_u8": opacity_u8,
+            "scales_f16": scales_f16,
+            "bbox_min": bbox_min,
+            "bbox_max": bbox_max,
+            "n_splats": self._header["n_splats"],
+            "n_frames": self._header["n_frames"],
+            "fps_hint": self._header["fps_hint"],
+        }
+
+        # Ring: OrderedDict mapping absolute frame idx -> (xyz, quat).
+        # Eviction picks the frame farthest from ``_cursor``, NOT pure
+        # LRU — playback wants the K frames closest to "where we are".
+        self._ring: OrderedDict[int, FrameTuple] = OrderedDict()
+        self._cursor = 0       # latest absolute frame the render loop pushed
+        self._requests: list[int] = []  # queue of absolute frame indices
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._closed = False
+        # Stats — read by tests and (optionally) by /state for diagnostics.
+        self._stutter_count = 0
+        self._decoded_count = 0
+        self._evicted_count = 0
+
+        self._thread = threading.Thread(
+            target=self._decoder_loop,
+            name=f"SplatRingDecode[{self._path.name}]",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop the decoder thread and release the ring.
+
+        Idempotent: safe to call from any thread, multiple times. Does
+        NOT join the daemon thread with a long timeout — the file handle
+        is opened per-decode in the decoder loop, so there's nothing to
+        leak if the thread is still mid-decode at shutdown.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._wake.set()
+        # Best-effort join. Decoder loop checks ``_closed`` between
+        # frame decodes; a long join would block the eviction path on
+        # the laptop where zstd decode of one frame can take ~50 ms.
+        self._thread.join(timeout=1.0)
+        with self._lock:
+            self._ring.clear()
+            self._requests.clear()
+
+    # ---------- public properties ----------
+
+    @property
+    def gsq_path(self) -> Path:
+        return self._path
+
+    @property
+    def n_frames(self) -> int:
+        return int(self._static["n_frames"])
+
+    @property
+    def n_splats(self) -> int:
+        return int(self._static["n_splats"])
+
+    @property
+    def fps_hint(self) -> float:
+        return float(self._static["fps_hint"])
+
+    @property
+    def bbox_min(self) -> np.ndarray:
+        return self._static["bbox_min"]
+
+    @property
+    def bbox_max(self) -> np.ndarray:
+        return self._static["bbox_max"]
+
+    @property
+    def static(self) -> dict:
+        """Read-only view of static attrs. Treat values as immutable."""
+        return self._static
+
+    @property
+    def window_size(self) -> int:
+        return self._window_size
+
+    def stats(self) -> dict:
+        """Snapshot of decode counters for diagnostics / tests."""
+        with self._lock:
+            return {
+                "decoded": self._decoded_count,
+                "evicted": self._evicted_count,
+                "stutter": self._stutter_count,
+                "ring_size": len(self._ring),
+                "cursor": self._cursor,
+            }
+
+    # ---------- query / hint API ----------
+
+    def has_frame(self, idx: int) -> bool:
+        """True iff frame ``idx`` is currently decoded and in the ring."""
+        if not (0 <= idx < self.n_frames):
+            return False
+        with self._lock:
+            return idx in self._ring
+
+    def get_frame(self, idx: int) -> FrameTuple | None:
+        """Return decoded (xyz, quat) for frame ``idx`` or ``None``.
+
+        Render loop's hot path; must be branch-light + lock-cheap. The
+        ring lookup is O(1) on the OrderedDict; eviction never runs
+        from this side.
+        """
+        if not (0 <= idx < self.n_frames):
+            return None
+        with self._lock:
+            return self._ring.get(idx)
+
+    def note_stutter(self) -> None:
+        """Account a render-loop stutter for diagnostics.
+
+        Called by the render loop when ``get_frame`` returns None for
+        the next desired frame and playback holds instead of skipping.
+        Cheap; the lock is uncontended on the render thread.
+        """
+        with self._lock:
+            self._stutter_count += 1
+
+    def request_frame(self, idx: int) -> None:
+        """Queue an async decode for frame ``idx``. Idempotent.
+
+        Returns immediately; caller polls ``has_frame``. Decoder will
+        drop the request if the frame is already in the ring by the
+        time it's picked up.
+        """
+        if not (0 <= idx < self.n_frames):
+            return
+        with self._lock:
+            if self._closed:
+                return
+            if idx in self._ring:
+                return
+            if idx not in self._requests:
+                self._requests.append(idx)
+        self._wake.set()
+
+    def request_window(self, center_idx: int) -> None:
+        """Reseed the ring around ``center_idx`` (scrub-jump entry point).
+
+        Clears the in-progress request queue, evicts ring entries that
+        fall outside the new [center - K/2, center + K/2] window, and
+        enqueues missing frames in distance-from-center order so the
+        center frame decodes first.
+
+        The cursor is also moved to ``center_idx`` so subsequent
+        ``advance(n)`` calls grow the window forward as usual.
+        """
+        idx = max(0, min(int(center_idx), self.n_frames - 1))
+        with self._lock:
+            if self._closed:
+                return
+            half = max(1, self._window_size // 2)
+            lo = max(0, idx - half)
+            hi = min(self.n_frames - 1, idx + half)
+            # Evict anything outside the new window.
+            for k in list(self._ring.keys()):
+                if k < lo or k > hi:
+                    self._ring.pop(k, None)
+                    self._evicted_count += 1
+            # Replace request queue with an in-window list, ordered
+            # nearest-to-center first.
+            wanted = [
+                j for j in range(lo, hi + 1)
+                if j not in self._ring
+            ]
+            wanted.sort(key=lambda j: abs(j - idx))
+            self._requests = wanted
+            self._cursor = idx
+        self._wake.set()
+
+    def advance(self, current_idx: int) -> None:
+        """Hint that playback is at ``current_idx`` and moving forward.
+
+        Decoder pre-decodes the next ``prefetch_ahead`` frames. If the
+        ring would overflow, the farthest-from-cursor frames are evicted
+        first (most often: frames N below the cursor that were just
+        watched).
+        """
+        idx = max(0, min(int(current_idx), self.n_frames - 1))
+        with self._lock:
+            if self._closed:
+                return
+            self._cursor = idx
+            need = []
+            for d in range(self._prefetch_ahead + 1):
+                j = idx + d
+                if j >= self.n_frames:
+                    break
+                if j in self._ring or j in self._requests:
+                    continue
+                need.append(j)
+            if need:
+                self._requests.extend(need)
+                self._wake.set()
+
+    # ---------- decoder thread ----------
+
+    def _pick_next_request(self) -> int | None:
+        """Pull the next request from the queue under the lock.
+
+        Skips frames that are already in the ring (happens when scrub
+        clears + re-enqueues races with a still-in-flight decode).
+        """
+        while self._requests:
+            idx = self._requests.pop(0)
+            if idx in self._ring:
+                continue
+            return idx
+        return None
+
+    def _evict_one_for_insert(self, new_idx: int) -> None:
+        """Make room for ``new_idx``: drop the entry farthest from cursor.
+
+        Called under ``_lock``. If the ring is below capacity this is a
+        no-op. If the existing farthest entry is closer to cursor than
+        ``new_idx``, we drop ``new_idx`` instead by leaving the ring as
+        is and signaling failure via not inserting — but that path is
+        actually fine to insert too (it just means the new frame replaces
+        a slightly-closer one). To keep semantics simple: we always make
+        room and let the caller insert ``new_idx``.
+        """
+        if len(self._ring) < self._window_size:
+            return
+        # Find farthest-from-cursor key.
+        farthest_key = None
+        farthest_dist = -1
+        cursor = self._cursor
+        for k in self._ring.keys():
+            d = abs(k - cursor)
+            if d > farthest_dist:
+                farthest_dist = d
+                farthest_key = k
+        if farthest_key is None:
+            return
+        # If the new frame would be even farther than the current farthest,
+        # don't bother inserting — but it's still fine to let it in; the
+        # next eviction (on the NEXT advance) will trim it again. Simpler
+        # to just always evict + insert.
+        self._ring.pop(farthest_key, None)
+        self._evicted_count += 1
+
+    def _decoder_loop(self) -> None:
+        """Service decode requests until ``close()``.
+
+        Opens the .gsq once per request (not once for the lifetime of
+        the ring) — the OS keeps the inode in page cache, so re-open
+        cost is negligible compared to the zstd decode (~50 ms for a
+        200k-splat frame). One-shot opens make the close path trivial.
+        """
+        while True:
+            self._wake.wait(timeout=1.0)
+            self._wake.clear()
+            while True:
+                with self._lock:
+                    if self._closed:
+                        return
+                    idx = self._pick_next_request()
+                if idx is None:
+                    break
+                try:
+                    xyz, quat = self._decode_one(idx)
+                except Exception:
+                    # Decode failure (corrupt file, partial download race).
+                    # Drop the request; render loop will keep stuttering
+                    # on this index until the file fixes itself, which is
+                    # acceptable since this is far off the happy path.
+                    continue
+                with self._lock:
+                    if self._closed:
+                        return
+                    self._evict_one_for_insert(idx)
+                    self._ring[idx] = (xyz, quat)
+                    self._decoded_count += 1
+            with self._lock:
+                if self._closed:
+                    return
+
+    def _decode_one(self, idx: int) -> FrameTuple:
+        """Decode a single frame from disk. Called only from decoder thread."""
+        off, sz = self._header["frame_index"][idx]
+        with open(self._path, "rb") as f:
+            f.seek(off)
+            blob = f.read(sz)
+        return _dequantize_frame(
+            blob,
+            self._static["n_splats"],
+            self._static["bbox_min"],
+            self._span,
+        )
+
+    # ---------- synchronous helpers (used by tests + initial paint) ----------
+
+    def decode_blocking(self, idx: int, timeout: float = 5.0) -> FrameTuple:
+        """Decode + insert frame ``idx`` synchronously.
+
+        Convenience for tests and the initial "make sure frame 0 is
+        ready" path. Bypasses the decoder thread by doing the work on
+        the caller's thread, then inserts the result into the ring under
+        the lock.
+        """
+        if not (0 <= idx < self.n_frames):
+            raise IndexError(f"frame {idx} out of range [0, {self.n_frames})")
+        # Fast path: already in ring.
+        cached = self.get_frame(idx)
+        if cached is not None:
+            return cached
+        xyz, quat = self._decode_one(idx)
+        with self._lock:
+            if not self._closed:
+                self._evict_one_for_insert(idx)
+                self._ring[idx] = (xyz, quat)
+                self._decoded_count += 1
+        return xyz, quat
+
+    def wait_for_frame(self, idx: int, timeout: float = 5.0) -> bool:
+        """Block until ``has_frame(idx)`` is True or ``timeout`` elapses.
+
+        Returns True on success, False on timeout. Polls at 5 ms — the
+        decoder posts to the ring via the same lock, so a short poll
+        loop is cheap and avoids adding a condition variable just for
+        this rarely-used helper.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.has_frame(idx):
+                return True
+            time.sleep(0.005)
+        return self.has_frame(idx)
+
+
+def make_static_cell(ring: SplatRing, viser_k: float = 1.0) -> dict:
+    """Build a static-attrs cell dict mirroring _build_gsq_cell_dict.
+
+    The render loop in viser_headless reads these fields directly off
+    the cell. ``frames`` and ``quats`` are NOT present here — those go
+    through the ring. ``ring`` is stashed under the ``_ring`` key so
+    the render loop has a back-reference without needing a second dict
+    lookup.
+    """
+    static = ring.static
+    K2 = viser_k * viser_k
+    bbox_lo = (static["bbox_min"] * viser_k).astype(np.float32)
+    bbox_hi = (static["bbox_max"] * viser_k).astype(np.float32)
+    scales_f32 = static["scales_f16"].astype(np.float32)
+    return {
+        "version": 2,
+        "ring": ring,                 # new entry point for sliding-window cells
+        "n_frames": ring.n_frames,    # mirrored convenience read
+        "scales_sq": (scales_f32 * scales_f32) * K2,
+        "rgb": static["rgb_f16"].astype(np.float32),
+        "opacity": (static["opacity_u8"].astype(np.float32) / 255.0).reshape(-1, 1),
+        "bbox_lo": bbox_lo,
+        "bbox_hi": bbox_hi,
+    }
+
+
+def iter_frame_indices_around(center: int, k: int, n_frames: int) -> Iterable[int]:
+    """Yield up to ``k`` valid frame indices around ``center``, nearest first.
+
+    Used by tests and by sanity-check tooling — not by the ring itself
+    (which inlines the same math inside request_window).
+    """
+    if n_frames <= 0:
+        return
+    center = max(0, min(int(center), n_frames - 1))
+    half = max(1, k // 2)
+    lo = max(0, center - half)
+    hi = min(n_frames - 1, center + half)
+    candidates = list(range(lo, hi + 1))
+    candidates.sort(key=lambda j: abs(j - center))
+    for c in candidates[:k]:
+        yield c
