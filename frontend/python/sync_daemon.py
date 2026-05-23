@@ -1,11 +1,11 @@
 """Client-side sync daemon.
 
-Mirrors the server's per-sequence caches (`viser.npz` for Splats mode,
+Mirrors the server's per-sequence caches (`splats.gsq` for Splats mode,
 `frames.bin` for Points mode) plus the per-sequence `_meta.json` so the
 client's outliner surfaces sim runs produced on the server without a
 manual stub. See ../docs/ARCHITECTURE.md for the split-topology
 rationale — short version: pushing per-frame xyz over WAN at 30 fps is
-~2 Gbps, hopeless. A one-time .npz download per sequence then local
+~2 Gbps, hopeless. A one-time .gsq download per sequence then local
 playback is the only path that scales.
 
 Loop, every `--interval` seconds:
@@ -15,17 +15,17 @@ Loop, every `--interval` seconds:
        /api/sequences walk surfaces the run with proper source / model
        / bbox metadata.
     3. If server's cache mtime > local file's mtime (or local file is
-       missing), download .npz via HTTP Range.
-    4. Atomic write: stream to <name>.npz.partial, then rename in place.
+       missing), download .gsq via HTTP Range.
+    4. Atomic write: stream to <name>.gsq.partial, then rename in place.
        Partial downloads on the next pass resume via Range.
-    5. After successful .npz download, POST to viser_headless's
+    5. After successful .gsq download, POST to viser_headless's
        /reload?cell=<name> so it re-mmaps the new file.
     6. Write a status snapshot to --status-file (default
        /tmp/gsfluent_sync_status.json) for the UI's offline indicator.
 
 Failure modes:
     - Server unreachable: status flips to {"online": false}, retry next tick.
-    - Download interrupted (e.g., network drop): partial file stays, next
+    - Download interrupted (e.g., network drop): .gsq.partial stays, next
       pass resumes with Range header.
     - viser_headless unreachable: warning logged, daemon continues. The
       next viser_headless start will mmap the latest local file anyway.
@@ -324,7 +324,7 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
     caller can write it to --status-file after each tick.
 
     Layout we mirror to:
-      <cache_root>/viser/<name>.npz         (Splats mode, mmap'd by viser_headless)
+      <cache_root>/viser/<name>.gsq         (Splats mode, mmap'd by viser_headless)
       <cache_root>/frames-bin/<name>.bin    (Points mode, mmap'd by local_stream)
       <library_root>/<name>/_meta.json      (Outliner metadata)
     """
@@ -371,10 +371,10 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
         name_q = urllib.parse.quote(name, safe="")
 
         # ---- _meta.json -----------------------------------------------
-        # Mirror first so the seq dir + meta exist before the .npz
+        # Mirror first so the seq dir + meta exist before the .gsq
         # arrives in the parallel cache tree. /api/sequences on the
         # client walks library_root to surface entries; without this
-        # the .npz lands in cache/viser/ unreachable from the outliner.
+        # the .gsq lands in cache/viser/ unreachable from the outliner.
         try:
             wrote = _mirror_meta(s, library_root)
             if wrote:
@@ -388,12 +388,17 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
             if verbose:
                 print(f"[sync] {name}/_meta.json: FAILED — {e}", file=sys.stderr)
 
-        # ---- viser .npz ------------------------------------------------
-        npz_mtime = cache_info.get("viser_npz_mtime")
-        npz_bytes = cache_info.get("viser_npz_bytes")
-        npz_local = viser_dir / f"{name}.npz"
-        if _needs_sync(npz_mtime, npz_bytes, npz_local):
-            url = f"{server}/api/sequences/{name_q}/cache/viser.npz"
+        # ---- viser .gsq ------------------------------------------------
+        # Server contract since the NPZ→GSQ rewire: cache descriptor
+        # keys are splats_gsq_*, served at /cache/splats.gsq. The old
+        # viser_npz_* / viser.npz pair was removed from api/sequences.py
+        # in the same rewire. Reading the old keys returned None on every
+        # tick, so this block silently never fired.
+        gsq_mtime = cache_info.get("splats_gsq_mtime")
+        gsq_bytes = cache_info.get("splats_gsq_bytes")
+        gsq_local = viser_dir / f"{name}.gsq"
+        if _needs_sync(gsq_mtime, gsq_bytes, gsq_local):
+            url = f"{server}/api/sequences/{name_q}/cache/splats.gsq"
 
             # Per-chunk progress: stamp the in-memory status with the
             # latest bytes-so-far and flush to disk so the workbench's
@@ -409,18 +414,18 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
                     write_status(status, status_file)
 
             try:
-                w = _download_resumable(url, npz_local, npz_bytes,
+                w = _download_resumable(url, gsq_local, gsq_bytes,
                                         on_progress=_on_dl_progress)
                 status.files_synced += 1
                 status.bytes_downloaded += w
-                # Clear the in-flight entry; the viser_npz block carries
+                # Clear the in-flight entry; the splats_gsq block carries
                 # the "done" signal. Leaving "download" around would
                 # confuse the workbench into thinking another tick is
                 # pending.
                 per.pop("download", None)
-                per["viser_npz"] = {"ok": True, "bytes": npz_bytes, "synced_unix": time.time()}
+                per["splats_gsq"] = {"ok": True, "bytes": gsq_bytes, "synced_unix": time.time()}
                 if verbose:
-                    print(f"[sync] {name}/viser.npz: {w/1e6:.1f} MB downloaded")
+                    print(f"[sync] {name}/splats.gsq: {w/1e6:.1f} MB downloaded")
                 # Tell viser to re-mmap, if reachable.
                 if viser_control:
                     try:
@@ -431,9 +436,9 @@ def sync_once(server: str, cache_root: Path, library_root: Path,
                             print(f"[sync]   viser /reload?cell={name} unreachable")
             except IOError as e:
                 per.pop("download", None)
-                per["viser_npz"] = {"ok": False, "error": str(e)}
+                per["splats_gsq"] = {"ok": False, "error": str(e)}
                 if verbose:
-                    print(f"[sync] {name}/viser.npz: FAILED — {e}", file=sys.stderr)
+                    print(f"[sync] {name}/splats.gsq: FAILED — {e}", file=sys.stderr)
 
         # ---- frames.bin -----------------------------------------------
         bin_mtime = cache_info.get("frames_bin_mtime")

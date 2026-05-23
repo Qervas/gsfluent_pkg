@@ -50,12 +50,14 @@ export type SequenceItem = {
   converted_from?: "y-up" | null;
   // Server-side cache descriptor. Always present in the response —
   // individual field values may be null when the corresponding artifact
-  // hasn't been built (run batch_convert_to_npz.py / pack_sequence.py
-  // on server). Used by the sync daemon for staleness detection and
-  // surfaced in the outliner as size/synced indicators.
+  // hasn't been built (run pack_splats.py / pack_sequence.py on server).
+  // Used by the sync daemon for staleness detection and surfaced in the
+  // outliner as size/synced indicators. Field names mirror the server's
+  // api/sequences.py exactly: splats_gsq_* for the Splats-mode cache,
+  // frames_bin_* for the Points-mode cache.
   cache: {
-    viser_npz_mtime:  number | null;
-    viser_npz_bytes:  number | null;
+    splats_gsq_mtime: number | null;
+    splats_gsq_bytes: number | null;
     frames_bin_mtime: number | null;
     frames_bin_bytes: number | null;
   };

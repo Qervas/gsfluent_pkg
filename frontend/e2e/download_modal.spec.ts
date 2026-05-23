@@ -59,8 +59,8 @@ test("clicking an unloaded sequence shows the Download modal", async ({ page }) 
           is_broken: false,
           created_at: null,
           cache: {
-            viser_npz_mtime: null,
-            viser_npz_bytes: null,
+            splats_gsq_mtime: null,
+            splats_gsq_bytes: null,
             frames_bin_mtime: null,
             frames_bin_bytes: null,
           },
