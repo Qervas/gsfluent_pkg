@@ -5,8 +5,11 @@
 # This unit assumes:
 #   - A dedicated system user `gsfluent` (created during install).
 #   - The repo is checked out under /opt/gsfluent (or symlinked there).
-#   - A uv-managed virtualenv lives at /opt/gsfluent/.venv with
-#     uvicorn + gsfluent installed (`uv sync` was run in /opt/gsfluent/server).
+#   - The unified uv-managed virtualenv lives at /opt/gsfluent/.venv
+#     with uvicorn + gsfluent installed. Build it once with:
+#       uv venv .venv --python 3.12
+#       uv pip install --python .venv/bin/python -e 'server[dev]'
+#     (or, on a workstation, just `cd frontend && npm install`).
 #
 # Edit the User= / WorkingDirectory= / ExecStart= lines to match your
 # install path. The dev-box variant `gsfluent-backend.dev.service` runs

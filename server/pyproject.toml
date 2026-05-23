@@ -15,6 +15,15 @@ dependencies = [
   "pydantic>=2.6",
   "python-multipart>=0.0.9",
   "pyyaml>=6.0",
+  # Numeric stack used by core/fusers (KNN+Kabsch via scipy.spatial.cKDTree)
+  # and by api/stream + every PLY-handling path. Both are server-side
+  # essentials, not client-only renderer deps.
+  "numpy>=1.24",
+  "scipy>=1.10",
+  # zstandard: decoder/encoder for the .gsq streamable splat format
+  # (server/tools/pack_splats.py emits zstd-compressed per-frame chunks
+  # consumed by core/codecs/gsq.py).
+  "zstandard>=0.22",
 ]
 
 [project.optional-dependencies]
@@ -26,13 +35,21 @@ dev = [
   "mypy>=1.10",
   "hypothesis>=6.100",
 ]
-# Client-side extras: pulled in by `uv sync --extra client` on the
-# machine that runs viser/sync_daemon/local_stream + the SPA. The
-# server install (plain `uv sync`) deliberately omits these — the
-# server doesn't render anything.
+# Client-side extras: the renderer/sidecar stack that runs on each
+# teammate's laptop alongside the SPA. Installed by the unified root
+# venv (frontend/scripts/install.mjs) via `uv pip install -e
+# server[dev,client]`. The production server install can skip this
+# extra (it doesn't render anything) by omitting --extra client.
 #   - viser pinned <2: the 1.x API (initial_camera, GaussianSplatHandle,
-#     on_client_connect) is what tools/viser_headless.py depends on.
-client = ["viser>=1.0,<2", "numpy>=1.24"]
+#     on_client_connect) is what frontend/python/viser_headless.py
+#     depends on.
+#   - httpx + eval_type_backport: the FastAPI sidecar that viser_headless
+#     bolts onto port 8092 for /set, /state, etc.
+client = [
+  "viser>=1.0,<2",
+  "httpx>=0.27",
+  "eval_type_backport>=0.2",
+]
 
 [project.scripts]
 gsfluent = "gsfluent.cli:main"

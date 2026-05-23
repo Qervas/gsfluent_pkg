@@ -17,9 +17,11 @@ Two unit files are provided:
 | `gsfluent-backend.service` | Production. Runs as a dedicated `gsfluent` system user under `/opt/gsfluent`. |
 | `gsfluent-backend.dev.service` | Dev box / single-operator. Runs as the current user from the repo checkout. |
 
-Both expect Python 3.10+, `uv`-managed virtualenv at `<repo>/.venv`,
-and the env vars `GSFLUENT_SIM_HOME` + `GSFLUENT_SIM_PYTHON` set
-(typically via an `.env` file loaded by `EnvironmentFile=`).
+Both expect Python 3.10+, the unified `uv`-managed virtualenv at
+`<repo>/.venv` (single venv for both server and client stacks; see
+`frontend/scripts/install.mjs` or `server/Makefile`), and the env
+vars `GSFLUENT_SIM_HOME` + `GSFLUENT_SIM_PYTHON` set (typically via
+an `.env` file loaded by `EnvironmentFile=`).
 
 ## Install — production form
 
@@ -29,12 +31,15 @@ Replace `/opt/gsfluent` with your actual checkout path if different.
 # 1. Create the system user.
 sudo useradd --system --shell /usr/sbin/nologin --home /opt/gsfluent gsfluent
 
-# 2. Lay down the code and venv.
+# 2. Lay down the code and the unified venv.
 sudo mkdir -p /opt/gsfluent
 sudo chown gsfluent:gsfluent /opt/gsfluent
 sudo -u gsfluent git clone https://example.invalid/gsfluent_pkg.git /opt/gsfluent
 cd /opt/gsfluent
-sudo -u gsfluent uv sync --directory server
+# Production GPU box: skip the client extra (no renderer) and just
+# install the server stack + dev tools into the unified <repo>/.venv.
+sudo -u gsfluent uv venv .venv --python 3.12
+sudo -u gsfluent uv pip install --python .venv/bin/python -e 'server[dev]'
 
 # 3. Make sure work/ is writable by the service user.
 sudo -u gsfluent mkdir -p /opt/gsfluent/work
@@ -75,9 +80,12 @@ cp deploy/gsfluent-backend.dev.service \
 #    with your real path.
 $EDITOR ~/.config/systemd/user/gsfluent-backend.service
 
-# 3. Make sure the venv has uvicorn + gsfluent installed.
+# 3. Make sure the unified root venv has uvicorn + gsfluent installed.
 cd /path/to/your/gsfluent_pkg
-uv sync --directory server
+# If you already ran `cd frontend && npm install`, the unified .venv
+# is already built. Otherwise, materialise it directly:
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -e 'server[dev,client]'
 
 # 4. Reload + start.
 systemctl --user daemon-reload
@@ -193,7 +201,9 @@ Common causes:
   preflight errors.
 - `work/` directory not writable by the service user (production: did
   you `chown gsfluent:gsfluent /opt/gsfluent/work`?).
-- `.venv/bin/uvicorn` missing -> `uv sync` was not run.
+- `.venv/bin/uvicorn` missing -> the unified venv wasn't built;
+  run `uv pip install --python .venv/bin/python -e 'server[dev]'`
+  (or `cd frontend && npm install` on a workstation).
 
 Once fixed, clear the start limit: `systemctl reset-failed
 gsfluent-backend.service` then `systemctl restart gsfluent-backend.service`.

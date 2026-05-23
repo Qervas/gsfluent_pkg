@@ -11,16 +11,28 @@ numpy). Simulation itself runs on the GPU server, not here
 
 ## Install
 
-This package is normally installed by the top-level
-`../setup-view.sh`. To install standalone:
+There is a SINGLE unified `.venv/` at the repo root that holds both
+server and client deps (Python 3.12, managed by `uv`). It is normally
+created by `npm install` in `../frontend/` (which runs
+`frontend/scripts/install.mjs`).
+
+For a server-only install (no viser/SPA — useful on a GPU box that
+never renders):
 
 ```bash
 cd server
-pip install -e .
+make install-server        # uv pip install -e .[dev] into ../.venv/
 ```
 
-That registers the `gsfluent` console script. For the SPA, build it
-first or run vite alongside in dev mode:
+Or pull the full client+dev stack into the unified venv:
+
+```bash
+cd server
+make install               # uv pip install -e .[dev,client]
+```
+
+That registers the `gsfluent` console script in `../.venv/bin/`. For
+the SPA, build it via the frontend:
 
 ```bash
 # production: bake the SPA into server/gsfluent/static/
@@ -46,7 +58,7 @@ use `../run-server.sh` (this box) + `../run-laptop.sh` (laptop) instead.
 
 ```bash
 cd server
-make test     # pytest -v
+make test     # PYTHONPATH=. ../.venv/bin/python -m pytest -v
 ```
 
 ## Layout

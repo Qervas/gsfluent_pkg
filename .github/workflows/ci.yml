@@ -109,7 +109,11 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          # Pinned to 3.12 to match the unified <repo>/.venv built by
+          # frontend/scripts/install.mjs. Older 3.10 worked when scipy/
+          # zstandard weren't pinned core deps; now they are, and 3.12
+          # is the version where the lockfile is exercised in dev.
+          python-version: '3.12'
 
       - name: Install gsfluent dev deps
         working-directory: server
@@ -147,7 +151,11 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          # Pinned to 3.12 to match the unified <repo>/.venv built by
+          # frontend/scripts/install.mjs. Older 3.10 worked when scipy/
+          # zstandard weren't pinned core deps; now they are, and 3.12
+          # is the version where the lockfile is exercised in dev.
+          python-version: '3.12'
 
       - name: Install gsfluent dev deps
         working-directory: server
@@ -167,7 +175,11 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          # Pinned to 3.12 to match the unified <repo>/.venv built by
+          # frontend/scripts/install.mjs. Older 3.10 worked when scipy/
+          # zstandard weren't pinned core deps; now they are, and 3.12
+          # is the version where the lockfile is exercised in dev.
+          python-version: '3.12'
 
       - name: Install gsfluent dev deps
         working-directory: server
@@ -187,7 +199,11 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          # Pinned to 3.12 to match the unified <repo>/.venv built by
+          # frontend/scripts/install.mjs. Older 3.10 worked when scipy/
+          # zstandard weren't pinned core deps; now they are, and 3.12
+          # is the version where the lockfile is exercised in dev.
+          python-version: '3.12'
 
       - name: Install gsfluent dev deps
         working-directory: server
