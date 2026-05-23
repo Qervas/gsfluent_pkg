@@ -252,6 +252,84 @@ If `systemctl status` hangs at `activating: start` and never reaches
    show gsfluent-backend.service | grep NOTIFY` or add a one-shot debug
    line at the top of `composition.build_app`.
 
+## HTTP/2 via Caddy (production-recommended)
+
+uvicorn does NOT speak HTTP/2 natively (as of late 2025). For
+production we run Caddy as a reverse proxy in front of uvicorn — Caddy
+terminates HTTP/2 + TLS at the edge and talks plain HTTP/1.1 over
+loopback to uvicorn. The browser + SPA see HTTP/2 (multiplexed
+streams, header compression, no head-of-line blocking on the
+`splats.gsq` body while a `/state` poll fires).
+
+Why not switch uvicorn to hypercorn (which does support HTTP/2)?
+Hypercorn would work but is operational churn: different CLI args,
+different startup-notification semantics, and our existing systemd
+units assume uvicorn. Caddy is a 5-line config and gives HTTP/2 +
+Let's Encrypt for free.
+
+The committed `deploy/gsfluent-backend.service` keeps `uvicorn` in
+`ExecStart=` so direct-access debugging (`curl
+http://127.0.0.1:7869/api/health`) still works. Caddy fronts it for
+public traffic.
+
+Install:
+
+```bash
+# 1. Install Caddy. Debian/Ubuntu:
+sudo apt install -y caddy
+# macOS:
+brew install caddy
+
+# 2. Drop the example config in place and edit the hostname.
+sudo cp deploy/caddy.example.conf /etc/caddy/Caddyfile
+sudoedit /etc/caddy/Caddyfile      # replace backend.example.com
+
+# 3. Reload Caddy. systemd's caddy.service is already installed by the
+#    package; `reload` re-reads the Caddyfile without dropping connections.
+sudo systemctl reload caddy
+
+# 4. Verify Caddy is healthy.
+sudo systemctl status caddy
+sudo caddy validate --config /etc/caddy/Caddyfile  # parses + lints
+```
+
+Verify HTTP/2 is live end-to-end:
+
+```bash
+# Browser-facing should be HTTP/2.
+curl -sIv https://backend.example.com/api/health 2>&1 | grep -E '^(HTTP|>) '
+# → expect `HTTP/2 200`.
+
+# Splats.gsq body should also be HTTP/2 (and benefit from the
+# Phase-5 Cache-Control: immutable + ETag header).
+curl -o /dev/null -w '%{http_version} %{time_total}\n' \
+  https://backend.example.com/api/sequences/<name>/cache/splats.gsq
+# → expect `2 <seconds>`.
+```
+
+Where the latency win comes from:
+
+- **TCP/TLS handshake amortization**: HTTP/2 multiplexes many requests
+  over one connection. The SPA's per-tick `/state` poll + the
+  per-frame WS-style `/set` calls + the splats.gsq body all share
+  the same TLS connection. With HTTP/1.1 the browser would either
+  open 6 parallel TCP connections (each with its own ~100 ms handshake)
+  or serialize them.
+- **HPACK header compression**: per-request overhead drops from ~600 B
+  to ~50 B for a typical `/state` poll. Across 30 polls/s the savings
+  add up to a few KB/s saved on cellular.
+- **No head-of-line blocking**: a long-running splats.gsq stream over
+  HTTP/2 doesn't block a `/state` poll on the same connection.
+
+What HTTP/2 doesn't help:
+
+- WebSocket frames (viser's own WS port 8092) are HTTP/1.1 Upgrade and
+  stay that way under Caddy. The HTTP/2 win is for the FastAPI sidecar
+  + the `splats.gsq` body, not the viser WS.
+
+See `deploy/caddy.example.conf` for the full annotated config (Range
+passthrough, timeout tuning, access log path).
+
 ## Uninstall
 
 ```bash
