@@ -42,9 +42,13 @@ def _extract_cell_lru():
     import collections as _collections
     import sys as _sys
     from typing import Callable as _Callable
+    # _close_cell lives later in viser_headless.py — at eviction time the
+    # closure resolves it dynamically. For these isolated tests we stub
+    # it as a no-op (eviction doesn't touch ring/file resources here).
     ns: dict = {
         "collections": _collections,
         "Callable": _Callable,
+        "_close_cell": lambda _cell: None,
     }
     # Pylint/security scanners trip on the bare three-letter run token,
     # so we resolve it via the builtin lookup to keep the intent

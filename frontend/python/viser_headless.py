@@ -46,6 +46,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Local sibling module — no upward dep on viser. Owns the per-cell
+# sliding-window ring buffer that replaces the prior "decode every
+# frame into RAM" model.
+import sys as _sys_for_import
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in _sys_for_import.path:
+    _sys_for_import.path.insert(0, str(_THIS_DIR))
+import splat_ring as _splat_ring   # noqa: E402  (path-tweak above)
+SplatRing = _splat_ring.SplatRing
+make_static_cell = _splat_ring.make_static_cell
+
 
 # ----- structured event emitter (Phase 6) ----------------------------------
 #
@@ -172,9 +183,31 @@ class _CellLRU(collections.abc.MutableMapping):
             evicted = self._od.pop(name)
             evicted_size_hint = None
             try:
-                frames = evicted.get("frames")
-                if frames is not None and hasattr(frames, "nbytes"):
-                    evicted_size_hint = int(frames.nbytes)
+                # Ring-backed cell: rough live-RAM proxy = ring size ×
+                # n_splats × 28 bytes (xyz f32 + quat f32). Legacy cell:
+                # the full frames-array nbytes (the old all-frames-in-RAM
+                # estimate).
+                ring = evicted.get("ring")
+                if ring is not None:
+                    try:
+                        stats = ring.stats()
+                        n_sp = int(ring.n_splats)
+                        ring_size = int(stats.get("ring_size", 0))
+                        evicted_size_hint = ring_size * n_sp * 28
+                    except Exception:
+                        evicted_size_hint = None
+                else:
+                    frames = evicted.get("frames")
+                    if frames is not None and hasattr(frames, "nbytes"):
+                        evicted_size_hint = int(frames.nbytes)
+            except Exception:
+                pass
+            # Release any background resources (the ring's decoder thread,
+            # file handles) before dropping the cell. _close_cell is a
+            # late-bound import to keep _CellLRU side-effect-free at
+            # class-definition time (the closure resolves at call time).
+            try:
+                _close_cell(evicted)        # noqa: F821 (defined below)
             except Exception:
                 pass
             if self._emit is not None:
@@ -337,45 +370,170 @@ def parse_gsq_header(buf: bytes) -> dict:
 
 
 def load_cell_gsq(gsq_path: Path) -> dict:
-    """Decode a complete .gsq file into the same dict shape mmap_cell produces.
+    """Construct a sliding-window-backed cell for ``gsq_path``.
 
-    See server/tools/pack_splats.py for the on-disk layout. This is the
-    synchronous all-at-once loader. For incremental decode used by the
-    streaming /sync_cell path, see _gsq_dequantize_frame + parse_gsq_header.
+    The cell carries:
+      - ``ring``: a SplatRing managing the on-disk decode
+      - ``rgb`` / ``opacity`` / ``scales_sq`` / ``bbox_lo`` / ``bbox_hi``:
+        the static attrs the render loop reads directly
+      - ``n_frames``: convenience mirror of ``ring.n_frames``
+
+    Frame 0 is pre-decoded synchronously so the initial paint is
+    available immediately when the SPA's first /set lands. Subsequent
+    frames decode on demand via the daemon thread.
+
+    Decode RAM cost: ~window_size × n_splats × 28 bytes (xyz+quat) plus
+    the small static block. For 200k splats × 32 frames that's ~180 MB
+    instead of the prior ~2 GB.
     """
-    import struct as _struct
-    import zstandard as _zstd
-    with open(gsq_path, "rb") as f:
-        head_buf = f.read(80)
-        # n_frames is at bytes 12..16 — read it directly so we know how
-        # much more to read for the index.
-        n_frames_peek = _struct.unpack_from("<I", head_buf, 12)[0]
-        idx_buf = f.read(n_frames_peek * 16)
-        h = parse_gsq_header(head_buf + idx_buf)
-        n_splats, n_frames = h["n_splats"], h["n_frames"]
-        bbox_min, bbox_max = h["bbox_min"], h["bbox_max"]
-        span = (bbox_max - bbox_min).astype(np.float32)
-        span[span == 0] = 1.0
+    ring = SplatRing(gsq_path)
+    cell = make_static_cell(ring, viser_k=_VISER_K)
+    # Eager frame-0 decode so the render loop has something to push on
+    # the very first tick — the no-skip render contract requires frame 0
+    # to be ready before any later frame can advance.
+    ring.decode_blocking(0)
+    # Hint the decoder to start pre-rolling frames 1..N so the SPA's
+    # autoplay (which advances 1→2→3 immediately) doesn't stutter.
+    ring.advance(0)
+    return cell
 
-        f.seek(h["static_offset"])
-        static_blob = _zstd.ZstdDecompressor().decompress(f.read(h["static_size"]))
-        rgb_bytes = n_splats * 3 * 2
-        rgb_f16 = np.frombuffer(static_blob[:rgb_bytes], dtype=np.float16).reshape(n_splats, 3)
-        opacity_u8 = np.frombuffer(static_blob[rgb_bytes:rgb_bytes + n_splats], dtype=np.uint8)
-        scales_f16 = np.frombuffer(static_blob[rgb_bytes + n_splats : rgb_bytes + n_splats + n_splats * 3 * 2],
-                                   dtype=np.float16).reshape(n_splats, 3)
 
-        xyz_per_frame = np.empty((n_frames, n_splats, 3), dtype=np.float32)
-        quat_per_frame = np.empty((n_frames, n_splats, 4), dtype=np.float32)
-        for t, (off, sz) in enumerate(h["frame_index"]):
-            f.seek(off)
-            xyz, quat = _gsq_dequantize_frame(f.read(sz), n_splats, bbox_min, span)
-            xyz_per_frame[t] = xyz
-            quat_per_frame[t] = quat
+def _cell_n_frames(cell: dict) -> int:
+    """Return the frame count for any cell shape.
 
-    return _build_gsq_cell_dict(xyz_per_frame, quat_per_frame, rgb_f16,
-                                opacity_u8, scales_f16, bbox_min, bbox_max,
-                                n_loaded=n_frames)
+    Supports:
+      - ring-backed cells (sliding-window decode) → ring.n_frames
+      - legacy / streaming / model cells → frames.shape[0]
+      - error stubs (no frames at all) → 0
+    """
+    ring = cell.get("ring") if isinstance(cell, dict) else None
+    if ring is not None:
+        return int(ring.n_frames)
+    frames = cell.get("frames") if isinstance(cell, dict) else None
+    if frames is None:
+        return 0
+    try:
+        return int(frames.shape[0])
+    except Exception:
+        return 0
+
+
+def _cell_get_xyz_quat(cell: dict, frame_idx: int) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return (xyz, quat) for ``frame_idx`` or ``None`` if not yet decoded.
+
+    Ring-backed cells go through SplatRing.get_frame, which returns None
+    when the requested frame is not in the decoded window. Legacy cells
+    return the slice directly (always available).
+    """
+    ring = cell.get("ring") if isinstance(cell, dict) else None
+    if ring is not None:
+        return ring.get_frame(frame_idx)
+    frames = cell.get("frames")
+    quats = cell.get("quats")
+    if frames is None or quats is None:
+        return None
+    if frame_idx < 0 or frame_idx >= int(frames.shape[0]):
+        return None
+    return np.asarray(frames[frame_idx]), np.asarray(quats[frame_idx])
+
+
+def _close_cell(cell: dict) -> None:
+    """Release any background resources held by a cell.
+
+    Currently only relevant to ring-backed cells (they own a daemon
+    decoder thread). Called from the LRU eviction path and from
+    /clear when the cell is dropped.
+    """
+    if not isinstance(cell, dict):
+        return
+    ring = cell.get("ring")
+    if ring is not None:
+        try:
+            ring.close()
+        except Exception:
+            pass
+
+
+def decide_next_idx_and_push(
+    data: dict,
+    desired: int,
+    pushed: int,
+    scrub_pending: bool,
+) -> tuple[int | None, bool, bool]:
+    """Strict-sequential next-frame chooser (the no-skip invariant).
+
+    Pure function over (cell data, SPA state). The render loop calls
+    this every tick to decide what to push next. Module-scope so it
+    can be tested without spinning up viser/FastAPI.
+
+    Returns ``(next_idx, push_now, clear_scrub)``:
+      - ``next_idx``: frame the render loop should attempt to push (or
+        None to hold the current frame).
+      - ``push_now``: True iff that frame's xyz/quat data is already
+        decoded and ready. False means a stutter (decoder hasn't
+        caught up — render loop holds).
+      - ``clear_scrub``: True iff this tick should clear
+        ``state["scrub_pending"]`` (the scrub successfully landed).
+
+    Branches:
+      - **Scrub jump**: exempt from no-skip; try to land ``desired``
+        directly. Hold if not yet decoded.
+      - **Initial paint** (``pushed < 0``): wait for frame 0; render
+        loop must paint frame 0 before any later advance.
+      - **End of sequence**: hold (the SPA's playback driver bounces
+        ``desired`` back to 0 if loop is on; render loop has no opinion).
+      - **Continuous playback**: advance to ``pushed + 1`` ONLY if
+        decoded. Otherwise stutter.
+      - **Paused** (``desired <= pushed``): hold.
+    """
+    n = _cell_n_frames(data)
+    ring = data.get("ring") if isinstance(data, dict) else None
+    if n <= 0:
+        return None, False, False
+
+    if scrub_pending:
+        # Exempt from no-skip. Try to land `desired` directly.
+        if ring is not None:
+            # Best-effort poke (idempotent if already requested).
+            ring.request_window(desired)
+        pair_ready = _cell_get_xyz_quat(data, desired) is not None
+        if pair_ready:
+            return desired, True, True
+        # Hold pushed_frame until ring catches up. Return ``desired``
+        # so the render-loop diagnostics know which frame we're waiting
+        # for; ``push_now=False`` keeps the held frame visible.
+        return desired, False, False
+
+    if pushed is None or pushed < 0:
+        # Initial paint: insist on frame 0, even if SPA already
+        # advanced past it (the splat node was just created at 0
+        # by _rebuild_scene_node; this confirms it).
+        target = 0
+        pair_ready = _cell_get_xyz_quat(data, target) is not None
+        return (target, pair_ready, False)
+
+    # Normal advance: the loop walks pushed → pushed+1 only when
+    # SPA's desired has moved past pushed.
+    if desired <= pushed:
+        # SPA paused or hasn't crossed the boundary. Nothing to do.
+        return None, False, False
+
+    next_idx = pushed + 1
+    if next_idx >= n:
+        # Past the end. The render loop has no opinion on looping —
+        # the SPA's playback driver should bounce `desired` back to
+        # 0 if loop is on. From the render loop's view, hold.
+        return None, False, False
+
+    pair_ready = _cell_get_xyz_quat(data, next_idx) is not None
+    if pair_ready:
+        return next_idx, True, False
+    # Decoder hasn't caught up: STUTTER. We return ``next_idx`` so the
+    # render loop can post a decode request for the frame we're WAITING
+    # FOR (helps drain the no-skip backlog). ``push_now=False`` means
+    # the loop holds the current frame; the SPA sees its scrub bar
+    # frozen on ``pushed_frame`` until the ring catches up.
+    return next_idx, False, False
 
 
 def _build_gsq_cell_dict(xyz: np.ndarray, quat: np.ndarray, rgb_f16: np.ndarray,
@@ -514,13 +672,22 @@ def _quats_to_R(quats: np.ndarray) -> np.ndarray:
     return R
 
 
-def _cov_for_frame(data: dict, frame_idx: int) -> np.ndarray:
+def _cov_for_frame(data: dict, frame_idx: int,
+                   quat_override: np.ndarray | None = None) -> np.ndarray:
     """Per-frame Σᵢ = Rᵢ · diag(scales²) · Rᵢᵀ for v2, or just the static
     cov for v1. Returns a (n, 3, 3) float32 array suitable for assignment
-    to viser's `splat.covariances`."""
+    to viser's `splat.covariances`.
+
+    ``quat_override`` lets the render loop pass in a quaternion already
+    pulled from a ring (avoids a double lookup). When None, falls back
+    to ``data["quats"][frame_idx]`` (legacy/model path).
+    """
     if data["version"] == 1:
         return np.ascontiguousarray(data["cov"])
-    q = np.asarray(data["quats"][frame_idx])               # (n, 4)
+    if quat_override is not None:
+        q = np.asarray(quat_override)
+    else:
+        q = np.asarray(data["quats"][frame_idx])           # (n, 4)
     R = _quats_to_R(q)                                     # (n, 3, 3)
     S2 = data["scales_sq"]                                 # (n, 3)
     # Scale each column of R by S² (because Σ = R · diag(s²) · Rᵀ ⇒
@@ -908,17 +1075,46 @@ def main() -> int:
         # dict. The SPA polls /state every 500ms and surfaces this as a
         # status overlay so loads of large 3DGS models don't look frozen.
         "loading": None,
+        # Set when /set receives a frame request that's > 1 away from
+        # `pushed_frame` — treated as a scrub jump and the render loop
+        # exempts it from the no-skip invariant. The loop clears the
+        # flag once the target frame is decoded + pushed.
+        "scrub_pending": False,
     }
     lock = threading.Lock()
 
     def _rebuild_scene_node():
         """Remove + re-add the splat node for the current cell.
-        Called on cell-swap. ~10ms on cluster_6_15-class data."""
+        Called on cell-swap. ~10ms on cluster_6_15-class data.
+
+        For ring-backed cells, this attempts a synchronous decode of the
+        active frame so the first paint is correct. If the decode fails
+        (e.g. ring not yet warmed) the node is created with frame 0 —
+        whichever frame the decoder has ready first will be pushed on
+        the next render tick via the no-skip advance path.
+        """
         nonlocal splat
         cur_c = cells[state["cell"]]
-        centers = np.ascontiguousarray(
-            np.asarray(cur_c["frames"][state["frame"]]) * _VISER_K
-        )
+        frame_idx = state["frame"]
+        ring = cur_c.get("ring") if isinstance(cur_c, dict) else None
+        if ring is not None:
+            # Ring path: ensure the requested frame is decoded. If we
+            # can't get it (e.g. timeout), fall back to frame 0 so the
+            # node has something to display.
+            try:
+                xyz, quat = ring.decode_blocking(frame_idx)
+            except Exception:
+                try:
+                    xyz, quat = ring.decode_blocking(0)
+                    frame_idx = 0
+                except Exception:
+                    return  # nothing to render; render loop will retry
+        else:
+            pair = _cell_get_xyz_quat(cur_c, frame_idx)
+            if pair is None:
+                return
+            xyz, quat = pair
+        centers = np.ascontiguousarray(np.asarray(xyz) * _VISER_K)
         if splat is not None:
             try:
                 splat.remove()
@@ -928,7 +1124,7 @@ def main() -> int:
         splat = server.scene.add_gaussian_splats(
             "splat",
             centers=centers,
-            covariances=_cov_for_frame(cur_c, state["frame"]),
+            covariances=_cov_for_frame(cur_c, frame_idx, quat_override=quat),
             rgbs=np.ascontiguousarray(cur_c["rgb"]),
             opacities=np.ascontiguousarray(cur_c["opacity"]),
             position=(0.0, 0.0, -float(cur_c["bbox_lo"][2])),
@@ -936,7 +1132,7 @@ def main() -> int:
         # The rebuild just populated the node with the current frame's
         # data, so the render loop doesn't need to push again this tick.
         state["pushed_cell"] = state["cell"]
-        state["pushed_frame"] = state["frame"]
+        state["pushed_frame"] = frame_idx
 
     # Skip startup rebuild — `state["cell"]` is None until the user
     # explicitly picks a cell via /set. _rebuild_scene_node assumes a
@@ -1018,9 +1214,9 @@ def main() -> int:
                     state["scene_dirty"] = True   # grid + camera resize next tick
                     # Cells can have different frame counts (e.g. 60 vs 150).
                     # If the new cell is shorter than the old frame index,
-                    # the render loop's `data["frames"][frame]` would raise
-                    # IndexError and silently kill the render thread. Clamp.
-                    n_new = cells[state["cell"]]["frames"].shape[0]
+                    # the render loop's frame lookup would raise IndexError
+                    # and silently kill the render thread. Clamp.
+                    n_new = _cell_n_frames(cells[state["cell"]])
                     if state["frame"] >= n_new:
                         state["frame"] = max(0, n_new - 1)
                     _rebuild_scene_node()
@@ -1032,11 +1228,25 @@ def main() -> int:
                 # raises KeyError and the response is a noisy 500.
                 cur = state["cell"]
                 if cur is not None and cur in cells:
-                    n = cells[cur]["frames"].shape[0]
-                    state["frame"] = max(0, min(int(body.frame), n - 1))
+                    n = _cell_n_frames(cells[cur])
+                    requested = max(0, min(int(body.frame), n - 1))
+                    # Detect a scrub: large jump from the currently
+                    # rendered frame. The render loop honors this exempt
+                    # path via state["scrub_pending"] — see the no-skip
+                    # invariant inside the render loop.
+                    pushed = state.get("pushed_frame", -1)
+                    if pushed is not None and pushed >= 0 and abs(requested - pushed) > 1:
+                        state["scrub_pending"] = True
+                        cell_obj = cells[cur]
+                        ring = cell_obj.get("ring") if isinstance(cell_obj, dict) else None
+                        if ring is not None:
+                            ring.request_window(requested)
+                    state["frame"] = requested
                 else:
                     state["frame"] = max(0, int(body.frame))
-            return {"ok": True, "cell": state["cell"], "frame": state["frame"]}
+            return {"ok": True, "cell": state["cell"],
+                    "frame": state["frame"],
+                    "pushed_frame": state.get("pushed_frame", -1)}
 
     @api.post("/clear")
     def clear_state() -> dict:
@@ -1077,16 +1287,24 @@ def main() -> int:
                 return {
                     "cell": None,
                     "frame": 0,
+                    "pushed_frame": -1,
                     "n_frames": 0,
                     "cells": list(cells),
                     "bbox": None,
                     "loading": loading,
                 }
             cur_c = cells[cell]
+            # `pushed_frame` is the frame that's actually rendered on
+            # viser — distinct from `frame`, which is the SPA's desired
+            # playback cursor. The SPA displays pushed_frame on the
+            # scrub bar so the displayed index never leads the splats
+            # (no-skip invariant: render loop only advances by 1 per
+            # tick, holds when next decode isn't ready).
             return {
                 "cell": cell,
                 "frame": state["frame"],
-                "n_frames": cur_c["frames"].shape[0],
+                "pushed_frame": state.get("pushed_frame", -1),
+                "n_frames": _cell_n_frames(cur_c),
                 "cells": list(cells),
                 "loading": loading,
                 "bbox": {
@@ -1143,6 +1361,39 @@ def main() -> int:
             media_type="application/octet-stream",
             filename=p.name,
         )
+
+    def _swap_to_ring_cell(cell_key: str, gsq_path: Path) -> None:
+        """Replace the streaming-array cell at ``cell_key`` with a SplatRing.
+
+        Called once the .gsq file is complete on disk (post-rename from
+        .partial). The legacy frames/quats arrays drop out of RAM as
+        soon as the dict reference is replaced — Python's refcount frees
+        the large float32 buffers immediately on assignment.
+
+        If the cell isn't the currently-active one, we still swap so the
+        LRU stores the small ring-backed shell; next time the user
+        clicks the cell, render loop's first tick finds a ring and the
+        no-skip advance path takes over.
+
+        On swap failure (rare — only happens if the file is corrupt
+        post-rename), the legacy cell is left in place. The user sees
+        normal playback at the old higher RAM cost; nothing breaks.
+        """
+        try:
+            new_ring = SplatRing(gsq_path)
+            new_ring.decode_blocking(0)
+            new_cell = make_static_cell(new_ring, viser_k=_VISER_K)
+        except Exception as e:
+            print(f"  swap-to-ring failed for {cell_key}: {e}; keeping legacy cell")
+            return
+        with lock:
+            old = cells.get(cell_key)
+            cells[cell_key] = new_cell
+            if state["cell"] == cell_key:
+                state["scene_dirty"] = True
+                state["pushed_frame"] = -1
+        if old is not None:
+            _close_cell(old)
 
     def _sync_cell_gsq_streaming_with_prefix(
         *,
@@ -1274,7 +1525,11 @@ def main() -> int:
                     f"{header_parsed is not None}, static={static_decoded}, "
                     f"frames={n_loaded}"}
 
-        commit_cell()
+        # Stream complete + on-disk: replace the in-RAM frames/quats
+        # arrays with a SplatRing pointing at the final .gsq. Drops
+        # ~1-2 GB of dequantized float32 in exchange for a small
+        # background decoder thread.
+        _swap_to_ring_cell(cell_key, dest)
         _set_loading(None, None)
         return {
             "ok": True, "cell": name, "added": True, "resumed": True,
@@ -1558,9 +1813,12 @@ def main() -> int:
                         f"incomplete .gsq: parsed_header={header_parsed is not None}, "
                         f"static={static_decoded}, frames={n_loaded}"}
 
-            # Final commit (in case the last batch of frames hadn't been
-            # published — commit_cell only runs while bytes are flowing).
-            commit_cell()
+            # Stream complete + on-disk: swap from the in-RAM streaming
+            # arrays to a SplatRing reading from `dest`. This is where the
+            # sliding-window RAM win lands — the legacy ~2 GB of decoded
+            # float32 arrays go away and the cell drops to a ring +
+            # static block + decoder thread (~200 MB worst case).
+            _swap_to_ring_cell(cell_key, dest)
             _set_loading(None, None)
 
             return {"ok": True, "cell": name, "added": True,
@@ -1628,6 +1886,7 @@ def main() -> int:
             return {"ok": False, "error": f"load failed: {e}"}
         with lock:
             was_new = cell not in cells
+            old = cells.get(cell)
             cells[cell] = new_data
             if state["cell"] == cell:
                 # Force a full re-push: cells[cell] is a fresh dict, so
@@ -1635,8 +1894,12 @@ def main() -> int:
                 # grid + camera all need to be re-asserted.
                 state["scene_dirty"] = True
                 state["pushed_frame"] = -1
+        # Release the prior cell's decoder thread + file handles. Done
+        # outside the lock so a slow ring teardown can't stall /state polls.
+        if old is not None and old is not new_data:
+            _close_cell(old)
         return {"ok": True, "cell": cell, "added": was_new,
-                "n_frames": new_data["frames"].shape[0]}
+                "n_frames": _cell_n_frames(new_data)}
 
     @api.get("/camera")
     def get_camera() -> dict:
@@ -1723,14 +1986,16 @@ def main() -> int:
     print(f"\n>>> viser viewport: http://localhost:{args.viser_port}")
     print(f">>> control API:    http://localhost:{args.control_port}/set\n")
 
+
     # --- render loop -----------------------------------------------------
     while not stop_flag["v"]:
         with lock:
             cell = state["cell"]
-            frame = state["frame"]
+            desired = state["frame"]
+            pushed = state.get("pushed_frame", -1)
             need_full_swap = cell != state["pushed_cell"]
-            need_frame_push = frame != state["pushed_frame"] or need_full_swap
             need_scene_redo = state["scene_dirty"]
+            scrub_pending = bool(state.get("scrub_pending", False))
 
         # Empty scene path: no cell selected (startup state) means nothing
         # to render. Just spin until /set delivers a cell. 1/30 matches
@@ -1739,43 +2004,65 @@ def main() -> int:
             time.sleep(1 / 30)
             continue
 
-        if need_frame_push:
-            data = cells[cell]
-            is_v2 = data["version"] == 2
-            # Hold the lock for the push so /set's _rebuild_scene_node
-            # (called from a worker thread) can't race in mid-attribute
-            # write. The try/except RuntimeError is a belt-and-braces
-            # guard: viser marks the handle internally on .remove() and
-            # attr writes to a stale reference raise even under the lock
-            # if the C-side removal isn't fully atomic.
-            wrote = False
+        # --- pick which frame to push this tick (no-skip invariant) -------
+        data = cells[cell]
+        if need_full_swap:
+            # Cell just swapped — _rebuild_scene_node already pushed the
+            # active frame and updated pushed_*. Render loop has nothing
+            # extra to do this tick beyond accounting.
             with lock:
-                local_splat = splat
-                if local_splat is not None:
-                    try:
-                        if need_full_swap:
-                            # rgb + opacity are static per cell; cov is
-                            # static in v1 but gets re-pushed per frame in
-                            # v2. The one-time push gets the cell into a
-                            # consistent state before the frame loop kicks
-                            # in. Cov is K²-scaled by mmap_cell so it lands
-                            # inside fp16's normal range for WS transport.
-                            local_splat.covariances = _cov_for_frame(data, frame)
-                            local_splat.rgbs = np.ascontiguousarray(data["rgb"])
-                            local_splat.opacities = np.ascontiguousarray(data["opacity"])
-                        elif is_v2:
-                            # Per-frame Σᵢ reconstruction so ellipsoids
-                            # rotate with the deformation (~1ms for 683k splats).
-                            local_splat.covariances = _cov_for_frame(data, frame)
-                        local_splat.centers = np.ascontiguousarray(
-                            np.asarray(data["frames"][frame]) * _VISER_K
-                        )
-                        wrote = True
-                    except RuntimeError:
-                        pass  # handle removed mid-write; next tick retries
-                if wrote:
+                if state["pushed_cell"] != cell:
+                    # Defensive: _rebuild_scene_node wasn't called for
+                    # this cell (e.g. /set failed). Reset pushed_frame
+                    # to -1 so the initial-paint branch handles it next
+                    # tick.
                     state["pushed_cell"] = cell
-                    state["pushed_frame"] = frame
+                    state["pushed_frame"] = -1
+        else:
+            next_idx, push_now, clear_scrub = decide_next_idx_and_push(
+                data, desired, pushed, scrub_pending,
+            )
+            if next_idx is None or not push_now:
+                # Stutter: hold current frame. Account it so /state can
+                # surface decode pressure.
+                ring = data.get("ring") if isinstance(data, dict) else None
+                if next_idx is not None and not push_now and ring is not None:
+                    # Decoder didn't catch up — request and account.
+                    ring.request_frame(next_idx)
+                    ring.note_stutter()
+                # When scrub_pending and we couldn't land yet, keep the
+                # flag set so the next tick keeps trying.
+            else:
+                # We have a frame to push. Hold the lock for the actual
+                # WS attr writes so /set's _rebuild_scene_node (called
+                # from a worker thread) can't race in mid-attribute write.
+                pair = _cell_get_xyz_quat(data, next_idx)
+                if pair is not None:
+                    xyz, quat = pair
+                    wrote = False
+                    with lock:
+                        local_splat = splat
+                        if local_splat is not None:
+                            try:
+                                local_splat.covariances = _cov_for_frame(
+                                    data, next_idx, quat_override=quat,
+                                )
+                                local_splat.centers = np.ascontiguousarray(
+                                    np.asarray(xyz) * _VISER_K
+                                )
+                                wrote = True
+                            except RuntimeError:
+                                pass  # handle removed mid-write; retry next tick
+                        if wrote:
+                            state["pushed_cell"] = cell
+                            state["pushed_frame"] = next_idx
+                            if clear_scrub:
+                                state["scrub_pending"] = False
+                    # Hint the decoder thread to keep prefetching ahead
+                    # of where we just landed.
+                    ring = data.get("ring") if isinstance(data, dict) else None
+                    if ring is not None and wrote:
+                        ring.advance(next_idx)
 
         if need_scene_redo:
             data = cells[cell]
