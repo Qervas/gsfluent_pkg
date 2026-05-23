@@ -181,8 +181,8 @@ def _add_legacy_introspection_routes(app: FastAPI) -> None:
             "platform":      platform.platform(),
             "python":        sys.version.split()[0],
             "pkg_root":      str(PKG_ROOT),
-            "sim_script":    os.environ.get("GSFLUENT_SIM_SCRIPT_RUNNER", "<default>"),
             "sim_home":      os.environ.get("GSFLUENT_SIM_HOME", "<default>"),
+            "sim_python":    os.environ.get("GSFLUENT_SIM_PYTHON", "<default>"),
             "in_container":  Path("/.dockerenv").exists(),
         }
 
