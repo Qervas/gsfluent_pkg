@@ -1434,10 +1434,16 @@ def main() -> int:
                 scales_f16, bbox_min, bbox_max, n_loaded=n_loaded,
             )
             with lock:
+                old = cells.get(cell_key)
                 cells[cell_key] = cell
                 if state["cell"] == cell_key:
                     state["scene_dirty"] = True
                     state["pushed_frame"] = -1
+            # Close any prior ring-backed cell. Same dict produced by a
+            # prior streaming commit would be a legacy cell with no ring,
+            # so _close_cell is a no-op in the common case.
+            if old is not None and old is not cell:
+                _close_cell(old)
 
         # Decode whatever is already in the prefix BEFORE any new bytes
         # arrive. This handles the case where the prior run had decoded
@@ -1614,10 +1620,16 @@ def main() -> int:
                         print(f"  cache hit decode failed for {name}: {e}; re-downloading")
                     else:
                         with lock:
+                            old_cached = cells.get(cell_key)
                             cells[cell_key] = cell
                             if state["cell"] == cell_key:
                                 state["scene_dirty"] = True
                                 state["pushed_frame"] = -1
+                        # Release any prior ring/file handles outside
+                        # the lock so a slow teardown can't stall /state
+                        # polls. Idempotent on non-ring cells.
+                        if old_cached is not None and old_cached is not cell:
+                            _close_cell(old_cached)
                         _set_loading(None, None)
                         _emit_event(
                             "cell.cache.hit",
@@ -1728,10 +1740,15 @@ def main() -> int:
                         scales_f16, bbox_min, bbox_max, n_loaded=n_loaded,
                     )
                     with lock:
+                        old = cells.get(cell_key)
                         cells[cell_key] = cell
                         if state["cell"] == cell_key:
                             state["scene_dirty"] = True
                             state["pushed_frame"] = -1
+                    # Release any prior ring (rare — would only happen
+                    # if the user re-downloads while a ring is live).
+                    if old is not None and old is not cell:
+                        _close_cell(old)
 
                 try:
                     for chunk in r.iter_bytes(chunk_size=1024 * 1024):
