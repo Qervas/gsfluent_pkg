@@ -26,6 +26,7 @@ streamable cache); .npz is fully retired.
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as _dt
 import json as _json
 import os as _os
@@ -35,6 +36,7 @@ import sys as _sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import httpx
 import numpy as np
@@ -81,6 +83,114 @@ def _emit_event(event: str, **context):
         _sys.stderr.flush()
     except Exception:
         pass
+
+# ----- bounded cell cache (Phase 7: prevent unbounded RAM growth) -----------
+#
+# A single decoded sequence cell is 200-400 MB resident (n_splats × n_frames
+# × 7 floats × 4 bytes). The original `cells: dict[str, dict]` never
+# evicted, so over a long session with 5-10 sequence loads RAM grew to
+# 2-4 GB — eventually OOMing the laptop or thrashing swap. This LRU caps
+# the live-decoded set; re-clicking an evicted cell triggers a fresh
+# decode from the .gsq on disk (Tier 2: ~1-3s) rather than the from-RAM
+# Tier 1 path. The active cell is never evicted, so playback never
+# stalls because a render-loop tick lost its current cell.
+#
+# Reads via __getitem__ AND writes via __setitem__ both update MRU
+# position. Pure existence checks (__contains__) are passive — they do
+# NOT move-to-end, so a `name in cells` poll from /state can't fight
+# the eviction order.
+
+class _CellLRU(collections.abc.MutableMapping):
+    """OrderedDict-backed LRU. Drop-in for the prior `cells: dict[str, dict]`.
+
+    Constructor args:
+      max_size: cap on live cells; <=0 disables eviction (testing only).
+      pinned:   optional callable returning the name to never evict
+                (typically `lambda: state["cell"]`). Late-bound so the
+                cache can be constructed before `state` exists.
+      emit:     optional callable matching `_emit_event` for evict events.
+    """
+
+    def __init__(
+        self,
+        max_size: int,
+        pinned: Callable[[], str | None] | None = None,
+        emit: Callable[..., None] | None = None,
+    ) -> None:
+        self._od: collections.OrderedDict[str, dict] = collections.OrderedDict()
+        self._max = int(max_size)
+        self._pinned = pinned
+        self._emit = emit
+
+    def __getitem__(self, key: str) -> dict:
+        # Mark as MRU on every read. The render loop reads `cells[cell]`
+        # every tick at 30Hz, so the currently-rendered cell is naturally
+        # held at the MRU end without any explicit pinning.
+        v = self._od[key]
+        self._od.move_to_end(key)
+        return v
+
+    def __setitem__(self, key: str, value: dict) -> None:
+        # If the key already exists, this counts as an update + MRU touch.
+        # If it's new, it's an insert + MRU touch; we may need to evict.
+        is_update = key in self._od
+        self._od[key] = value
+        self._od.move_to_end(key)
+        if not is_update:
+            self._maybe_evict()
+
+    def __delitem__(self, key: str) -> None:
+        del self._od[key]
+
+    def __iter__(self):
+        return iter(self._od)
+
+    def __len__(self) -> int:
+        return len(self._od)
+
+    def __contains__(self, key: object) -> bool:
+        # Pure observation — no MRU update. Lets /state polls and the
+        # `if cell in cells` guards run without disturbing eviction order.
+        return key in self._od
+
+    def _maybe_evict(self) -> None:
+        if self._max <= 0 or len(self._od) <= self._max:
+            return
+        pinned_name = None
+        if self._pinned is not None:
+            try:
+                pinned_name = self._pinned()
+            except Exception:
+                pinned_name = None
+        # Walk from the LRU end forward, skipping the pinned (active)
+        # cell. In normal use only one cell is pinned, so the walk is
+        # O(1) amortized. If every cell is pinned (impossible today —
+        # only one active cell) we'd no-op gracefully.
+        for name in list(self._od.keys()):
+            if name == pinned_name:
+                continue
+            evicted = self._od.pop(name)
+            evicted_size_hint = None
+            try:
+                frames = evicted.get("frames")
+                if frames is not None and hasattr(frames, "nbytes"):
+                    evicted_size_hint = int(frames.nbytes)
+            except Exception:
+                pass
+            if self._emit is not None:
+                try:
+                    self._emit(
+                        "cell.cache.evicted",
+                        cell=name,
+                        max_size=self._max,
+                        live=len(self._od),
+                        frames_bytes=evicted_size_hint,
+                    )
+                except Exception:
+                    pass
+            # One eviction per insert is the contract; loop exits.
+            return
+
 
 # Strict-allowlist regex for any user-supplied identifier that becomes
 # part of a filesystem path. Library sequence names already pass through
@@ -553,7 +663,33 @@ def main() -> int:
     print(f"boot: {len(available)} .gsq cells available in {cache_root} (loaded on demand)")
     for path in available:
         print(f"  available: sequence:{path.stem}  ({path.stat().st_size / 1e6:.0f} MB)")
-    cells: dict[str, dict] = {}
+    # Bounded LRU around decoded cells. The eviction `pinned` callback
+    # late-binds to state["cell"], which is created a few hundred lines
+    # below — Python closures resolve names at call time, so by the time
+    # the first insert happens (inside a FastAPI handler after main()
+    # has fully built `state`) the lookup succeeds. The NameError guard
+    # below handles the (impossible-today) case of an eviction firing
+    # during the brief window between cells construction and state
+    # construction.
+    _max_cached_cells_str = _os.environ.get("GSFLUENT_MAX_CACHED_CELLS", "5")
+    try:
+        _max_cached_cells = int(_max_cached_cells_str)
+    except ValueError:
+        print(f"  warn: GSFLUENT_MAX_CACHED_CELLS={_max_cached_cells_str!r} "
+              "is not an int; using default 5")
+        _max_cached_cells = 5
+
+    def _active_cell_name() -> str | None:
+        try:
+            return state["cell"]  # type: ignore[name-defined]
+        except NameError:
+            return None
+
+    cells: _CellLRU = _CellLRU(
+        max_size=_max_cached_cells,
+        pinned=_active_cell_name,
+        emit=_emit_event,
+    )
 
     def _set_loading(name: str | None, phase: str | None, error: str | None = None) -> None:
         """Brief-locked update to state["loading"] so concurrent /state polls
