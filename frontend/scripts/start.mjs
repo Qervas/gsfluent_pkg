@@ -14,7 +14,7 @@
 //   UI_PORT                default 5173
 //   VISER_PORT             default 8091
 //   CONTROL_PORT           default 8092
-//   VISER_NPZ_DIR          default <repo>/work/cache/viser
+//   VISER_CACHE_DIR        default <repo>/work/cache/viser
 //   OPEN_BROWSER           default 1 (0 disables auto-open)
 
 import { spawn, spawnSync } from "node:child_process";
@@ -36,7 +36,7 @@ dotenv.config({ path: resolve(PKG_ROOT, ".env") });
 const UI_PORT = process.env.UI_PORT ?? "5173";
 const VISER_PORT = process.env.VISER_PORT ?? "8091";
 const CONTROL_PORT = process.env.CONTROL_PORT ?? "8092";
-const VISER_NPZ_DIR = process.env.VISER_NPZ_DIR ?? resolve(PKG_ROOT, "work/cache/viser");
+const VISER_CACHE_DIR = process.env.VISER_CACHE_DIR ?? resolve(PKG_ROOT, "work/cache/viser");
 const BACKEND_URL = process.env.GSFLUENT_BACKEND_URL ?? process.env.BACKEND_URL ?? "";
 const OPEN_BROWSER = process.env.OPEN_BROWSER !== "0";
 
@@ -50,7 +50,7 @@ if (!existsSync(VISER_SCRIPT)) {
   console.error(`ERROR: ${VISER_SCRIPT} missing — wrong working tree?`);
   process.exit(1);
 }
-mkdirSync(VISER_NPZ_DIR, { recursive: true });
+mkdirSync(VISER_CACHE_DIR, { recursive: true });
 
 // ---- rebuild dist if any source file is newer than the last build ----------
 // Without this, `git pull && npm start` silently serves a stale bundle —
@@ -93,7 +93,7 @@ if (process.env.SKIP_BUILD !== "1" && srcIsNewerThanDist()) {
 console.log(`>>> backend:         ${BACKEND_URL || "(unset)"}`);
 console.log(`>>> SPA:             http://localhost:${UI_PORT}/`);
 console.log(`>>> viser_headless:  127.0.0.1:${VISER_PORT} (splats)  127.0.0.1:${CONTROL_PORT} (control)`);
-console.log(`>>> npz cache:       ${VISER_NPZ_DIR}\n`);
+console.log(`>>> viser cache:     ${VISER_CACHE_DIR}\n`);
 
 // ---- run viser + vite in parallel with shared cleanup ---------------------
 
@@ -102,7 +102,7 @@ const { result } = concurrently(
     {
       name: "viser",
       // --server is required: viser_headless fetches model .ply files
-      // from the backend on model-cell resolution, and downloads npz
+      // from the backend on model-cell resolution, and downloads .gsq
       // caches via the new /sync_cell endpoint. Default in the script
       // is http://localhost:8080, which doesn't match this deployment.
       //
@@ -114,7 +114,7 @@ const { result } = concurrently(
       command: [
         VENV_PY,
         VISER_SCRIPT,
-        "--npz_dir", VISER_NPZ_DIR,
+        "--cache-dir", VISER_CACHE_DIR,
         "--viser_port", VISER_PORT,
         "--control_port", CONTROL_PORT,
         ...(BACKEND_URL ? ["--server", BACKEND_URL] : []),

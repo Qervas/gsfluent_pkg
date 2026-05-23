@@ -20,9 +20,8 @@ Latency is whatever viser's WS push + browser render takes (~1 frame).
 Usage:
     python frontend/python/viser_headless.py --cache-dir work/cache/viser
 
-The legacy --npz_dir flag is accepted as a deprecated alias and prints a
-warning on first use (per-process). Same applies to the cache directory
-contents: .gsq is the only format produced today; .npz is fully retired.
+The cache directory holds per-sequence .gsq files (visual-lossless
+streamable cache); .npz is fully retired.
 """
 from __future__ import annotations
 
@@ -505,17 +504,9 @@ class CameraBody(BaseModel):
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
-    # --cache-dir is the canonical Phase-5 flag. --npz_dir is the
-    # deprecated alias kept for one release so existing run-client.sh
-    # invocations keep working; it prints a one-shot warning per process.
-    cache_group = p.add_mutually_exclusive_group(required=True)
-    cache_group.add_argument(
-        "--cache-dir", dest="cache_dir", default=None,
+    p.add_argument(
+        "--cache-dir", dest="cache_dir", required=True,
         help="Directory containing per-sequence .gsq cache files",
-    )
-    cache_group.add_argument(
-        "--npz_dir", dest="cache_dir_legacy", default=None,
-        help="[DEPRECATED] Use --cache-dir. Same meaning, kept for back-compat.",
     )
     p.add_argument("--viser_port", type=int, default=8091,
                    help="Port for viser's HTTP+WS (where the iframe points)")
@@ -550,21 +541,7 @@ def main() -> int:
         _xdg = _os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/{_os.getuid()}"
         args.sync_status_file = Path(_xdg) / "gsfluent_sync_status.json"
 
-    # Resolve --cache-dir vs the deprecated --npz_dir alias. The
-    # mutually-exclusive group above guarantees exactly one of them is
-    # set; here we prefer the new name and warn on first sighting of the
-    # old one (once per process, not per call, since main() runs once).
-    if args.cache_dir_legacy is not None:
-        import warnings as _warnings
-        _warnings.warn(
-            "viser_headless: --npz_dir is deprecated; use --cache-dir. "
-            "The old flag will be removed in the next release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        cache_root = Path(args.cache_dir_legacy)
-    else:
-        cache_root = Path(args.cache_dir)
+    cache_root = Path(args.cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
     # Lazy boot: just enumerate available .gsq files; do not decode.
     # Each .gsq decode is ~1-3s + hundreds of MB of dequantized float32,

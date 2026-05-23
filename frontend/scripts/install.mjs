@@ -7,8 +7,7 @@
 //      sidecar deps (fastapi/uvicorn/httpx/eval_type_backport).
 //   3. Runs `npm run build` to populate frontend/dist/  (unless
 //      PYTHON_ONLY=1, used by `npm run install:python`).
-//   4. Drops a placeholder .npz into work/cache/viser/ so viser_headless
-//      can start on a fresh cache (its --npz_dir loader requires ≥1 file).
+//   4. Ensures work/cache/viser/ exists for viser_headless (--cache-dir).
 //
 // Env:
 //   PYTHON_BIN                 python3.10+ to use (default: python3)
@@ -24,7 +23,7 @@ const FRONTEND_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PKG_ROOT = dirname(FRONTEND_DIR);
 const VENV_DIR = resolve(PKG_ROOT, ".venv");
 const VENV_PY = resolve(VENV_DIR, "bin/python");
-const VISER_NPZ_DIR = resolve(PKG_ROOT, "work/cache/viser");
+const VISER_CACHE_DIR = resolve(PKG_ROOT, "work/cache/viser");
 
 const note = (msg) => console.log(`>>> ${msg}`);
 const die = (msg) => { console.error(`ERROR: ${msg}`); process.exit(1); };
@@ -121,7 +120,7 @@ if (!existsSync(ENV_FILE) && existsSync(ENV_EXAMPLE)) {
 
 // Make sure the cache dir exists. viser_headless now boots fine on an
 // empty dir (lazy cell load on first /set), so no placeholder needed.
-mkdirSync(VISER_NPZ_DIR, { recursive: true });
+mkdirSync(VISER_CACHE_DIR, { recursive: true });
 
 note("done.");
 console.log("\nNext:  cd frontend && npm start");
