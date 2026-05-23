@@ -42,6 +42,32 @@ const f: typeof fetch = (input, init) => {
   return fetch(url, init);
 };
 
+/** Warm the TCP/TLS handshake to the backend by injecting a
+ * `<link rel="preconnect">` head element. Idempotent — re-calls during
+ * one page session are no-ops. Use from outliner hover handlers so a
+ * subsequent click pays only the request-response RTT, not the
+ * full handshake (saves 50-300 ms on a cold connection).
+ *
+ * Same-origin (no VITE_BACKEND_URL) → no-op: the browser is already
+ * connected to its own origin. Only the cross-origin static-host
+ * deployment benefits, but the cost of calling this in the same-origin
+ * case is just a no-op early return. */
+let _preconnected = false;
+export function preconnectBackend(): void {
+  if (_preconnected) return;
+  if (!BACKEND_URL) return;          // same-origin, nothing to warm
+  if (typeof document === "undefined") return; // SSR safety
+  const link = document.createElement("link");
+  link.rel = "preconnect";
+  link.href = BACKEND_URL;
+  // crossorigin matters when the backend serves no-credential GETs —
+  // the browser dedupes preconnect by (href, crossorigin), so the
+  // attribute MUST match what the subsequent fetch will send.
+  link.crossOrigin = "anonymous";
+  document.head.appendChild(link);
+  _preconnected = true;
+}
+
 // Gzip a File/Blob in the browser via the Compression Streams API
 // (Chromium 80+, Firefox 113+, Safari 16.4+). Used by the model upload
 // path to shrink transport size — .ply 3DGS files compress 2-3x with

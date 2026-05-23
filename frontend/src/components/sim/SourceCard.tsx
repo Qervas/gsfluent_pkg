@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Play, Plus, Trash2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, preconnectBackend } from "@/lib/api";
 import { useActiveCell } from "@/lib/use-active-cell";
 import type { ModelItem, SequenceItem } from "@/lib/types";
 
@@ -130,6 +130,7 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
         return (
           <div key={m.name}>
             <div
+              onMouseEnter={preconnectBackend}
               className={
                 "group relative flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
                 (isActiveCell
@@ -189,6 +190,7 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
                     return (
                       <div
                         key={s.name}
+                        onMouseEnter={preconnectBackend}
                         className={
                           "group relative flex items-center gap-1 py-1 px-1 hover:bg-elevated rounded " +
                           (isActive
@@ -252,6 +254,7 @@ export function SourceCard({ onPickModel, onLoadRun }: Props) {
             return (
             <div
               key={s.name}
+              onMouseEnter={preconnectBackend}
               className={
                 "group relative flex items-center gap-1 px-3 py-1 hover:bg-elevated " +
                 (isActive
