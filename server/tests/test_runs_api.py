@@ -1,18 +1,34 @@
 def _isolate(monkeypatch, tmp_path):
-    """Redirect runner.FUSED_DIR + library.SEQUENCES_DIR to tmp paths so
-    tests don't pick up real production data sitting in work/library/."""
-    from gsfluent.core import library, runner
+    """Redirect library.SEQUENCES_DIR + the api/runs _LEGACY_RUNS_DIR
+    fallback to tmp paths so tests don't pick up real production data
+    sitting in work/library/."""
+    from gsfluent.api import runs as runs_api
+    from gsfluent.core import library
     monkeypatch.setattr(library, "LIBRARY_ROOT", tmp_path / "library")
     monkeypatch.setattr(library, "SEQUENCES_DIR", tmp_path / "library" / "sequences")
     monkeypatch.setattr(library, "MODELS_DIR", tmp_path / "library" / "models")
-    monkeypatch.setattr(runner, "FUSED_DIR", tmp_path / "fused")
+    monkeypatch.setattr(runs_api, "_LEGACY_RUNS_DIR", tmp_path / "fused")
+
+
+def _clear_run_state(client):
+    """Empty the in-memory RunStateStore that the app's run_mgr observes.
+
+    The test client shares an app instance across tests; without this,
+    runs persisted by earlier tests (under the production state dir, even
+    if individual tests monkeypatch library paths) keep showing up in
+    /api/runs.
+    """
+    state = client.app.state.state_store
+    for rec in list(state.scan()):
+        try:
+            state._path(rec.id).unlink()
+        except FileNotFoundError:
+            pass
 
 
 def test_runs_list_starts_empty(client, tmp_path, monkeypatch):
-    # The runner registry may have leftovers from earlier tests; ensure clean.
-    from gsfluent.core import runner
     _isolate(monkeypatch, tmp_path)
-    runner._RUNS.clear()
+    _clear_run_state(client)
     r = client.get("/api/runs")
     assert r.status_code == 200
     assert r.json() == []
@@ -70,8 +86,7 @@ def test_post_validates_payload(client):
 
 
 def test_cancel_unknown_run_404(client):
-    from gsfluent.core import runner
-    runner._RUNS.clear()
+    _clear_run_state(client)
     r = client.delete("/api/runs/nonexistent")
     assert r.status_code == 404
 

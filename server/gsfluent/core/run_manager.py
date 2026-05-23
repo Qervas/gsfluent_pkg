@@ -1,14 +1,13 @@
 """AsyncioRunManager — RunManager Protocol concrete implementation.
 
-Phase 2 scope: thin adapter over the legacy core.runner module functions.
+Owns the run lifecycle end-to-end: spawns the sim subprocess in its own
+process group (via spawn_in_new_pg), persists pid/pgid/pid_starttime to
+RunStateRecord so recover_on_boot can defend against PID reuse, and on
+completion records the final state. cancel() uses escalate_kill_pg
+against the persisted pgid.
 
-Phase 4 rewire: when sim_engine is provided, submit() drives it directly
-via a background asyncio task that spawns the sim subprocess in its own
-process group, persists pid/pgid/pid_starttime to RunStateRecord (so
-recover_on_boot can defend against PID reuse), and on completion records
-the final state. cancel() uses escalate_kill_pg against the persisted
-pgid. When sim_engine is None (legacy callers), submit() falls back to
-the original _runner.start_run delegation.
+The legacy `core.runner` delegation path was removed in the Phase-7+
+rewire — `sim_engine` is now required at construction (no fallback).
 
 Cross-plan attribute contract: `_state` (RunStateStore), `_obs`
 (EventEmitter), `_procs` (RunId -> Process), `_futures` (RunId -> Future),
@@ -25,7 +24,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import TypeVar
 
-from gsfluent.core import runner as _runner
 from gsfluent.core.recovery import RecoveryDecision, classify_recovery
 from gsfluent.core.state import (
     RunStateRecord,
@@ -35,6 +33,7 @@ from gsfluent.protocols.cache import CacheCodec
 from gsfluent.protocols.fuse import Fuser
 from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.runs import (
+    TERMINAL_RUN_STATES,
     CapExceededError,
     RecoveryReport,
     RunEvent,
@@ -52,17 +51,6 @@ from gsfluent.protocols.sim import (
 from gsfluent.protocols.storage import Storage
 
 _T = TypeVar("_T")
-
-
-def _runner_state_to_run_state(legacy: str) -> RunState:
-    """Map legacy runner.Run.state strings to the typed RunState enum."""
-    return {
-        "queued": RunState.QUEUED,
-        "running": RunState.RUNNING,
-        "done": RunState.COMPLETED,
-        "error": RunState.FAILED,
-        "cancelled": RunState.CANCELLED,
-    }.get(legacy, RunState.QUEUED)
 
 
 # ---------- process-group lifecycle helpers (Phase 3) --------------------
@@ -181,11 +169,9 @@ def _read_pid_starttime(pid: int) -> float | None:
 
 
 class AsyncioRunManager:
-    """RunManager Protocol shim over the existing core.runner module functions.
+    """RunManager Protocol concrete implementation.
 
-    Construction (Phase 2; Phase-2 callers should pass the new collaborators
-    even though the shim doesn't dispatch through them yet — Phase 3 wires
-    them up):
+    Construction:
         mgr = AsyncioRunManager(
             sim_engine=sim_engine,
             fuser=fuser,
@@ -197,12 +183,9 @@ class AsyncioRunManager:
             particle_count_cap=cfg.caps.particle_count,
         )
 
-    Attribute names are part of the cross-plan contract — Phase 3 and Phase 6
-    reference `_state`, `_obs`, `_procs`, `_futures` directly. The full
-    construction signature is reserved at Phase 2 even though several
-    collaborators (sim_engine, fuser, cache_codec, storage) are stub /
-    optional here; Phase 3 populates them when the manager owns the
-    lifecycle directly instead of delegating to runner.py.
+    Attribute names are part of the cross-plan contract — the recovery,
+    cancel-escalation, and observability flows reference `_state`,
+    `_obs`, `_procs`, `_futures`, `_pgids` directly.
     """
 
     def __init__(
@@ -244,15 +227,12 @@ class AsyncioRunManager:
 
         Recipe carries reserved underscore-prefixed keys for fields not
         in the Protocol (`_run_name`, `_recipe_source_name`, `_particles`).
-        When `self._sim` is a real SimulationEngine, the run is driven by a
-        background asyncio task that owns the subprocess lifecycle (Phase 4
-        rewire). When `self._sim` is None (legacy callers), falls back to
-        the original `_runner.start_run` delegation path.
+        Drives `self._sim` directly via a background asyncio task that
+        owns the subprocess lifecycle.
         """
         run_name = recipe.get("_run_name")
         if not run_name:
             raise ValidationError("recipe missing '_run_name' (shim convention)")
-        recipe_source_name = recipe.get("_recipe_source_name", "unknown")
         particles = recipe.get("_particles", 0)
         try:
             particles = int(particles)
@@ -263,30 +243,12 @@ class AsyncioRunManager:
         if particles < 0:
             raise CapExceededError(f"particles must be >= 0; got {particles}")
 
-        # --- Phase 4 rewire path: drive sim_engine directly when present ---
-        if self._sim is not None:
-            return await self._submit_via_engine(
-                recipe=recipe,
-                model=model,
-                run_name=run_name,
-                particles=particles,
-            )
-
-        # --- Legacy fallback: delegate to runner.start_run (Phase 2 shim) ---
-        legacy_run_id = await _runner.start_run(
+        return await self._submit_via_engine(
+            recipe=recipe,
+            model=model,
             run_name=run_name,
-            model_dir=model.path,
-            recipe_data=recipe,
-            recipe_source_name=recipe_source_name,
             particles=particles,
         )
-        rid = RunId(legacy_run_id)
-        self._state_store.write(RunStateRecord(
-            id=rid,
-            state=RunState.RUNNING,
-            sequence_name=run_name,
-        ))
-        return rid
 
     async def _submit_via_engine(
         self,
@@ -585,10 +547,9 @@ class AsyncioRunManager:
     async def cancel(self, run_id: RunId) -> None:
         """Idempotent cancellation.
 
-        Phase 4 rewire: when self._sim drives the run (modern path), use
-        escalate_kill_pg against the captured pgid + cancel the supervising
-        asyncio task. Falls back to _runner.cancel_run for runs that came
-        in via the legacy path.
+        Uses escalate_kill_pg against the captured pgid + cancels the
+        supervising asyncio task. Unknown / already-terminal runs return
+        silently.
         """
         rec = self._state_store.read(run_id)
         if rec is None or rec.is_terminal():
@@ -606,62 +567,75 @@ class AsyncioRunManager:
         ) if hasattr(self._obs, "child") else self._obs
         cancel_obs.emit("run.cancelling")
 
-        # Modern path: we own the task + pgid -> escalate signal ladder.
+        # We own the task + pgid -> escalate signal ladder.
         task = self._tasks.get(run_id)
         proc = self._procs.get(run_id)
         pgid = self._pgids.get(run_id)
 
-        if task is not None or proc is not None or pgid is not None:
-            # If we have a live Process handle, use escalate_kill_pg for the
-            # full SIGTERM->grace->SIGKILL ladder. Otherwise fall back to a
-            # direct killpg call against the captured pgid.
-            if proc is not None and pgid is not None:
-                try:
-                    await escalate_kill_pg(proc, pgid=pgid)
-                except Exception:
-                    # Best-effort - the engine might have torn down already.
-                    pass
-            elif pgid is not None:
-                try:
-                    os.killpg(pgid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            # Cancel the supervising task so _run_to_completion records
-            # CANCELLED on disk.
-            if task is not None and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            return
-
-        # Legacy path: delegate to runner.cancel_run for runs spawned
-        # through the Phase 2 shim path.
-        _runner.cancel_run(run_id)
+        # If we have a live Process handle, use escalate_kill_pg for the
+        # full SIGTERM->grace->SIGKILL ladder. Otherwise fall back to a
+        # direct killpg call against the captured pgid.
+        if proc is not None and pgid is not None:
+            try:
+                await escalate_kill_pg(proc, pgid=pgid)
+            except Exception:
+                # Best-effort - the engine might have torn down already.
+                pass
+        elif pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        # Cancel the supervising task so _run_to_completion records
+        # CANCELLED on disk.
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def status(self, run_id: RunId) -> RunStatus:
         """Snapshot the run's current state. Raises KeyError if unknown."""
-        run = _runner.get_run(run_id)
         rec = self._state_store.read(run_id)
-        if run is None and rec is None:
+        if rec is None:
             raise KeyError(run_id)
-        # Prefer the live registry state if both exist; fall back to persisted.
-        if run is not None:
-            state = _runner_state_to_run_state(run.state)
-        else:
-            state = rec.state if rec is not None else RunState.QUEUED
-        error = rec.error if rec is not None else None
-        paths = rec.paths if rec is not None else {}
-        return RunStatus(id=run_id, state=state, error=error, paths=paths)
+        return RunStatus(
+            id=run_id,
+            state=rec.state,
+            error=rec.error,
+            paths=rec.paths,
+            sequence_name=rec.sequence_name,
+        )
+
+    def list_active(self) -> list[RunStatus]:
+        """Snapshot of all non-terminal runs from the state store.
+
+        Synchronous so the API layer can call it from non-async request
+        handlers (e.g. GET /api/runs, GET /api/sequences "is_live"
+        filter). The result is a point-in-time snapshot; concurrent
+        writes from background tasks may not be reflected.
+        """
+        out: list[RunStatus] = []
+        for rec in self._state_store.scan():
+            if rec.state in TERMINAL_RUN_STATES:
+                continue
+            out.append(RunStatus(
+                id=RunId(rec.id),
+                state=rec.state,
+                error=rec.error,
+                paths=rec.paths,
+                sequence_name=rec.sequence_name,
+            ))
+        return out
 
     async def stream_events(
         self, run_id: RunId
     ) -> AsyncIterator[RunEvent]:
-        """Phase 2 returns an empty event stream — the legacy runner doesn't
-        emit structured events, just plain stdout lines into run.log.
-        Phase 3 wires this to a real per-run channel that yields RunEvent
-        objects as the lifecycle progresses."""
+        """Returns an empty event stream today; a future change can wire
+        this to a per-run channel that yields RunEvent objects as the
+        lifecycle progresses (the on-disk run.log + journalctl JSON
+        events already cover the same surface from a different angle)."""
         async def _empty():
             if False:
                 yield  # pragma: no cover

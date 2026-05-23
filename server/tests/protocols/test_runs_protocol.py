@@ -82,22 +82,13 @@ def test_validation_and_cap_errors() -> None:
 
 
 @pytest.fixture
-def real_run_mgr(tmp_path, monkeypatch):
-    from gsfluent.core import runner
+def real_run_mgr(tmp_path):
     from gsfluent.core.run_manager import AsyncioRunManager
+    from gsfluent.core.sim_engines.mock import MockSimulationEngine
     from gsfluent.core.state import RunStateStore
 
-    fake_sim = tmp_path / "fake_sim.sh"
-    fake_sim.write_text("#!/bin/bash\necho '[fake]'\nexit 0\n")
-    fake_sim.chmod(0o755)
-    monkeypatch.setattr(runner, "SIM_SCRIPT_RUNNER", fake_sim)
-    monkeypatch.setattr(runner, "FUSED_DIR", tmp_path / "fused")
-    monkeypatch.setattr(runner, "NPZ_REBUILD_AFTER_RUN", False)
-    runner._RUNS.clear()
-
-    # Phase 2 stubs for collaborators the shim accepts but does not yet
-    # dispatch through. Defined inline so this conformance test stays
-    # self-contained and independent of any single concrete impl.
+    # Self-contained stubs — the Protocol conformance check exercises the
+    # Protocol surface; it does not need a real Fuser/Codec/Storage.
     class _NullEmitter:
         def emit(self, event: str, **context) -> None: pass
         def child(self, **context): return self
@@ -108,7 +99,7 @@ def real_run_mgr(tmp_path, monkeypatch):
 
     store = RunStateStore(state_dir=tmp_path / "state" / "runs")
     return AsyncioRunManager(
-        sim_engine=_Stub(),
+        sim_engine=MockSimulationEngine(n_frames=1, n_particles=2),
         fuser=_Stub(),
         cache_codec=_Stub(),
         storage=_Stub(),

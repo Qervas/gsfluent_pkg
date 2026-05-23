@@ -247,7 +247,8 @@ def test_convert_full_3dgs_ply_atomic_no_partial_on_failure(tmp_path: Path):
 
 
 def _isolate(monkeypatch, tmp_path):
-    from gsfluent.core import library, runner
+    from gsfluent.api import runs as runs_api
+    from gsfluent.core import library
     from gsfluent.core import models as core_models
 
     models_dir = tmp_path / "library" / "models"
@@ -261,7 +262,7 @@ def _isolate(monkeypatch, tmp_path):
     # name in that module so wrap_ply_upload uses the tmp path.
     monkeypatch.setattr(core_models, "MODELS_DIR", models_dir)
     monkeypatch.setattr(core_models, "UPLOADS_DIR", models_dir)
-    monkeypatch.setattr(runner, "FUSED_DIR", tmp_path / "fused")
+    monkeypatch.setattr(runs_api, "_LEGACY_RUNS_DIR", tmp_path / "fused")
 
 
 def _write_full_ply(path: Path, n: int = 2) -> None:

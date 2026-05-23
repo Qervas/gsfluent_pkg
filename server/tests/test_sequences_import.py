@@ -52,11 +52,12 @@ def _write_xyz_ply(path: Path, n: int = 2) -> None:
 def _isolate(monkeypatch, tmp_path):
     """Redirect SEQUENCES_DIR + MODELS_DIR + LIBRARY_ROOT to tmp paths so
     tests don't pollute the real work/library/."""
-    from gsfluent.core import library, runner
+    from gsfluent.api import runs as runs_api
+    from gsfluent.core import library
     monkeypatch.setattr(library, "LIBRARY_ROOT", tmp_path / "library")
     monkeypatch.setattr(library, "SEQUENCES_DIR", tmp_path / "library" / "sequences")
     monkeypatch.setattr(library, "MODELS_DIR", tmp_path / "library" / "models")
-    monkeypatch.setattr(runner, "FUSED_DIR", tmp_path / "fused")
+    monkeypatch.setattr(runs_api, "_LEGACY_RUNS_DIR", tmp_path / "fused")
 
 
 # --- direct library.import_sequence ----------------------------------------

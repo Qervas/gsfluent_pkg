@@ -50,6 +50,7 @@ class RunStatus:
     state: RunState
     error: dict[str, Any] | None = None  # {kind, message, details, trace_id}
     paths: dict[str, str] = field(default_factory=dict)  # frames_dir, gsq_path, manifest_path
+    sequence_name: str | None = None  # mirrors RunStateRecord.sequence_name
 
 
 @dataclass(frozen=True)

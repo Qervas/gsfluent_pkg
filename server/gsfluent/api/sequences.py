@@ -18,20 +18,20 @@ import time
 from pathlib import Path
 from threading import Lock
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..core import library as lib
-from ..core import runner
 from ..core.library import Sequence, import_sequence
+from ..protocols.runs import RunManager
 from ..server import PKG_ROOT
 
 # Frame-serving handler is shared with /api/runs/{name}/frame/{idx}.ply
 # so the two URL shapes return the exact same bytes for the same args.
 # Imported at the top (was originally a late-import inside the function
 # to avoid circular-import worries — verified no longer needed).
-from .runs import get_run_frame as _get_run_frame
+from .runs import _get_run_mgr, get_run_frame as _get_run_frame
 
 router = APIRouter(prefix="/api/sequences", tags=["sequences"])
 
@@ -43,14 +43,20 @@ router = APIRouter(prefix="/api/sequences", tags=["sequences"])
 _VISER_CACHE = PKG_ROOT / "work" / "cache" / "viser"
 
 
-def _sequence_dict(seq: Sequence) -> dict:
+def _sequence_dict(seq: Sequence, *, active_names: set[str] | None = None) -> dict:
     """Build the frontend-facing sequence dict.
 
     Carries everything in `_meta.json` plus `is_broken` (computed from the
     frames symlink state). Frame count is taken from meta when present,
     falling back to a live filesystem count for sim-produced sequences
     that may be growing as we read.
+
+    `active_names` is the set of currently-running sequence names (taken
+    from RunManager.list_active()). When this sequence is among them,
+    we re-walk the frames dir for live frame counts.
     """
+    if active_names is None:
+        active_names = set()
     d = seq.meta_dict()
     # Always emit is_broken — frontend reads it to decide whether to show
     # the warning indicator.
@@ -98,8 +104,7 @@ def _sequence_dict(seq: Sequence) -> dict:
     if "frame_count" not in d:
         d["frame_count"] = seq.frame_count()
     else:
-        is_live = any(r.name == seq.name and r.state == "running"
-                      for r in runner.list_runs())
+        is_live = seq.name in active_names
         if is_live:
             d["frame_count"] = seq.frame_count()
     # Cache descriptor: lets the SPA detect what's already built without
@@ -133,18 +138,27 @@ def _stat_size(p: Path) -> int | None:
         return None
 
 
+def _active_sequence_names(run_mgr: RunManager) -> set[str]:
+    """Names of currently-running sequences. Read once per request so a
+    100-sequence library doesn't pay the per-entry cost in /api/sequences."""
+    return {s.sequence_name for s in run_mgr.list_active() if s.sequence_name}
+
+
 @router.get("")
-def list_sequences():
+def list_sequences(
+    run_mgr: RunManager = Depends(_get_run_mgr),
+):
     """List every sequence in the library, both sim-produced and imported.
 
     Newest-first by `created_at` (falls back to dir mtime when missing).
     """
     out: list[dict] = []
+    active = _active_sequence_names(run_mgr)
     for name in Sequence.list():
         seq = Sequence.load(name)
         if seq is None:
             continue
-        out.append(_sequence_dict(seq))
+        out.append(_sequence_dict(seq, active_names=active))
 
     def _sort_key(d: dict) -> tuple[int, str]:
         # Newest first; sequences without a parseable created_at sink.
@@ -174,7 +188,10 @@ class ImportRequest(BaseModel):
 
 
 @router.post("/import")
-def import_endpoint(req: ImportRequest):
+def import_endpoint(
+    req: ImportRequest,
+    run_mgr: RunManager = Depends(_get_run_mgr),
+):
     """Register an external folder of frame_*.ply as a Sequence.
 
     Returns the same dict shape as the list endpoint so the frontend can
@@ -207,7 +224,7 @@ def import_endpoint(req: ImportRequest):
             raise HTTPException(500, f"disk error during import: {msg}") from e
         raise HTTPException(500, f"import failed: {msg}") from e
 
-    return _sequence_dict(seq)
+    return _sequence_dict(seq, active_names=_active_sequence_names(run_mgr))
 
 
 @router.get("/{name}/frame/{frame_idx}.ply")
@@ -442,7 +459,10 @@ def get_frames_bin_cache(name: str):
 
 
 @router.delete("/{name}")
-def delete_sequence(name: str):
+def delete_sequence(
+    name: str,
+    run_mgr: RunManager = Depends(_get_run_mgr),
+):
     """Remove a sequence from the library.
 
     For imports (where frames/ is a symlink), only the library entry +
@@ -462,11 +482,10 @@ def delete_sequence(name: str):
     except ValueError:
         raise HTTPException(400, f"refusing to delete outside library: {name}") from None
 
-    for r in runner.list_runs():
-        if r.name == name and r.state == "running":
-            raise HTTPException(
-                409, f"sequence is still being written: {name}; cancel the run first",
-            )
+    if name in _active_sequence_names(run_mgr):
+        raise HTTPException(
+            409, f"sequence is still being written: {name}; cancel the run first",
+        )
 
     if not Sequence.delete(name):
         raise HTTPException(500, f"failed to delete sequence: {name}")

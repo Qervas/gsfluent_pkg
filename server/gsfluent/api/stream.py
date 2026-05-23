@@ -33,17 +33,33 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from watchfiles import awatch
 
 from ..core import library as lib
-from ..core import runner
 from ..core.frame_stream import (
     PackedReader,
     parse_frame_xyz,
     parse_static_attrs,
 )
-from ..core.runner import _log_task_exception
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Surface exceptions from background tasks (the WS sub_task here, the
+    sim drain in the run manager elsewhere) to the logger instead of letting
+    them die silently in asyncio's "Task exception was never retrieved"
+    warning.
+
+    Lives at the call site since it is the only consumer; the legacy
+    `core.runner._log_task_exception` was deleted along with the rest of
+    the runner module in the Phase-7+ rewire.
+    """
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is not None:
+        _log.error("background task failed: %s", exc, exc_info=exc)
 
 
 @router.websocket("/api/stream")
@@ -98,20 +114,24 @@ _SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 def _resolve_run_dir(run_name: str) -> Path | None:
     """Locate the on-disk dir for `run_name`. Library wins; legacy
-    fused dir only used as a fallback (tests + pre-migration data).
+    runs dir only used as a fallback (tests + pre-migration data).
     Returns None if the run isn't found anywhere.
 
     `run_name` is WebSocket-supplied. Reject anything but plain
-    identifiers — otherwise `run_name="../../etc"` walks outside
-    SEQUENCES_DIR / FUSED_DIR and lets the client read arbitrary dirs
-    via _pump's frame-tail loop.
+    identifiers — otherwise `run_name="../../etc"` walks outside the
+    allowed roots and lets the client read arbitrary dirs via _pump's
+    frame-tail loop.
+
+    Reads `gsfluent.api.runs._LEGACY_RUNS_DIR` lazily so tests can
+    monkeypatch it (the runs module owns the test-override seam).
     """
     if not _SAFE_RUN_NAME.match(run_name):
         return None
     seq_dir = lib.SEQUENCES_DIR / run_name
     if seq_dir.is_dir():
         return seq_dir
-    legacy = runner.FUSED_DIR / run_name
+    from . import runs as _runs_api
+    legacy = _runs_api._LEGACY_RUNS_DIR / run_name
     if legacy.is_dir():
         return legacy
     return None

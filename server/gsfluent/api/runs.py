@@ -14,13 +14,18 @@ Phase 3 hardens the recipe trust boundary: every POST /api/runs body
 goes through strict Pydantic validation + limits.check_recipe_caps()
 BEFORE any subprocess can spawn. Rejections return the spec's 422
 envelope shape `{"error": {"kind", "message", "details", "trace_id"}}`.
+
+Phase 7+ rewire: the route handlers now drive AsyncioRunManager through
+the FastAPI app.state hook the composition root wires up. The legacy
+`core/runner.py` module was deleted; recipe pre-spawn validators moved
+to `core/recipe_validation.py`.
 """
 import json
 import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import (
     BaseModel,
@@ -38,15 +43,23 @@ from ..api.errors import (
     raise_validation_error,
 )
 from ..core import library as lib
-from ..core import runner
+from ..core import recipe_validation
 from ..core.library import Sequence
 from ..core.limits import CapConfig, check_recipe_caps
-from ..protocols.runs import CapExceededError
+from ..protocols.runs import CapExceededError, RunId, RunManager
+from ..protocols.sim import ModelRef
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 
 _SAFE_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
+# Legacy run-dir fallback for the API endpoints below. In production this
+# equals `lib.SEQUENCES_DIR`; tests monkeypatch it at this location so
+# their `<tmp>/fused/<run>/manifest.json` fixtures still exercise the
+# legacy-fallback branches in /api/runs/history and friends.
+_LEGACY_RUNS_DIR: Path = lib.SEQUENCES_DIR
 
 
 class StartRunRequest(BaseModel):
@@ -92,24 +105,37 @@ def _caps_dep() -> CapConfig:
     return CapConfig.from_env()
 
 
+def _get_run_mgr(request: Request) -> RunManager:
+    """FastAPI dependency: pull the RunManager from app.state.
+
+    The composition root attaches `app.state.run_mgr` at startup time.
+    Tests using `TestClient(create_app())` get the production wiring;
+    tests that need to swap in a stub can overwrite `app.state.run_mgr`
+    before issuing the request.
+    """
+    return request.app.state.run_mgr
+
+
 @router.get("")
-def list_active():
+def list_active(
+    run_mgr: RunManager = Depends(_get_run_mgr),
+):
     """Active runs only (state == 'running'). Past runs live in
     /api/runs/history (which walks the on-disk library)."""
     return [
-        {"id": r.id, "name": r.name, "state": r.state}
-        for r in runner.list_runs()
-        if r.state == "running"
+        {"id": str(r.id), "name": r.sequence_name or "", "state": r.state.value}
+        for r in run_mgr.list_active()
     ]
 
 
 @router.post("")
 async def start(
     raw_body: dict,
+    run_mgr: RunManager = Depends(_get_run_mgr),
     caps: CapConfig = Depends(_caps_dep),
 ):
     """Submit a run. Validates request body in strict mode, then enforces
-    recipe caps, then hands the recipe off to runner.start_run().
+    recipe caps, then hands the recipe off to run_mgr.submit().
 
     Rejections return 422 with the standard envelope:
         {"error": {"kind", "message", "details", "trace_id"}}
@@ -201,8 +227,10 @@ async def start(
 
     if req.dry_run:
         try:
-            effective_recipe = runner._translate_sim_area_if_local(req.recipe_data, model_dir)
-            runner._validate_sim_area_intersects_model(
+            effective_recipe = recipe_validation.translate_sim_area_if_local(
+                req.recipe_data, model_dir,
+            )
+            recipe_validation.validate_sim_area_intersects_model(
                 effective_recipe.get("sim_area", []), model_dir,
             )
         except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
@@ -214,13 +242,17 @@ async def start(
         return {"dry_run": True, "valid": True, "run_name": req.run_name, "trace_id": trace_id}
 
     # ---- 4. submit ---------------------------------------------------
+    # Compose the recipe shape AsyncioRunManager.submit() expects:
+    # reserved underscore-prefixed shim keys carry fields not in the
+    # ValidatedRecipe Protocol surface (`_run_name`, `_particles`,
+    # `_recipe_source_name`). Also forward sim_area pre-validation so
+    # the engine inherits the translated bounds.
     try:
-        rid = await runner.start_run(
-            run_name=req.run_name,
-            model_dir=model_dir,
-            recipe_data=req.recipe_data,
-            recipe_source_name=req.recipe_source,
-            particles=req.particles,
+        effective_recipe = recipe_validation.translate_sim_area_if_local(
+            req.recipe_data, model_dir,
+        )
+        recipe_validation.validate_sim_area_intersects_model(
+            effective_recipe.get("sim_area", []), model_dir,
         )
     except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
         raise_validation_error(
@@ -228,53 +260,103 @@ async def start(
             message=f"failed to start run: {e}",
             details={"got": str(e)},
         )
-    return {"run_id": rid, "run_name": req.run_name, "trace_id": trace_id}
+
+    submit_recipe = {
+        **effective_recipe,
+        "_run_name": req.run_name,
+        "_recipe_source_name": req.recipe_source,
+        "_particles": req.particles,
+        "particle_count": req.particles,
+    }
+    try:
+        rid = await run_mgr.submit(
+            submit_recipe,
+            model=ModelRef(name=model_dir.name, path=model_dir),
+        )
+    except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
+        raise_validation_error(
+            kind="validation.recipe_data",
+            message=f"failed to start run: {e}",
+            details={"got": str(e)},
+        )
+    return {"run_id": str(rid), "run_name": req.run_name, "trace_id": trace_id}
 
 
 @router.delete("/{run_id}")
-def cancel(run_id: str):
-    if not runner.cancel_run(run_id):
+async def cancel(
+    run_id: str,
+    run_mgr: RunManager = Depends(_get_run_mgr),
+):
+    """Cancel an active run.
+
+    Returns 404 if the run is unknown OR already terminal — matches the
+    legacy contract (the old `runner.cancel_run` returned False in both
+    cases, which the route translated to 404). The underlying
+    AsyncioRunManager.cancel is idempotent on unknown / terminal runs,
+    so the route checks status first to preserve the 404 signal.
+    """
+    rid = RunId(run_id)
+    try:
+        status = await run_mgr.status(rid)
+    except KeyError:
+        raise HTTPException(404, f"run {run_id} not active") from None
+    if status.state.value in {"completed", "failed", "cancelled", "interrupted"}:
         raise HTTPException(404, f"run {run_id} not active")
+    await run_mgr.cancel(rid)
     return {"status": "cancelled"}
 
 
 def _seq_root() -> Path:
     """Resolve the sequences root.
 
-    Looks first at `runner.FUSED_DIR` for backward compat with tests that
+    Looks first at `_LEGACY_RUNS_DIR` for backward compat with tests that
     monkeypatch it (those tests build a `<tmp>/fused/<name>/manifest.json`
-    layout pre-Phase-1). If FUSED_DIR is the real PKG_ROOT/work/fused dir
-    (the legacy production location) we ignore it — production reads
-    library.SEQUENCES_DIR. Tests pointing FUSED_DIR at a temp path keep
-    working because their layout is what the legacy branch reads.
+    layout pre-Phase-1). If `_LEGACY_RUNS_DIR` is the real
+    `lib.SEQUENCES_DIR` (the production setup) we ignore it — production
+    reads from the library directly. Tests pointing `_LEGACY_RUNS_DIR` at
+    a temp path keep working because their layout is what the legacy
+    branch reads.
     """
     return lib.SEQUENCES_DIR
 
 
+def _active_run_names(run_mgr: RunManager) -> set[str]:
+    """Names of active (non-terminal) runs, for the "don't delete a
+    live sequence" guard. Returns a set so callers can do O(1) lookups
+    even with hundreds of in-flight runs in the state store."""
+    return {
+        s.sequence_name for s in run_mgr.list_active()
+        if s.sequence_name
+    }
+
+
 @router.delete("/history/{run_name}")
-def delete_history(run_name: str):
+def delete_history(
+    run_name: str,
+    run_mgr: RunManager = Depends(_get_run_mgr),
+):
     """Delete a single past run from the library by name.
 
     Path-traversal defense: a run_name like '../../etc' is rejected
     before any rmtree. Refuses to delete a still-running run (the
     in-process registry would still hold a subprocess + log handle).
     """
+    active = _active_run_names(run_mgr)
     if not Sequence.exists(run_name):
         # Fall back to the legacy fused dir for tests / pre-migration data.
-        legacy = (runner.FUSED_DIR / run_name).resolve()
+        legacy = (_LEGACY_RUNS_DIR / run_name).resolve()
         try:
-            legacy.relative_to(runner.FUSED_DIR.resolve())
+            legacy.relative_to(_LEGACY_RUNS_DIR.resolve())
         except ValueError:
             raise HTTPException(400, f"refusing to delete outside library: {run_name}") from None
         if not legacy.exists():
             raise HTTPException(404, f"run not found: {run_name}")
         if not legacy.is_dir():
             raise HTTPException(400, f"not a run directory: {run_name}")
-        for r in runner.list_runs():
-            if r.name == run_name and r.state == "running":
-                raise HTTPException(
-                    409, f"run is still running: {run_name}; cancel it first",
-                )
+        if run_name in active:
+            raise HTTPException(
+                409, f"run is still running: {run_name}; cancel it first",
+            )
         try:
             shutil.rmtree(legacy)
         except OSError as e:
@@ -289,11 +371,10 @@ def delete_history(run_name: str):
     except ValueError:
         raise HTTPException(400, f"refusing to delete outside library: {run_name}") from None
 
-    for r in runner.list_runs():
-        if r.name == run_name and r.state == "running":
-            raise HTTPException(
-                409, f"run is still running: {run_name}; cancel it first",
-            )
+    if run_name in active:
+        raise HTTPException(
+            409, f"run is still running: {run_name}; cancel it first",
+        )
 
     if not Sequence.delete(run_name):
         raise HTTPException(500, f"failed to delete sequence: {run_name}")
@@ -307,7 +388,7 @@ _SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9_.\-]+$")
 def _resolve_run_log(run_name: str) -> Path:
     """Locate run.log for an active OR archived run.
 
-    Active runs write into `runner.FUSED_DIR/<name>/run.log`; once the
+    Active runs write into `_LEGACY_RUNS_DIR/<name>/run.log`; once the
     sequence is archived, the log gets copied into
     `lib.SEQUENCES_DIR/<name>/run.log`. We check both. Raises 400 on a
     bad name, 404 when neither path is a file.
@@ -316,11 +397,11 @@ def _resolve_run_log(run_name: str) -> Path:
         raise HTTPException(400, f"invalid run name: {run_name!r}")
     # Active first (most recently written), then archived.
     candidates = [
-        runner.FUSED_DIR / run_name / "run.log",
+        _LEGACY_RUNS_DIR / run_name / "run.log",
         lib.SEQUENCES_DIR / run_name / "run.log",
     ]
     seq_root = lib.SEQUENCES_DIR.resolve()
-    fused_root = runner.FUSED_DIR.resolve()
+    fused_root = _LEGACY_RUNS_DIR.resolve()
     for p in candidates:
         rp = p.resolve()
         # Path-traversal defense: refuse anything that escapes the two
@@ -387,12 +468,12 @@ async def get_run_frame(run_name: str, frame_idx: int):
         raise HTTPException(404, f"frame {frame_idx} not found in sequence {run_name}")
 
     # Fallback to the legacy fused dir for tests + pre-migration data.
-    target_dir = (runner.FUSED_DIR / run_name).resolve()
-    fused_root = runner.FUSED_DIR.resolve()
+    target_dir = (_LEGACY_RUNS_DIR / run_name).resolve()
+    fused_root = _LEGACY_RUNS_DIR.resolve()
     try:
         target_dir.relative_to(fused_root)
     except ValueError:
-        raise HTTPException(400, f"refusing to read outside FUSED_DIR: {run_name}") from None
+        raise HTTPException(400, f"refusing to read outside run dir: {run_name}") from None
     if not target_dir.is_dir():
         raise HTTPException(404, f"run not found: {run_name}")
     candidates = [
@@ -498,7 +579,7 @@ def _history_entry_from_sequence(seq: Sequence) -> dict | None:
 def _history_entry_from_legacy_dir(d: Path) -> dict | None:
     """Build a HistoryEntry-shaped dict from a pre-Phase-1 fused dir.
 
-    Used by tests that monkeypatch `runner.FUSED_DIR` to a tmp dir
+    Used by tests that monkeypatch `_LEGACY_RUNS_DIR` to a tmp dir
     containing `<run>/manifest.json` files in the old layout, and as a
     fallback for any production data that wasn't run through the migration
     script yet (shouldn't happen, but defensive).
@@ -540,8 +621,8 @@ def history():
 
     Walks `library.SEQUENCES_DIR` and merges each sequence's `_meta.json`
     + (where present) `manifest.json` into a HistoryEntry-shaped dict.
-    Falls back to the legacy `runner.FUSED_DIR` walk for any pre-migration
-    data; tests patch `FUSED_DIR` to a tmp dir.
+    Falls back to the legacy `_LEGACY_RUNS_DIR` walk for any pre-migration
+    data; tests patch `_LEGACY_RUNS_DIR` to a tmp dir.
     """
     out: list[dict] = []
     seen_names: set[str] = set()
@@ -557,9 +638,9 @@ def history():
             out.append(entry)
             seen_names.add(name)
 
-    # Legacy/fallback walk. Tests monkeypatch FUSED_DIR to a tmp path
-    # holding the old `<run>/manifest.json` layout — surface those too.
-    fused = runner.FUSED_DIR
+    # Legacy/fallback walk. Tests monkeypatch _LEGACY_RUNS_DIR to a tmp
+    # path holding the old `<run>/manifest.json` layout — surface those too.
+    fused = _LEGACY_RUNS_DIR
     if fused.is_dir() and fused.resolve() != lib.SEQUENCES_DIR.resolve():
         try:
             for d in sorted(
