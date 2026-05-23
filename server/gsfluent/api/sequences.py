@@ -31,7 +31,8 @@ from ..server import PKG_ROOT
 # so the two URL shapes return the exact same bytes for the same args.
 # Imported at the top (was originally a late-import inside the function
 # to avoid circular-import worries — verified no longer needed).
-from .runs import _get_run_mgr, get_run_frame as _get_run_frame
+from .runs import _get_run_mgr
+from .runs import get_run_frame as _get_run_frame
 
 router = APIRouter(prefix="/api/sequences", tags=["sequences"])
 
