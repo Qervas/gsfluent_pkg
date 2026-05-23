@@ -92,6 +92,10 @@ export function ViserSplatScene() {
           cell: d.cell ?? null,
           frame: d.frame ?? 0,
           n_frames: d.n_frames ?? 0,
+          // pushed_frame is the actually-rendered cursor (no-skip
+          // invariant). The bar reads this so the displayed index
+          // never leads the splats. -1 means "no frame pushed yet".
+          pushed_frame: typeof d.pushed_frame === "number" ? d.pushed_frame : -1,
         });
       } catch {
         if (!cancelled) setControlReachable(false);
@@ -145,13 +149,18 @@ export function ViserSplatScene() {
           // free-running timer but viser only updates per /set.
           if (!r.ok || c === null) return;
           try {
-            const body = (await r.json()) as { ok?: boolean; cell?: string; frame?: number };
+            const body = (await r.json()) as {
+              ok?: boolean; cell?: string; frame?: number; pushed_frame?: number
+            };
             if (body?.ok && typeof body.frame === "number") {
               const s = useStore.getState().viserState;
-              if (body.frame !== s.frame) {
+              const nextPushed =
+                typeof body.pushed_frame === "number" ? body.pushed_frame : s.pushed_frame;
+              if (body.frame !== s.frame || nextPushed !== s.pushed_frame) {
                 useStore.getState().setViserState({
                   ...s,
                   frame: body.frame,
+                  pushed_frame: nextPushed,
                 });
               }
             }

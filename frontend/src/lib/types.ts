@@ -82,6 +82,10 @@ export type BackendHealth = { status: string; pkg_root: string };
 export type ViserState = {
   cell: string;
   frame: number;
+  // The frame the render loop has actually pushed to viser. Distinct
+  // from `frame` (the SPA's desired cursor) so the scrub bar can
+  // display the actually-rendered index. -1 before the first paint.
+  pushed_frame: number;
   n_frames: number;
   cells: string[];
   bbox: { lo: [number, number, number]; hi: [number, number, number] };

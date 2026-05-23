@@ -14,9 +14,16 @@ export const SPEED_X_VALUES: SpeedX[] = [0.25, 0.5, 1, 2, 4];
 type State = {
   /** Polled from viser's /state endpoint by ViserSplatScene's mount
    *  effect. Source of truth for cell + frame + n_frames now that the
-   *  websocket positions stream is gone. */
-  viserState: { cell: string | null; frame: number; n_frames: number };
-  setViserState: (s: { cell: string | null; frame: number; n_frames: number }) => void;
+   *  websocket positions stream is gone.
+   *
+   *  `frame` is the SPA's *desired* playback cursor (driven by
+   *  PlaybackDriver's wall-clock advance). `pushed_frame` is what the
+   *  render loop has actually pushed to viser — never leads `frame`
+   *  during continuous playback (no-skip invariant). When decode is
+   *  fast, `pushed_frame == frame`; when slow, `pushed_frame < frame`
+   *  and the UI shows the held-frame index. */
+  viserState: { cell: string | null; frame: number; n_frames: number; pushed_frame: number };
+  setViserState: (s: { cell: string | null; frame: number; n_frames: number; pushed_frame: number }) => void;
 
   /** Manual on/off for the viser splat viewer iframe. When `false` the
    *  iframe is unmounted (no WebGL, no /state polling, no sorter WASM).
@@ -185,7 +192,7 @@ function loadViserEnabled(): boolean {
 }
 
 export const useStore = create<State>((set) => ({
-  viserState: { cell: null, frame: 0, n_frames: 0 },
+  viserState: { cell: null, frame: 0, n_frames: 0, pushed_frame: -1 },
   setViserState: (s) => set({ viserState: s }),
   viserEnabled: loadViserEnabled(),
   setViserEnabled: (b) =>

@@ -30,10 +30,21 @@ export function PlaybackBar() {
   // The scrubber shows where viser is actually rendering, not where
   // React intends to be — otherwise the bar leads the splat whenever
   // /set takes more than 1/fpsHint to land, and the user perceives the
-  // bar and the building as on different clocks. `viserFrame` echoes
-  // back from each /set response in ViserSplatScene; falls back to the
-  // /state poll for the initial paint before the first /set lands.
+  // bar and the building as on different clocks.
+  //
+  // Two related quantities live in viserState:
+  //   - `frame` = SPA's desired playback cursor (echoed back from /set;
+  //     this is the SPA's wall-clock-driven advance target).
+  //   - `pushed_frame` = the frame the render loop has ACTUALLY pushed
+  //     to viser. During continuous playback the no-skip render loop
+  //     only ever advances pushed by 1 per tick; if decode lags, pushed
+  //     trails frame.
+  //
+  // We display pushed_frame as the primary cursor (so the bar never
+  // leads the splats during a stutter), falling back to `frame` when
+  // pushed_frame is -1 (no frame pushed yet, initial paint pending).
   const viserFrame = useStore((s) => s.viserState.frame);
+  const pushedFrame = useStore((s) => s.viserState.pushed_frame);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
   const speedX = useStore((s) => s.speedX);
@@ -141,9 +152,13 @@ export function PlaybackBar() {
 
   const isLive = simState === "running";
   // During a manual scrub the user owns the slider, so show their
-  // intent (currentFrameIdx). During autoplay show what viser is
-  // actually rendering so the bar matches the splat one-for-one.
-  const displayFrame = scrubbing ? currentFrameIdx : viserFrame;
+  // intent (currentFrameIdx). During autoplay show what viser has
+  // actually rendered (pushed_frame) so the bar matches the splat
+  // one-for-one even when decode lags. pushed_frame=-1 means no
+  // frame pushed yet (initial paint or no cell); fall back to viserFrame
+  // for the SPA-side state cursor.
+  const renderedFrame = pushedFrame >= 0 ? pushedFrame : viserFrame;
+  const displayFrame = scrubbing ? currentFrameIdx : renderedFrame;
 
   const onScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = parseInt(e.target.value, 10);

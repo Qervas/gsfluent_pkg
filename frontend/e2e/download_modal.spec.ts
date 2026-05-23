@@ -79,6 +79,7 @@ test("clicking an unloaded sequence shows the Download modal", async ({ page }) 
       ? {
           cell: null,
           frame: 0,
+          pushed_frame: -1,
           n_frames: 0,
           cells: [],
           loading: {
@@ -90,6 +91,7 @@ test("clicking an unloaded sequence shows the Download modal", async ({ page }) 
       : {
           cell: null,
           frame: 0,
+          pushed_frame: -1,
           n_frames: 0,
           cells: [],
           loading: null,
