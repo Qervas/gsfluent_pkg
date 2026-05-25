@@ -81,7 +81,7 @@ def retention_curve(
 import struct
 import zstandard as zstd
 
-from gsfluent.core.codecs.gsq import parse_header_bytes
+from gsfluent.core.codecs.gsq import parse_header_bytes, read_frame_payload_raw_i16
 
 _HEADER_SIZE = 80
 _INDEX_ENTRY = 16
@@ -116,15 +116,14 @@ def prune_gsq_bytes(raw: bytes, keep: np.ndarray) -> bytes:
     new_static = rgb[keep].tobytes() + opacity[keep].tobytes() + scales[keep].tobytes()
     new_static_c = cctx.compress(new_static)
 
-    # --- frame chunks: slice raw int16 by keep
+    # --- frame chunks: slice raw int16 by keep, preserving per-frame flags
     new_frames_c = []
+    new_frame_flags = []
     for fidx in range(n_frames):
-        off, sz = h["frame_index"][fidx]
-        fraw = dctx.decompress(bytes(raw[off:off + sz]))
-        xyz = np.frombuffer(fraw[: n_old * 3 * 2], dtype=np.int16).reshape(n_old, 3)
-        qxyz = np.frombuffer(fraw[n_old * 3 * 2: n_old * 3 * 2 * 2], dtype=np.int16).reshape(n_old, 3)
+        xyz, qxyz, is_keyframe = read_frame_payload_raw_i16(raw, fidx)
         new_chunk = xyz[keep].tobytes() + qxyz[keep].tobytes()
         new_frames_c.append(cctx.compress(new_chunk))
+        new_frame_flags.append(1 if is_keyframe else 0)
 
     # --- reassemble
     static_offset = _HEADER_SIZE + n_frames * _INDEX_ENTRY
@@ -138,8 +137,8 @@ def prune_gsq_bytes(raw: bytes, keep: np.ndarray) -> bytes:
     out += b"\x00" * 24
     assert len(out) == _HEADER_SIZE
     off = static_offset + len(new_static_c)
-    for c in new_frames_c:
-        out += struct.pack("<QII", off, len(c), 0)
+    for c, flag in zip(new_frames_c, new_frame_flags):
+        out += struct.pack("<QII", off, len(c), flag)
         off += len(c)
     assert len(out) == static_offset
     out += new_static_c

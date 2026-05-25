@@ -250,3 +250,106 @@ def test_cli_base_writes_topk_sibling(tmp_path) -> None:
     base = tmp_path / "seq.base.gsq"
     assert base.is_file()
     assert parse_header_bytes(base.read_bytes())["n_splats"] == 25
+
+
+# ---- v2 pruning: keyframe flags must survive the prune --------------------
+
+
+class _NullEmitter:
+    def emit(self, event: str, **context) -> None:
+        pass
+
+    def child(self, **context):
+        return self
+
+
+def _make_v2_gsq(n_splats: int = 100, n_frames: int = 40) -> bytes:
+    """Encode a minimal v2 .gsq buffer using GSQCodec().encode."""
+    import io as _io
+    from gsfluent.core.codecs.gsq import GSQCodec
+
+    rng = np.random.default_rng(42)
+    base = rng.uniform(-1.0, 1.0, (n_splats, 3)).astype(np.float32)
+    frames = []
+    for t in range(n_frames):
+        xyz = base + 0.001 * t
+        f = {"xyz": xyz.astype(np.float32)}
+        if t == 0:
+            f["rgb"] = np.full((n_splats, 3), 0.5, dtype=np.float32)
+            f["opacity"] = np.full((n_splats,), 0.9, dtype=np.float32)
+            f["scales"] = np.full((n_splats, 3), 0.01, dtype=np.float32)
+        frames.append(f)
+    buf = _io.BytesIO()
+    GSQCodec().encode(frames, buf, _NullEmitter())
+    return buf.getvalue()
+
+
+def test_prune_v2_output_version_is_2() -> None:
+    """Pruning a v2 buffer must produce a v2 output (version field preserved)."""
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
+    from gsfluent.core.codecs.gsq import parse_header_bytes
+
+    v2 = _make_v2_gsq(n_splats=100, n_frames=40)
+    keep = np.arange(0, 100, 2)  # 50 even indices
+    pruned = prune_gsq_bytes(v2, keep)
+    h = parse_header_bytes(pruned)
+    assert h["version"] == 2
+
+
+def test_prune_v2_preserves_keyframe_flags() -> None:
+    """Keyframe flags (bit0) must be set at indices 0 and 30 (K=30), clear elsewhere."""
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
+    from gsfluent.core.codecs.gsq import parse_header_bytes, GSQ_KEYFRAME_INTERVAL
+
+    v2 = _make_v2_gsq(n_splats=100, n_frames=40)
+    keep = np.arange(0, 100, 2)
+    pruned = prune_gsq_bytes(v2, keep)
+    flags = parse_header_bytes(pruned)["frame_flags"]
+    assert len(flags) == 40
+    for t in range(40):
+        expected_kf = (t % GSQ_KEYFRAME_INTERVAL) == 0
+        got_kf = bool(flags[t] & 1)
+        assert got_kf == expected_kf, f"frame {t}: expected keyframe={expected_kf}, got {got_kf}"
+
+
+def test_prune_v2_decode_matches_sliced_original() -> None:
+    """decode_frame_raw_i16 on the pruned v2 buffer must equal the original
+    absolute frame sliced by keep — for several frames spanning both keyframe
+    boundaries and delta frames."""
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
+    from gsfluent.core.codecs.gsq import decode_frame_raw_i16
+
+    v2 = _make_v2_gsq(n_splats=100, n_frames=40)
+    keep = np.arange(0, 100, 2)
+    pruned = prune_gsq_bytes(v2, keep)
+
+    for t in (0, 1, 29, 30, 35, 39):
+        orig_xyz, orig_qxyz = decode_frame_raw_i16(v2, t)
+        pr_xyz, pr_qxyz = decode_frame_raw_i16(pruned, t)
+        np.testing.assert_array_equal(
+            pr_xyz, orig_xyz[keep],
+            err_msg=f"xyz mismatch at frame {t}",
+        )
+        np.testing.assert_array_equal(
+            pr_qxyz, orig_qxyz[keep],
+            err_msg=f"qxyz mismatch at frame {t}",
+        )
+
+
+def test_prune_v1_still_works_after_v2_change() -> None:
+    """Existing v1 prune behavior is unchanged: version==1, lossless slice."""
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
+    from gsfluent.core.codecs.gsq import parse_header_bytes, decode_frame_raw_i16
+
+    raw = _make_tiny_gsq(n_splats=80, n_frames=5)
+    keep = np.array([0, 10, 20, 30, 40, 50, 60, 70], dtype=np.int64)
+    pruned = prune_gsq_bytes(raw, keep)
+
+    h = parse_header_bytes(pruned)
+    assert h["version"] == 1, "v1 prune must preserve version==1"
+
+    for fidx in range(5):
+        orig_xyz, orig_qxyz = decode_frame_raw_i16(raw, fidx)
+        pr_xyz, pr_qxyz = decode_frame_raw_i16(pruned, fidx)
+        np.testing.assert_array_equal(pr_xyz, orig_xyz[keep])
+        np.testing.assert_array_equal(pr_qxyz, orig_qxyz[keep])
