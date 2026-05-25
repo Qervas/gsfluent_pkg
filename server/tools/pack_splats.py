@@ -28,7 +28,7 @@ if str(_BOOTSTRAP_ROOT / "server") not in sys.path:
 
 from gsfluent._paths import SEQUENCES, CACHE_VISER  # noqa: E402
 from gsfluent.core.codecs.gsq import GSQCodec, parse_header_bytes  # noqa: E402
-from gsfluent.core.codecs.gsq_prune import prune_to_retention  # noqa: E402
+from gsfluent.core.codecs.gsq_prune import prune_to_retention, prune_to_count  # noqa: E402
 from gsfluent.observability.jsonlog import StdlibJSONEmitter  # noqa: E402
 
 # Default retention for the post-pack prune step. Pruning is ON by default for
@@ -36,6 +36,11 @@ from gsfluent.observability.jsonlog import StdlibJSONEmitter  # noqa: E402
 # accepted). Override via the GSFLUENT_PRUNE_RETENTION env var; set it to "0"
 # or "" to disable pruning entirely (full-resolution .gsq).
 DEFAULT_PRUNE_RETENTION = 0.98
+
+# Default LOD base-layer size (splat count). The base layer is the top-K
+# most-significant splats, small enough to stream in real time on a slow link.
+# Override via GSFLUENT_LOD_BASE_SPLATS; "0"/"" disables base emission.
+DEFAULT_LOD_BASE_SPLATS = 40000
 
 
 def _resolve_prune_retention() -> float:
@@ -62,6 +67,35 @@ def _resolve_prune_retention() -> float:
               f"(0,1]; disabling prune", file=sys.stderr)
         return 0.0
     return val
+
+
+def _resolve_lod_base_splats() -> int:
+    """Read GSFLUENT_LOD_BASE_SPLATS; return 0 (disabled) or a positive count."""
+    raw = os.environ.get("GSFLUENT_LOD_BASE_SPLATS")
+    if raw is None:
+        return DEFAULT_LOD_BASE_SPLATS
+    raw = raw.strip()
+    if raw == "" or raw == "0":
+        return 0
+    try:
+        val = int(raw)
+    except ValueError:
+        print(f"[pack_splats] WARN: bad GSFLUENT_LOD_BASE_SPLATS={raw!r}; "
+              f"disabling base", file=sys.stderr)
+        return 0
+    return val if val > 0 else 0
+
+
+def _emit_base(out: Path, base_count: int) -> None:
+    """Write <name>.base.gsq = top-`base_count` splats of the full file at `out`."""
+    raw = out.read_bytes()
+    n_full = parse_header_bytes(raw)["n_splats"]
+    base = prune_to_count(raw, base_count)
+    base_path = out.with_suffix(".base.gsq")
+    n_base = parse_header_bytes(base)["n_splats"]
+    base_path.write_bytes(base)
+    print(f"  lod base splats {n_full:,} -> {n_base:,}  "
+          f"size {len(base)/1e6:.1f}MB -> {base_path.name}")
 
 
 def _prune_in_place(out: Path, retention: float) -> None:
@@ -108,6 +142,12 @@ def main() -> int:
     else:
         print("[pack_splats] prune OFF (full-resolution output)")
 
+    lod_base = _resolve_lod_base_splats()
+    if lod_base:
+        print(f"[pack_splats] LOD base ON  splats={lod_base}")
+    else:
+        print("[pack_splats] LOD base OFF")
+
     codec = GSQCodec()
     # The CLI logs to stdout in plain text (matches the prior behavior the
     # runner subprocess capture relies on). JSON events also stream to stderr
@@ -141,6 +181,9 @@ def main() -> int:
             )
             if prune_retention:
                 _prune_in_place(out, prune_retention)
+            lod_base = _resolve_lod_base_splats()
+            if lod_base:
+                _emit_base(out, lod_base)
             print()
             n_built += 1
         except Exception as e:

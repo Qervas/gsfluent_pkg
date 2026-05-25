@@ -92,3 +92,44 @@ def test_prune_in_place_overwrites_and_shrinks(tmp_path) -> None:
     assert h["n_frames"] == 4
     assert pruned[:4] == b"GSQ1"
     assert len(pruned) < len(raw)
+
+
+# ---------------------------------------------------------------------------
+# LOD base-layer tests
+# ---------------------------------------------------------------------------
+
+def test_lod_base_emitted_with_correct_splat_count(tmp_path, monkeypatch) -> None:
+    """With GSFLUENT_LOD_BASE_SPLATS=3, _emit_base creates <name>.base.gsq
+    beside the full .gsq and that file contains exactly 3 splats."""
+    monkeypatch.setenv("GSFLUENT_LOD_BASE_SPLATS", "3")
+    # Build a tiny .gsq with more splats than the base count.
+    out = tmp_path / "seq.gsq"
+    raw = _make_tiny_gsq(n_splats=50, n_frames=2)
+    out.write_bytes(raw)
+
+    pack_splats._emit_base(out, 3)
+
+    base_path = tmp_path / "seq.base.gsq"
+    assert base_path.exists(), "seq.base.gsq should have been created"
+    h = parse_header_bytes(base_path.read_bytes())
+    assert h["n_splats"] == 3
+
+
+def test_lod_base_not_emitted_when_disabled(tmp_path, monkeypatch) -> None:
+    """With GSFLUENT_LOD_BASE_SPLATS=0, _resolve_lod_base_splats returns 0
+    and no .base.gsq file is written."""
+    monkeypatch.setenv("GSFLUENT_LOD_BASE_SPLATS", "0")
+    assert pack_splats._resolve_lod_base_splats() == 0
+
+    out = tmp_path / "seq.gsq"
+    raw = _make_tiny_gsq(n_splats=50, n_frames=2)
+    out.write_bytes(raw)
+
+    # Guard: if caller respects the 0 return, _emit_base is never called.
+    # Verify that the resolver alone is enough to skip emission.
+    lod_base = pack_splats._resolve_lod_base_splats()
+    if lod_base:
+        pack_splats._emit_base(out, lod_base)
+
+    base_path = tmp_path / "seq.base.gsq"
+    assert not base_path.exists(), "seq.base.gsq must NOT be created when LOD base is disabled"
