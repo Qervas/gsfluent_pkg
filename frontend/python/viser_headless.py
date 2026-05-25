@@ -315,6 +315,40 @@ def fetch_model_ply(server_base: str, model_path_on_server: str) -> Path:
     return local_path
 
 
+def _download_gsq_to_disk(url: str, dest: Path, *, timeout: float = 600.0) -> int:
+    """Stream a .gsq from `url` to `dest` WITHOUT decoding or publishing it.
+
+    The LOD full-layer path: while the base layer is already playing, we just
+    need the full file on disk, then a ring swap. Publishing partial frames
+    here would clobber the live base cell and crawl at the network rate — so
+    this writes bytes only.
+
+    Writes to <dest>.partial then atomically renames. If a .partial exists,
+    resumes via Range (treats a 200 response as 'server ignored Range' and
+    restarts from scratch). No proxy (trust_env=False), mirroring the rest of
+    the client. Returns the total byte count of the finished file.
+    """
+    partial = dest.with_suffix(dest.suffix + ".partial")
+    headers: dict[str, str] = {}
+    mode = "wb"
+    if partial.exists() and partial.stat().st_size > 0:
+        headers["Range"] = f"bytes={partial.stat().st_size}-"
+        mode = "ab"
+    with httpx.stream("GET", url, timeout=timeout, follow_redirects=True,
+                      trust_env=False, headers=headers) as r:
+        if r.status_code == 200 and mode == "ab":
+            # Server ignored Range — restart from scratch.
+            partial.unlink(missing_ok=True)
+            mode = "wb"
+        elif r.status_code not in (200, 206):
+            raise RuntimeError(f"download failed: HTTP {r.status_code}")
+        with open(partial, mode) as f:
+            for chunk in r.iter_bytes(chunk_size=1024 * 1024):
+                f.write(chunk)
+    _os.replace(str(partial), str(dest))
+    return dest.stat().st_size
+
+
 def _gsq_dequantize_frame(blob: bytes, n_splats: int,
                           bbox_min: np.ndarray, span: np.ndarray) -> tuple:
     """Decompress one frame chunk into (xyz f32, quat f32) arrays."""
