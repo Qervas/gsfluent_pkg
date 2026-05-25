@@ -371,15 +371,26 @@ def _download_gsq_to_disk(url: str, dest: Path, *, timeout: float = 600.0) -> in
     return dest.stat().st_size
 
 
-def _gsq_dequantize_frame(blob: bytes, n_splats: int,
-                          bbox_min: np.ndarray, span: np.ndarray) -> tuple:
-    """Decompress one frame chunk into (xyz f32, quat f32) arrays."""
+def _gsq_decompress_payload_i16(blob: bytes, n_splats: int) -> tuple:
+    """Decompress one stored frame payload into (xyz_i16, quat_i16).
+
+    The returned arrays are the RAW stored int16 content: absolute for a v1
+    chunk or a v2 keyframe, modular-int16 deltas for a v2 delta frame. No
+    reconstruction or dequantization is performed here.
+    """
     import zstandard as _zstd
     raw = _zstd.ZstdDecompressor().decompress(blob)
     xyz_i16 = np.frombuffer(raw[: n_splats * 3 * 2], dtype=np.int16).reshape(n_splats, 3)
     quat_i16 = np.frombuffer(
         raw[n_splats * 3 * 2 : n_splats * 3 * 2 * 2], dtype=np.int16,
     ).reshape(n_splats, 3)
+    return xyz_i16, quat_i16
+
+
+def _gsq_dequantize_i16(xyz_i16: np.ndarray, quat_i16: np.ndarray,
+                        bbox_min: np.ndarray, span: np.ndarray) -> tuple:
+    """Dequantize ABSOLUTE int16 (xyz, quat) arrays into (xyz f32, quat f32)."""
+    n_splats = xyz_i16.shape[0]
     xyz = bbox_min + (xyz_i16.astype(np.float32) + 32768.0) / 65535.0 * span
     qxyz = quat_i16.astype(np.float32) / 32767.0
     qw = np.sqrt(np.clip(1.0 - (qxyz * qxyz).sum(axis=1), 0.0, 1.0))
@@ -387,6 +398,35 @@ def _gsq_dequantize_frame(blob: bytes, n_splats: int,
     quat[:, 0] = qw
     quat[:, 1:4] = qxyz
     return xyz, quat
+
+
+def _gsq_dequantize_frame(blob: bytes, n_splats: int,
+                          bbox_min: np.ndarray, span: np.ndarray) -> tuple:
+    """Decompress one ABSOLUTE frame chunk into (xyz f32, quat f32) arrays.
+
+    Used by the v1 streaming path and any caller whose stored chunk is already
+    absolute (v1 chunk / v2 keyframe). v2 delta frames must be reconstructed
+    with `_v2_apply_payload` first.
+    """
+    xyz_i16, quat_i16 = _gsq_decompress_payload_i16(blob, n_splats)
+    return _gsq_dequantize_i16(xyz_i16, quat_i16, bbox_min, span)
+
+
+def _v2_apply_payload(prev_xyz_i16, prev_quat_i16, blob: bytes,
+                      n_splats: int, is_keyframe: bool) -> tuple:
+    """Decompress a v2 frame payload and return the ABSOLUTE int16 (xyz, quat).
+
+    keyframe -> payload is absolute; delta -> prev + payload (modular int16).
+    Since frames arrive strictly in order and keyframes reset the running
+    state, threading the returned arrays back in as `prev_*` reconstructs the
+    exact absolute frame at every step.
+    """
+    pay_xyz, pay_quat = _gsq_decompress_payload_i16(blob, n_splats)
+    if is_keyframe:
+        return pay_xyz, pay_quat
+    xyz_i16 = (prev_xyz_i16 + pay_xyz).astype(np.int16)
+    quat_i16 = (prev_quat_i16 + pay_quat).astype(np.int16)
+    return xyz_i16, quat_i16
 
 
 def parse_gsq_header(buf: bytes) -> dict:
@@ -402,7 +442,7 @@ def parse_gsq_header(buf: bytes) -> dict:
     if buf[:4] != b"GSQ1":
         raise ValueError(f"not a .gsq: magic={buf[:4]!r}")
     (version, n_splats, n_frames) = _struct.unpack_from("<III", buf, 4)
-    if version != 1:
+    if version not in (1, 2):
         raise ValueError(f"unsupported .gsq version {version}")
     (fps_hint,) = _struct.unpack_from("<f", buf, 16)
     bbox_min = np.frombuffer(buf[20:32], dtype=np.float32).copy()
@@ -413,15 +453,17 @@ def parse_gsq_header(buf: bytes) -> dict:
     if len(buf) < index_end:
         raise ValueError(f"header read but index incomplete: have {len(buf)} need {index_end}")
     frame_index = []
+    frame_flags: list[int] = []
     for i in range(n_frames):
-        off, sz, _r = _struct.unpack_from("<QII", buf, 80 + i * 16)
+        off, sz, flags = _struct.unpack_from("<QII", buf, 80 + i * 16)
         frame_index.append((off, sz))
+        frame_flags.append(flags)
     return {
         "version": version, "n_splats": n_splats, "n_frames": n_frames,
         "fps_hint": fps_hint,
         "bbox_min": bbox_min, "bbox_max": bbox_max,
         "static_offset": static_offset, "static_size": static_size,
-        "frame_index": frame_index,
+        "frame_index": frame_index, "frame_flags": frame_flags,
     }
 
 
@@ -1495,6 +1537,8 @@ def main() -> int:
         xyz_backing = quat_backing = None
         n_loaded = 0
         bbox_min = bbox_max = span = None
+        # v2 running absolute int16 state (keyframes reset it). Unused on v1.
+        running_xyz_i16 = running_quat_i16 = None
 
         def commit_cell():
             cell = _build_gsq_cell_dict(
@@ -1522,6 +1566,7 @@ def main() -> int:
             nonlocal header_parsed, static_decoded, rgb_f16, opacity_u8
             nonlocal scales_f16, xyz_backing, quat_backing, n_loaded
             nonlocal bbox_min, bbox_max, span
+            nonlocal running_xyz_i16, running_quat_i16
 
             if header_parsed is None and len(buf) >= 80:
                 n_frames_peek = _struct.unpack_from("<I", bytes(buf[:80]), 12)[0]
@@ -1563,14 +1608,28 @@ def main() -> int:
             if static_decoded:
                 n_sp = header_parsed["n_splats"]
                 n_total = header_parsed["n_frames"]
+                is_v2 = header_parsed["version"] == 2
                 while n_loaded < n_total:
                     f_off, f_sz = header_parsed["frame_index"][n_loaded]
                     if len(buf) < f_off + f_sz:
                         break
-                    xyz, quat = _gsq_dequantize_frame(
-                        bytes(buf[f_off : f_off + f_sz]),
-                        n_sp, bbox_min, span,
-                    )
+                    frame_blob = bytes(buf[f_off : f_off + f_sz])
+                    if is_v2:
+                        # Running-absolute reconstruction. Frames arrive in
+                        # order, so deltas accumulate onto the prior absolute
+                        # and keyframes reset it — exact at every step.
+                        is_kf = bool(header_parsed["frame_flags"][n_loaded] & 1)
+                        running_xyz_i16, running_quat_i16 = _v2_apply_payload(
+                            running_xyz_i16, running_quat_i16,
+                            frame_blob, n_sp, is_kf,
+                        )
+                        xyz, quat = _gsq_dequantize_i16(
+                            running_xyz_i16, running_quat_i16, bbox_min, span,
+                        )
+                    else:
+                        xyz, quat = _gsq_dequantize_frame(
+                            frame_blob, n_sp, bbox_min, span,
+                        )
                     xyz_backing[n_loaded] = xyz
                     quat_backing[n_loaded] = quat
                     n_loaded += 1
@@ -1795,6 +1854,8 @@ def main() -> int:
                 xyz_backing = quat_backing = None
                 n_loaded = 0
                 bbox_min = bbox_max = span = None
+                # v2 running absolute int16 state (keyframes reset it).
+                running_xyz_i16 = running_quat_i16 = None
 
                 # cell_key is computed once at the top of the enclosing
                 # function (see Path 1 / Path 2 / Path 3 docstring).
@@ -1865,14 +1926,31 @@ def main() -> int:
                         if static_decoded:
                             n_sp = header_parsed["n_splats"]
                             n_total = header_parsed["n_frames"]
+                            is_v2 = header_parsed["version"] == 2
                             while n_loaded < n_total:
                                 f_off, f_sz = header_parsed["frame_index"][n_loaded]
                                 if len(buf) < f_off + f_sz:
                                     break  # not enough bytes yet
-                                xyz, quat = _gsq_dequantize_frame(
-                                    bytes(buf[f_off : f_off + f_sz]),
-                                    n_sp, bbox_min, span,
-                                )
+                                frame_blob = bytes(buf[f_off : f_off + f_sz])
+                                if is_v2:
+                                    # Running-absolute reconstruction: deltas
+                                    # accumulate, keyframes reset. Frames arrive
+                                    # in order so this is exact at every step.
+                                    is_kf = bool(
+                                        header_parsed["frame_flags"][n_loaded] & 1
+                                    )
+                                    running_xyz_i16, running_quat_i16 = _v2_apply_payload(
+                                        running_xyz_i16, running_quat_i16,
+                                        frame_blob, n_sp, is_kf,
+                                    )
+                                    xyz, quat = _gsq_dequantize_i16(
+                                        running_xyz_i16, running_quat_i16,
+                                        bbox_min, span,
+                                    )
+                                else:
+                                    xyz, quat = _gsq_dequantize_frame(
+                                        frame_blob, n_sp, bbox_min, span,
+                                    )
                                 xyz_backing[n_loaded] = xyz
                                 quat_backing[n_loaded] = quat
                                 n_loaded += 1
