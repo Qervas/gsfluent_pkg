@@ -69,7 +69,11 @@ def test_codec_advertises_media_type_and_extension() -> None:
 
 
 def test_encode_from_frames_dir_writes_gsq_header(tmp_path: Path) -> None:
-    """encode_sequence_dir generates a real .gsq with the right MAGIC."""
+    """encode_sequence_dir generates a real .gsq with the right MAGIC.
+
+    The encode default is now v2 (delta + keyframe). Frame 0 is always a
+    keyframe; with only 3 frames here, frames 1 and 2 are deltas.
+    """
     seq_dir = tmp_path / "demo" / "frames"
     seq_dir.mkdir(parents=True)
     for i in range(3):
@@ -85,9 +89,16 @@ def test_encode_from_frames_dir_writes_gsq_header(tmp_path: Path) -> None:
     body = out_path.read_bytes()
     assert body[:4] == MAGIC
     version, n_splats, n_frames = struct.unpack("<III", body[4:16])
-    assert version == 1
+    assert version == 2
     assert n_splats == 4
     assert n_frames == 3
+
+    # Round-trips: decode_all yields all 3 frames with absolute int16 data.
+    decoded = codec.decode_all(io.BytesIO(body))
+    assert len(decoded) == 3
+    for fr in decoded:
+        assert fr.data["xyz_q"].shape == (4, 3)
+        assert fr.data["quat_q"].shape == (4, 3)
 
 
 def test_encode_empty_dir_raises(tmp_path: Path) -> None:

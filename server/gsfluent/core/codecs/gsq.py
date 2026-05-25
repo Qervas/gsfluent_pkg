@@ -37,10 +37,11 @@ from gsfluent.protocols.observability import EventEmitter
 SH_C0 = 0.28209479177387814
 
 MAGIC = b"GSQ1"
-VERSION = 1
+VERSION = 2
 HEADER_SIZE = 80
 INDEX_ENTRY_SIZE = 16
 ZSTD_LEVEL = 9
+GSQ_KEYFRAME_INTERVAL = 30
 _FP16_COV_FLOOR_SQRT = np.float32(np.sqrt(6.1e-5))  # ~7.81e-3
 
 
@@ -55,27 +56,72 @@ def parse_header_bytes(buf: bytes) -> dict:
     bbox_max = np.frombuffer(buf[32:44], dtype=np.float32).copy()
     static_offset, static_size = struct.unpack_from("<QI", buf, 44)
     frame_index = []
+    frame_flags: list[int] = []
     for i in range(n_frames):
-        off, sz, _r = struct.unpack_from("<QII", buf, 80 + i * 16)
+        off, sz, flags = struct.unpack_from("<QII", buf, 80 + i * 16)
         frame_index.append((off, sz))
+        frame_flags.append(flags)
     return {
         "version": version, "n_splats": n_splats, "n_frames": n_frames,
         "fps_hint": fps_hint, "bbox_min": bbox_min, "bbox_max": bbox_max,
         "static_offset": static_offset, "static_size": static_size,
-        "frame_index": frame_index,
+        "frame_index": frame_index, "frame_flags": frame_flags,
     }
 
 
-def decode_frame_raw_i16(buf: bytes, frame_idx: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return (xyz_i16 (n,3), qxyz_i16 (n,3)) RAW int16 arrays for a frame —
-    no dequantization. Used by the pruner to slice losslessly."""
+def read_frame_payload_raw_i16(
+    buf: bytes, frame_idx: int
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Return the STORED per-frame payload as int16 arrays, plus is_keyframe.
+
+    For a keyframe the payload is the absolute frame; for a delta frame it is
+    `frame[t] - frame[t-1]` (modular int16). No reconstruction is performed —
+    this is the raw stored content. Used by the pruner (slicing commutes with
+    deltas) and by reconstruction logic in decode_frame_raw_i16 / decode_all.
+    """
     h = parse_header_bytes(buf)
     n = h["n_splats"]
     off, sz = h["frame_index"][frame_idx]
+    is_keyframe = bool(h["frame_flags"][frame_idx] & 1)
     raw = zstd.ZstdDecompressor().decompress(bytes(buf[off:off + sz]))
     xyz = np.frombuffer(raw[: n * 3 * 2], dtype=np.int16).reshape(n, 3)
     qxyz = np.frombuffer(raw[n * 3 * 2 : n * 3 * 2 * 2], dtype=np.int16).reshape(n, 3)
-    return xyz, qxyz
+    return xyz, qxyz, is_keyframe
+
+
+def decode_frame_raw_i16(buf: bytes, frame_idx: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return (xyz_i16 (n,3), qxyz_i16 (n,3)) ABSOLUTE int16 arrays for a frame
+    — no dequantization. Used by the pruner to slice losslessly.
+
+    v1: each stored chunk is already absolute.
+    v2: scan backward to the nearest keyframe (flags bit0 set) <= frame_idx,
+    then accumulate stored deltas with modular int16 add up to frame_idx.
+    """
+    h = parse_header_bytes(buf)
+    version = h["version"]
+    if version == 1:
+        n = h["n_splats"]
+        off, sz = h["frame_index"][frame_idx]
+        raw = zstd.ZstdDecompressor().decompress(bytes(buf[off:off + sz]))
+        xyz = np.frombuffer(raw[: n * 3 * 2], dtype=np.int16).reshape(n, 3)
+        qxyz = np.frombuffer(
+            raw[n * 3 * 2 : n * 3 * 2 * 2], dtype=np.int16
+        ).reshape(n, 3)
+        return xyz, qxyz
+
+    # v2: reconstruct absolute from the nearest keyframe.
+    flags = h["frame_flags"]
+    kf = frame_idx
+    while kf > 0 and not (flags[kf] & 1):
+        kf -= 1
+    xyz_acc, q_acc, _is_kf = read_frame_payload_raw_i16(buf, kf)
+    xyz_acc = xyz_acc.copy()
+    q_acc = q_acc.copy()
+    for i in range(kf + 1, frame_idx + 1):
+        dx, dq, _ = read_frame_payload_raw_i16(buf, i)
+        xyz_acc = (xyz_acc + dx).astype(np.int16)
+        q_acc = (q_acc + dq).astype(np.int16)
+    return xyz_acc, q_acc
 
 
 # ---- helper functions copied verbatim from tools/pack_splats.py ------------
@@ -152,6 +198,25 @@ def _quantize_xyz(xyz, bmin, bmax):
 def _quantize_quats(q):
     qxyz = np.clip(q[..., 1:4], -1.0, 1.0)
     return np.round(qxyz * 32767.0).astype(np.int16)
+
+
+def _v2_frame_payloads(xyz_q, quat_q, cctx, K=GSQ_KEYFRAME_INTERVAL):
+    """Build v2 per-frame compressed payloads + flags.
+
+    Frame 0 and every K-th frame are keyframes (absolute int16). All other
+    frames store modular int16 deltas from the previous frame. Returns
+    (payloads: list[bytes], flags: list[int]) where flags bit0 = is_keyframe.
+    """
+    T = xyz_q.shape[0]
+    payloads: list[bytes] = []
+    flags: list[int] = []
+    for t in range(T):
+        kf = (t % K == 0)
+        x = xyz_q[t] if kf else (xyz_q[t] - xyz_q[t - 1]).astype(np.int16)
+        q = quat_q[t] if kf else (quat_q[t] - quat_q[t - 1]).astype(np.int16)
+        payloads.append(cctx.compress(x.tobytes() + q.tobytes()))
+        flags.append(1 if kf else 0)
+    return payloads, flags
 
 
 # ---- GSQCodec class -------------------------------------------------------
@@ -275,10 +340,7 @@ class GSQCodec:
         static_uncompressed = rgb_f16.tobytes() + opacity_u8.tobytes() + scales_f16.tobytes()
         static_compressed = cctx.compress(static_uncompressed)
 
-        frame_chunks: list[bytes] = []
-        for t in range(n_frames):
-            raw = xyz_q[t].tobytes() + quat_q[t].tobytes()
-            frame_chunks.append(cctx.compress(raw))
+        frame_chunks, frame_flags = _v2_frame_payloads(xyz_q, quat_q, cctx)
 
         static_offset = HEADER_SIZE + n_frames * INDEX_ENTRY_SIZE
         static_size = len(static_compressed)
@@ -286,8 +348,8 @@ class GSQCodec:
 
         index_entries = []
         off = frame0_offset
-        for c in frame_chunks:
-            index_entries.append((off, len(c)))
+        for c, fl in zip(frame_chunks, frame_flags):
+            index_entries.append((off, len(c), fl))
             off += len(c)
 
         # Atomic write via tmp + replace.
@@ -303,8 +365,8 @@ class GSQCodec:
                 f.write(struct.pack("<QI", static_offset, static_size))
                 f.write(b"\x00" * 24)
                 assert f.tell() == HEADER_SIZE, f"header drift: {f.tell()}"
-                for off, sz in index_entries:
-                    f.write(struct.pack("<QII", off, sz, 0))
+                for off, sz, fl in index_entries:
+                    f.write(struct.pack("<QII", off, sz, fl))
                 assert f.tell() == static_offset, "static offset drift"
                 f.write(static_compressed)
                 for c in frame_chunks:
@@ -389,8 +451,7 @@ class GSQCodec:
         static_uncompressed = rgb_f16.tobytes() + opacity_u8.tobytes() + scales_f16.tobytes()
         static_compressed = cctx.compress(static_uncompressed)
 
-        frame_chunks = [cctx.compress(xyz_q[t].tobytes() + quat_q[t].tobytes())
-                        for t in range(n_frames)]
+        frame_chunks, frame_flags = _v2_frame_payloads(xyz_q, quat_q, cctx)
 
         static_offset = HEADER_SIZE + n_frames * INDEX_ENTRY_SIZE
         static_size = len(static_compressed)
@@ -405,8 +466,8 @@ class GSQCodec:
         out.write(b"\x00" * 24)
 
         off = frame0_offset
-        for c in frame_chunks:
-            out.write(struct.pack("<QII", off, len(c), 0))
+        for c, fl in zip(frame_chunks, frame_flags):
+            out.write(struct.pack("<QII", off, len(c), fl))
             off += len(c)
         out.write(static_compressed)
         for c in frame_chunks:
@@ -456,7 +517,7 @@ class GSQCodec:
         if header[:4] != MAGIC:
             raise CodecError(f"bad magic: {header[:4]!r}; expected {MAGIC!r}")
         version, n_splats, n_frames = struct.unpack("<III", header[4:16])
-        if version != VERSION:
+        if version not in (1, 2):
             raise CodecError(f"unsupported gsq version: {version}")
         # bbox is at offset 20..44 (3 floats min + 3 floats max).
         bbox_min = np.frombuffer(header[20:32], dtype=np.float32)
@@ -465,11 +526,11 @@ class GSQCodec:
 
         # Index entries
         index_raw = src.read(n_frames * INDEX_ENTRY_SIZE)
-        entries: list[tuple[int, int]] = []
+        entries: list[tuple[int, int, int]] = []
         for i in range(n_frames):
             base = i * INDEX_ENTRY_SIZE
-            off, sz, _flags = struct.unpack("<QII", index_raw[base:base + INDEX_ENTRY_SIZE])
-            entries.append((off, sz))
+            off, sz, flags = struct.unpack("<QII", index_raw[base:base + INDEX_ENTRY_SIZE])
+            entries.append((off, sz, flags))
 
         # Static block
         static_compressed = src.read(static_size)
@@ -482,12 +543,32 @@ class GSQCodec:
         opacity = np.frombuffer(opacity_bytes, dtype=np.uint8)
         scales = np.frombuffer(scales_bytes, dtype=np.float16).reshape(n_splats, 3)
 
+        # v1: each stored chunk is absolute. v2: keyframes are absolute, deltas
+        # accumulate onto a running absolute frame (reset at each keyframe).
+        prev_xyz: np.ndarray | None = None
+        prev_quat: np.ndarray | None = None
+
         frames_out: list[DecodedFrame] = []
-        for i, (_off, sz) in enumerate(entries):
+        for i, (_off, sz, flags) in enumerate(entries):
             chunk = src.read(sz)
             raw = dctx.decompress(chunk)
-            xyz_q = np.frombuffer(raw[:n_splats * 3 * 2], dtype=np.int16).reshape(n_splats, 3)
-            quat_q = np.frombuffer(raw[n_splats * 3 * 2:], dtype=np.int16).reshape(n_splats, 3)
+            stored_xyz = np.frombuffer(
+                raw[:n_splats * 3 * 2], dtype=np.int16
+            ).reshape(n_splats, 3)
+            stored_quat = np.frombuffer(
+                raw[n_splats * 3 * 2:], dtype=np.int16
+            ).reshape(n_splats, 3)
+
+            if version == 1 or (flags & 1):
+                # Absolute frame (v1 chunk or v2 keyframe).
+                xyz_q = stored_xyz
+                quat_q = stored_quat
+            else:
+                # v2 delta: modular int16 add onto the running absolute.
+                xyz_q = (prev_xyz + stored_xyz).astype(np.int16)
+                quat_q = (prev_quat + stored_quat).astype(np.int16)
+            prev_xyz = xyz_q
+            prev_quat = quat_q
             frames_out.append(DecodedFrame(
                 frame_index=i,
                 data={
