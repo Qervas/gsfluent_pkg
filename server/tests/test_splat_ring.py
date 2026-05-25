@@ -38,6 +38,75 @@ SplatRing = splat_ring.SplatRing
 make_static_cell = splat_ring.make_static_cell
 
 
+# ----- v2 fixture helpers (build via the real codec, decode via ground truth)-
+#
+# The ring module is forbidden from importing the server codec; the TEST is
+# not. We build a real v2 .gsq with GSQCodec().encode and use the codec's
+# decode_frame_raw_i16 as ground truth for the absolute int16 a frame should
+# reconstruct to.
+
+
+class _NullEmitter:
+    """Inline EventEmitter that drops events (codec encode needs one)."""
+
+    def emit(self, event: str, **context) -> None:
+        pass
+
+    def child(self, **context):
+        return self
+
+
+def _make_v2_frames(n_frames: int, n_splats: int):
+    """Small-motion frames so deltas stay tiny (and well inside the bbox)."""
+    rng = np.random.default_rng(0x5EED)
+    base = rng.uniform(-1.0, 1.0, (n_splats, 3)).astype(np.float32)
+    frames = []
+    for t in range(n_frames):
+        # Global drift + small per-frame jitter — distinct each frame.
+        xyz = base + 0.002 * t + 0.0005 * rng.standard_normal((n_splats, 3)).astype(
+            np.float32
+        )
+        f = {"xyz": xyz.astype(np.float32)}
+        if t == 0:
+            f["rgb"] = np.full((n_splats, 3), 0.5, dtype=np.float32)
+            f["opacity"] = np.full((n_splats,), 0.9, dtype=np.float32)
+            f["scales"] = np.full((n_splats, 3), 0.01, dtype=np.float32)
+        frames.append(f)
+    return frames
+
+
+def _write_v2_gsq(path: Path, n_splats: int = 12, n_frames: int = 40) -> bytes:
+    """Encode a real v2 .gsq to ``path`` and return its raw bytes."""
+    from gsfluent.core.codecs.gsq import GSQCodec
+
+    frames = _make_v2_frames(n_frames, n_splats)
+    buf = io.BytesIO()
+    GSQCodec().encode(frames, buf, _NullEmitter())
+    data = buf.getvalue()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return data
+
+
+def _expected_dequant(v2_bytes: bytes, t: int, bbox_min, span):
+    """Ground-truth (xyz, quat) for frame ``t`` using the codec's reconstruction.
+
+    Reconstructs absolute int16 via the codec, then applies the SAME dequant
+    math the ring uses, so the ring's output must match bit-for-bit (the int16
+    is identical; only float arithmetic, which is identical too).
+    """
+    from gsfluent.core.codecs.gsq import decode_frame_raw_i16
+
+    xyz_i16, quat_i16 = decode_frame_raw_i16(v2_bytes, t)
+    xyz = bbox_min + (xyz_i16.astype(np.float32) + 32768.0) / 65535.0 * span
+    qxyz = quat_i16.astype(np.float32) / 32767.0
+    qw = np.sqrt(np.clip(1.0 - (qxyz * qxyz).sum(axis=1), 0.0, 1.0))
+    quat = np.empty((xyz_i16.shape[0], 4), dtype=np.float32)
+    quat[:, 0] = qw
+    quat[:, 1:4] = qxyz
+    return xyz, quat
+
+
 # ----- synthetic .gsq builder ------------------------------------------------
 
 
@@ -484,5 +553,167 @@ def test_note_stutter_increments(tmp_path):
         ring.note_stutter()
         ring.note_stutter()
         assert ring.stats()["stutter"] == 2
+    finally:
+        ring.close()
+
+
+# ----- v2 delta reconstruction ------------------------------------------------
+
+# Frames {0, 1, 29, 30, 31, 35, 39} exercise: keyframe-0, first delta, last
+# delta before a boundary, the second keyframe (30), first delta after it,
+# a cold-scrub mid-segment, and the last frame.
+_V2_SAMPLE_FRAMES = (0, 1, 29, 30, 31, 35, 39)
+
+
+def test_parse_header_v2_exposes_flags(tmp_path):
+    gsq = tmp_path / "v2.gsq"
+    _write_v2_gsq(gsq, n_splats=10, n_frames=40)
+    header = splat_ring._parse_gsq_header(gsq.read_bytes())
+    assert header["version"] == 2
+    assert header["n_frames"] == 40
+    flags = header["frame_flags"]
+    assert len(flags) == 40
+    # Keyframes at 0 and 30 (K=30); everything else is a delta.
+    keyframes = [i for i, fl in enumerate(flags) if fl & 1]
+    assert keyframes == [0, 30]
+    # frame_index is still (off, sz) 2-tuples.
+    assert all(len(e) == 2 for e in header["frame_index"])
+
+
+def test_v2_decode_blocking_matches_codec_groundtruth(tmp_path):
+    gsq = tmp_path / "v2.gsq"
+    v2_bytes = _write_v2_gsq(gsq, n_splats=12, n_frames=40)
+    ring = SplatRing(gsq, window_size=8)
+    try:
+        bbox_min = ring.bbox_min
+        span = ring._span
+        for t in _V2_SAMPLE_FRAMES:
+            ring.decode_blocking(t)
+            got = ring.get_frame(t)
+            assert got is not None, f"frame {t} missing from ring"
+            xyz, quat = got
+            exp_xyz, exp_quat = _expected_dequant(v2_bytes, t, bbox_min, span)
+            np.testing.assert_array_equal(
+                xyz, exp_xyz, err_msg=f"xyz mismatch at frame {t}"
+            )
+            np.testing.assert_array_equal(
+                quat, exp_quat, err_msg=f"quat mismatch at frame {t}"
+            )
+    finally:
+        ring.close()
+
+
+def test_v2_sequential_across_keyframe_boundary(tmp_path):
+    gsq = tmp_path / "v2.gsq"
+    v2_bytes = _write_v2_gsq(gsq, n_splats=12, n_frames=40)
+    ring = SplatRing(gsq, window_size=8)
+    try:
+        bbox_min = ring.bbox_min
+        span = ring._span
+        # Sequential playback 29 -> 30 -> 31 crossing the keyframe at 30.
+        for t in (29, 30, 31):
+            ring.decode_blocking(t)
+            xyz, quat = ring.get_frame(t)
+            exp_xyz, exp_quat = _expected_dequant(v2_bytes, t, bbox_min, span)
+            np.testing.assert_array_equal(xyz, exp_xyz, err_msg=f"seq frame {t}")
+            np.testing.assert_array_equal(quat, exp_quat, err_msg=f"seq frame {t}")
+    finally:
+        ring.close()
+
+
+def test_v2_long_sequential_playthrough(tmp_path):
+    """Decode every frame in order — the fast-path cache must stay correct."""
+    gsq = tmp_path / "v2.gsq"
+    v2_bytes = _write_v2_gsq(gsq, n_splats=8, n_frames=40)
+    ring = SplatRing(gsq, window_size=40)
+    try:
+        bbox_min = ring.bbox_min
+        span = ring._span
+        for t in range(40):
+            ring.decode_blocking(t)
+            xyz, _ = ring.get_frame(t)
+            exp_xyz, _ = _expected_dequant(v2_bytes, t, bbox_min, span)
+            np.testing.assert_array_equal(xyz, exp_xyz, err_msg=f"playthrough {t}")
+    finally:
+        ring.close()
+
+
+def test_v2_cold_scrub_reconstructs_from_keyframe(tmp_path):
+    """Fresh ring, jump straight to frame 35 (no prior frames decoded)."""
+    gsq = tmp_path / "v2.gsq"
+    v2_bytes = _write_v2_gsq(gsq, n_splats=12, n_frames=40)
+    ring = SplatRing(gsq, window_size=8)
+    try:
+        bbox_min = ring.bbox_min
+        span = ring._span
+        xyz, quat = ring.decode_blocking(35)  # cold jump, walks from kf 30
+        exp_xyz, exp_quat = _expected_dequant(v2_bytes, 35, bbox_min, span)
+        np.testing.assert_array_equal(xyz, exp_xyz)
+        np.testing.assert_array_equal(quat, exp_quat)
+    finally:
+        ring.close()
+
+
+def test_v2_decoder_thread_request_path(tmp_path):
+    """The async decoder thread (not just decode_blocking) must reconstruct v2."""
+    gsq = tmp_path / "v2.gsq"
+    v2_bytes = _write_v2_gsq(gsq, n_splats=8, n_frames=40)
+    ring = SplatRing(gsq, window_size=8)
+    try:
+        bbox_min = ring.bbox_min
+        span = ring._span
+        ring.request_frame(35)
+        assert _wait_until(lambda: ring.has_frame(35), timeout=2.0)
+        xyz, _ = ring.get_frame(35)
+        exp_xyz, _ = _expected_dequant(v2_bytes, 35, bbox_min, span)
+        np.testing.assert_array_equal(xyz, exp_xyz)
+    finally:
+        ring.close()
+
+
+def test_v2_sequential_fast_path_is_one_decompress_per_frame(tmp_path, monkeypatch):
+    """Perf invariant: forward playback costs ~one decompress per frame.
+
+    Without the fast-path cache, frame t would re-walk from its keyframe
+    (O(t mod K) decompresses); with it, each sequential step is a single
+    decompress + modular add. We count zstd decompress calls to prove it.
+    """
+    import zstandard as zstd
+
+    gsq = tmp_path / "v2.gsq"
+    _write_v2_gsq(gsq, n_splats=8, n_frames=40)
+
+    counter = {"n": 0}
+    orig = zstd.ZstdDecompressor.decompress
+
+    def _counting(self, data, *a, **k):
+        counter["n"] += 1
+        return orig(self, data, *a, **k)
+
+    monkeypatch.setattr(zstd.ZstdDecompressor, "decompress", _counting)
+
+    ring = SplatRing(gsq, window_size=64)
+    try:
+        counter["n"] = 0
+        for t in range(40):
+            ring.decode_blocking(t)
+        # 40 sequential frames: 2 keyframes + 38 deltas, one decompress each.
+        assert counter["n"] == 40, f"expected 40 decompresses, got {counter['n']}"
+    finally:
+        ring.close()
+
+
+def test_v1_regression_still_decodes(tmp_path):
+    """A v1 .gsq (absolute frames, flags=0) must keep ringing correctly."""
+    gsq = tmp_path / "v1.gsq"
+    meta = _write_minimal_gsq(gsq, n_splats=8, n_frames=16)
+    ring = SplatRing(gsq, window_size=6)
+    try:
+        for t in (0, 5, 15):
+            ring.decode_blocking(t)
+            xyz, quat = ring.get_frame(t)
+            tol = float(meta["span"].max() / 65535.0) * 3.0
+            np.testing.assert_allclose(xyz, meta["xyz_all"][t], atol=tol)
+            np.testing.assert_allclose(quat[:, 0], 1.0, atol=1e-3)
     finally:
         ring.close()

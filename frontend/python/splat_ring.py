@@ -62,7 +62,7 @@ def _parse_gsq_header(buf: bytes) -> dict:
     if buf[:4] != b"GSQ1":
         raise ValueError(f"not a .gsq: magic={buf[:4]!r}")
     (version, n_splats, n_frames) = _struct.unpack_from("<III", buf, 4)
-    if version != 1:
+    if version not in (1, 2):
         raise ValueError(f"unsupported .gsq version {version}")
     (fps_hint,) = _struct.unpack_from("<f", buf, 16)
     bbox_min = np.frombuffer(buf[20:32], dtype=np.float32).copy()
@@ -74,10 +74,16 @@ def _parse_gsq_header(buf: bytes) -> dict:
         raise ValueError(
             f"header read but index incomplete: have {len(buf)} need {index_end}"
         )
+    # Per-entry layout is <QII> = (offset, size, flags). v1 always writes
+    # flags=0; v2 sets bit0 on keyframes. We keep frame_index as (off, sz)
+    # 2-tuples for backward compat and surface flags separately so the v2
+    # reconstruction path can find the nearest keyframe.
     frame_index = []
+    frame_flags: list[int] = []
     for i in range(n_frames):
-        off, sz, _r = _struct.unpack_from("<QII", buf, 80 + i * 16)
+        off, sz, fl = _struct.unpack_from("<QII", buf, 80 + i * 16)
         frame_index.append((off, sz))
+        frame_flags.append(fl)
     return {
         "version": version,
         "n_splats": n_splats,
@@ -88,16 +94,21 @@ def _parse_gsq_header(buf: bytes) -> dict:
         "static_offset": static_offset,
         "static_size": static_size,
         "frame_index": frame_index,
+        "frame_flags": frame_flags,
     }
 
 
-def _dequantize_frame(
-    blob: bytes,
-    n_splats: int,
-    bbox_min: np.ndarray,
-    span: np.ndarray,
-) -> FrameTuple:
-    """Inline copy of viser_headless._gsq_dequantize_frame."""
+def _decompress_payload_i16(
+    blob: bytes, n_splats: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Decompress a stored frame chunk into its two int16 arrays.
+
+    Returns ``(xyz_i16(n,3), quat_i16(n,3))`` as plain int16 — no
+    dequantization, no float conversion. For a v1 frame or a v2 keyframe
+    these are absolute; for a v2 delta they are modular int16 deltas from
+    the previous frame. The reshape uses the same split point as the
+    encoder: ``xyz`` occupies the first ``n*3*2`` bytes, ``quat`` the next.
+    """
     import zstandard as _zstd
 
     raw = _zstd.ZstdDecompressor().decompress(blob)
@@ -107,6 +118,22 @@ def _dequantize_frame(
     quat_i16 = np.frombuffer(
         raw[n_splats * 3 * 2 : n_splats * 3 * 2 * 2], dtype=np.int16
     ).reshape(n_splats, 3)
+    return xyz_i16, quat_i16
+
+
+def _dequantize_i16(
+    xyz_i16: np.ndarray,
+    quat_i16: np.ndarray,
+    bbox_min: np.ndarray,
+    span: np.ndarray,
+) -> FrameTuple:
+    """Dequantize ABSOLUTE int16 arrays to float (xyz, quat).
+
+    Split out of the old ``_dequantize_frame`` so the v2 reconstruction
+    path (which produces absolute int16 by accumulating deltas) can share
+    the exact same float math. Inputs must already be absolute int16.
+    """
+    n_splats = xyz_i16.shape[0]
     xyz = bbox_min + (xyz_i16.astype(np.float32) + 32768.0) / 65535.0 * span
     qxyz = quat_i16.astype(np.float32) / 32767.0
     qw = np.sqrt(np.clip(1.0 - (qxyz * qxyz).sum(axis=1), 0.0, 1.0))
@@ -114,6 +141,22 @@ def _dequantize_frame(
     quat[:, 0] = qw
     quat[:, 1:4] = qxyz
     return xyz, quat
+
+
+def _dequantize_frame(
+    blob: bytes,
+    n_splats: int,
+    bbox_min: np.ndarray,
+    span: np.ndarray,
+) -> FrameTuple:
+    """Inline copy of viser_headless._gsq_dequantize_frame.
+
+    Composes decompress + dequant. Valid for v1 chunks and v2 keyframes
+    (both store absolute int16). v2 delta frames must NOT go through here —
+    they need accumulation first (see ``SplatRing._decode_one``).
+    """
+    xyz_i16, quat_i16 = _decompress_payload_i16(blob, n_splats)
+    return _dequantize_i16(xyz_i16, quat_i16, bbox_min, span)
 
 
 def _decode_static_block(
@@ -220,6 +263,16 @@ class SplatRing:
         self._stutter_count = 0
         self._decoded_count = 0
         self._evicted_count = 0
+
+        # v2 sequential fast-path cache. Holds (idx, xyz_i16, quat_i16) of the
+        # most recently reconstructed ABSOLUTE frame. When the next requested
+        # frame is idx+1 and it's a delta, we add one decompressed delta onto
+        # this cached absolute instead of re-walking from the keyframe — the
+        # common case during forward playback. Best-effort and lock-free: a
+        # stale or raced cache only ever costs a redundant keyframe-walk, never
+        # correctness, because we re-validate ``cache_idx == idx - 1`` and only
+        # the int16 (lossless) is reused.
+        self._last_abs: tuple[int, np.ndarray, np.ndarray] | None = None
 
         self._thread = threading.Thread(
             target=self._decoder_loop,
@@ -485,18 +538,68 @@ class SplatRing:
                 if self._closed:
                     return
 
-    def _decode_one(self, idx: int) -> FrameTuple:
-        """Decode a single frame from disk. Called only from decoder thread."""
+    def _read_payload_i16(self, f, idx: int) -> tuple[np.ndarray, np.ndarray]:
+        """Read + decompress one stored frame chunk into int16 arrays.
+
+        ``f`` is an already-open binary file handle; we seek to the frame's
+        offset and decompress. The arrays are absolute (v1 / v2 keyframe) or
+        modular deltas (v2 delta) depending on the frame's flags — callers
+        decide how to interpret them.
+        """
         off, sz = self._header["frame_index"][idx]
+        f.seek(off)
+        blob = f.read(sz)
+        return _decompress_payload_i16(blob, self._static["n_splats"])
+
+    def _decode_one(self, idx: int) -> FrameTuple:
+        """Decode a single frame from disk. Called only from decoder thread.
+
+        v1: each chunk is absolute — decompress + dequant directly.
+        v2: reconstruct the absolute int16 (keyframe directly, sequential
+        fast-path via the cache, or a keyframe-walk for cold/scrub jumps),
+        then dequant. The reconstructed absolute int16 is stashed in
+        ``self._last_abs`` so the NEXT sequential frame is one decompress.
+        """
+        n_splats = self._static["n_splats"]
+        bbox_min = self._static["bbox_min"]
+
+        if self._header["version"] == 1:
+            with open(self._path, "rb") as f:
+                xyz_i16, quat_i16 = self._read_payload_i16(f, idx)
+            return _dequantize_i16(xyz_i16, quat_i16, bbox_min, self._span)
+
+        # ---- v2 reconstruction ----
+        flags = self._header["frame_flags"]
+        # Snapshot the cache once (it may be mutated by the other path).
+        cache = self._last_abs
+
         with open(self._path, "rb") as f:
-            f.seek(off)
-            blob = f.read(sz)
-        return _dequantize_frame(
-            blob,
-            self._static["n_splats"],
-            self._static["bbox_min"],
-            self._span,
-        )
+            if flags[idx] & 1:
+                # Keyframe: the stored payload IS the absolute frame.
+                xyz_i16, quat_i16 = self._read_payload_i16(f, idx)
+                xyz_abs = xyz_i16.copy()
+                quat_abs = quat_i16.copy()
+            elif cache is not None and cache[0] == idx - 1:
+                # Sequential fast path: absolute = prev_absolute + delta(idx).
+                dx, dq = self._read_payload_i16(f, idx)
+                xyz_abs = (cache[1] + dx).astype(np.int16)
+                quat_abs = (cache[2] + dq).astype(np.int16)
+            else:
+                # Cold / scrub: walk forward from the nearest keyframe <= idx.
+                kf = idx
+                while kf > 0 and not (flags[kf] & 1):
+                    kf -= 1
+                xyz_i16, quat_i16 = self._read_payload_i16(f, kf)
+                xyz_abs = xyz_i16.copy()
+                quat_abs = quat_i16.copy()
+                for j in range(kf + 1, idx + 1):
+                    dx, dq = self._read_payload_i16(f, j)
+                    xyz_abs = (xyz_abs + dx).astype(np.int16)
+                    quat_abs = (quat_abs + dq).astype(np.int16)
+
+        # Update the sequential fast-path cache (best-effort, lock-free).
+        self._last_abs = (idx, xyz_abs, quat_abs)
+        return _dequantize_i16(xyz_abs, quat_abs, bbox_min, self._span)
 
     # ---------- synchronous helpers (used by tests + initial paint) ----------
 
