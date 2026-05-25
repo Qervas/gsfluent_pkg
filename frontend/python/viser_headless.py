@@ -252,6 +252,28 @@ def _local_etag(path: Path) -> str:
     return f'"{st.st_size}-{int(st.st_mtime)}"'
 
 
+def _base_url_from_full(full_url: str) -> str:
+    """Derive the base-layer URL from a full splats.gsq URL.
+
+    .../cache/splats.gsq -> .../cache/base.gsq
+    """
+    return full_url.rsplit("/", 1)[0] + "/base.gsq"
+
+
+def _lod_decision(*, full_is_current: bool, base_status: int | None) -> str:
+    """Pick the fetch strategy for a cold sync_cell.
+
+    - "full-direct": full file already current on disk -> load it, skip base.
+    - "two-tier":    base layer exists (HEAD 200) -> stream base, then full+swap.
+    - "full-only":   no base layer -> stream full directly (today's behavior).
+    """
+    if full_is_current:
+        return "full-direct"
+    if base_status == 200:
+        return "two-tier"
+    return "full-only"
+
+
 # Workbench dark palette (mirrors frontend/tailwind.config.js). Keeping
 # this in sync visually means the iframe inside the React workbench
 # doesn't look like a foreign element pasted in. RGB tuples are 0-255.
@@ -1893,28 +1915,75 @@ def main() -> int:
 
     @api.post("/sync_cell")
     def sync_cell(name: str, url: str) -> dict:
-        """Download a cell artifact from `url` and load it as cell `name`.
+        """Load cell `name` from `url`, with LOD when a base layer exists.
 
-        For .gsq URLs, decode frames AS THEY ARRIVE. The cell appears in
-        `cells[name]` as soon as the static block is decoded (frame 0
-        included), and grows frame-by-frame as more bytes land. The SPA
-        sees /state.n_frames creep up as the stream progresses, so it
-        can start playback immediately.
-
-        For .npz URLs, fall back to download-then-load (no streaming).
-
-        Path-traversal defense same as /reload: `name` must match
-        _SAFE_NAME and the resolved file must stay under cache_dir.
+        Strategy (see _lod_decision):
+          - full already cached  -> load full directly (existing cache-hit path).
+          - base layer available -> stream base (plays), then download the full
+            file silently and swap to it at the current playhead.
+          - no base layer        -> stream full directly.
+        The SPA makes the same single call; LOD is transparent.
         """
         if not _SAFE_NAME.match(name):
             return {"ok": False, "error": f"invalid cell name: {name!r}"}
-        dest = (cache_root / f"{name}.gsq").resolve()
+        cell_key = f"sequence:{name}"
+        full_dest = (cache_root / f"{name}.gsq").resolve()
+        base_dest = (cache_root / f"{name}.base.gsq").resolve()
+        for d in (full_dest, base_dest):
+            try:
+                d.relative_to(cache_root.resolve())
+            except ValueError:
+                return {"ok": False, "error": f"cell path escapes cache_dir: {name!r}"}
+        full_partial = full_dest.with_suffix(".gsq.partial")
+        base_partial = base_dest.with_suffix(".base.gsq.partial")
+
+        # Is the local full file current vs the server?
+        full_is_current = False
+        if full_dest.is_file():
+            try:
+                head = httpx.head(url, timeout=10.0, follow_redirects=True, trust_env=False)
+                if head.status_code == 200:
+                    remote_etag = head.headers.get("etag")
+                    same_etag = remote_etag is not None and remote_etag == _local_etag(full_dest)
+                    same_size = str(full_dest.stat().st_size) == head.headers.get("content-length", "")
+                    full_is_current = bool(same_etag or same_size)
+            except Exception:
+                full_is_current = False
+
+        base_url = _base_url_from_full(url)
+        base_status = None
+        if not full_is_current:
+            try:
+                base_status = httpx.head(base_url, timeout=10.0,
+                                         follow_redirects=True, trust_env=False).status_code
+            except Exception:
+                base_status = None
+
+        decision = _lod_decision(full_is_current=full_is_current, base_status=base_status)
+
+        if decision in ("full-direct", "full-only"):
+            return _sync_cell_gsq_streaming(cell_key, url, full_dest, full_partial)
+
+        # two-tier: base now, full+swap after.
+        _set_loading(cell_key, "streaming-base")
+        base_res = _sync_cell_gsq_streaming(cell_key, base_url, base_dest, base_partial)
+        if not base_res.get("ok"):
+            # base failed -> fall straight to full streaming.
+            return _sync_cell_gsq_streaming(cell_key, url, full_dest, full_partial)
         try:
-            dest.relative_to(cache_root.resolve())
-        except ValueError:
-            return {"ok": False, "error": f"cell path escapes cache_dir: {name!r}"}
-        partial = dest.with_suffix(".gsq.partial")
-        return _sync_cell_gsq_streaming(name, url, dest, partial)
+            _set_loading(cell_key, "streaming-full")
+            _download_gsq_to_disk(url, full_dest)
+        except Exception as e:
+            # Full failed after base -> keep base playing, surface the error.
+            _set_loading(cell_key, "error", "full_stream_failed")
+            return {"ok": True, "cell": name, "lod": "base-only",
+                    "n_frames": int(base_res.get("n_frames", 0)),
+                    "error": f"full layer failed: {e}"}
+        _swap_to_ring_cell(cell_key, full_dest)
+        _set_loading(None, None)
+        return {"ok": True, "cell": name, "lod": "full",
+                "bytes": full_dest.stat().st_size,
+                "n_frames": int(base_res.get("n_frames", 0))}
 
     @api.post("/reload")
     def reload_cell(cell: str | None = None) -> dict:
