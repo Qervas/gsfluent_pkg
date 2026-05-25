@@ -6,6 +6,7 @@ from gsfluent.core.codecs.gsq_prune import (
     compute_significance,
     select_keep_indices,
     retention_curve,
+    prune_to_count,
 )
 
 
@@ -192,3 +193,36 @@ def test_prune_to_retention_rejects_bad_retention() -> None:
     for bad in (0.0, -0.5, 1.5):
         with pytest.raises(ValueError):
             prune_to_retention(raw, bad)
+
+
+# ---- prune_to_count: count-based sibling for LOD base-layer generation ----
+
+
+def test_prune_to_count_keeps_topk_subset() -> None:
+    """top-K keeps exactly K splats, same n_frames, bbox preserved."""
+    from gsfluent.core.codecs.gsq import parse_header_bytes
+
+    raw = _make_tiny_gsq(n_splats=100, n_frames=3)
+    out = prune_to_count(raw, 30)
+    h = parse_header_bytes(out)
+    assert h["n_splats"] == 30
+    assert h["n_frames"] == 3
+    h0 = parse_header_bytes(raw)
+    assert np.allclose(h["bbox_min"], h0["bbox_min"])
+    assert np.allclose(h["bbox_max"], h0["bbox_max"])
+
+
+def test_prune_to_count_noop_when_count_ge_n() -> None:
+    """keep_count >= n_splats is a no-op returning the original bytes unchanged."""
+    raw = _make_tiny_gsq(n_splats=50, n_frames=2)
+    assert prune_to_count(raw, 50) == raw
+    assert prune_to_count(raw, 999) == raw
+
+
+def test_prune_to_count_rejects_nonpositive() -> None:
+    """keep_count <= 0 raises ValueError."""
+    raw = _make_tiny_gsq(n_splats=10, n_frames=2)
+    with pytest.raises(ValueError):
+        prune_to_count(raw, 0)
+    with pytest.raises(ValueError):
+        prune_to_count(raw, -5)

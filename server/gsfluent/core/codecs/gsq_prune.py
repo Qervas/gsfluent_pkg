@@ -148,6 +148,37 @@ def prune_gsq_bytes(raw: bytes, keep: np.ndarray) -> bytes:
     return bytes(out)
 
 
+def prune_to_count(raw: bytes, keep_count: int) -> bytes:
+    """Prune a .gsq byte buffer to the top-`keep_count` most-significant splats.
+
+    Count-based sibling of prune_to_retention; the shared entry point for the
+    LOD base-layer CLI and the pack pipeline so the two never drift.
+
+    keep_count must be > 0. keep_count >= n_splats is a no-op that returns the
+    original bytes unchanged (nothing to drop).
+    """
+    if keep_count <= 0:
+        raise ValueError(f"keep_count must be > 0, got {keep_count}")
+
+    h = parse_header_bytes(raw)
+    n = h["n_splats"]
+    if keep_count >= n:
+        return raw
+
+    s_off, s_sz = h["static_offset"], h["static_size"]
+    static = zstd.ZstdDecompressor().decompress(bytes(raw[s_off:s_off + s_sz]))
+    op_start = n * 3 * 2
+    opacity = np.frombuffer(static[op_start:op_start + n], dtype=np.uint8).astype(np.float32) / 255.0
+    sc_start = op_start + n
+    scales = np.frombuffer(
+        static[sc_start:sc_start + n * 3 * 2], dtype=np.float16
+    ).reshape(n, 3).astype(np.float32)
+
+    sig = compute_significance(opacity, scales)
+    keep = select_keep_indices(sig, keep_count)
+    return prune_gsq_bytes(raw, keep)
+
+
 def prune_to_retention(raw: bytes, retention: float) -> bytes:
     """Prune a .gsq byte buffer to the smallest splat set retaining `retention`
     of total significance. Single entry point shared by the CLI and the pack
