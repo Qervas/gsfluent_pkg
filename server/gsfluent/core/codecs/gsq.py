@@ -44,6 +44,40 @@ ZSTD_LEVEL = 9
 _FP16_COV_FLOOR_SQRT = np.float32(np.sqrt(6.1e-5))  # ~7.81e-3
 
 
+def parse_header_bytes(buf: bytes) -> dict:
+    """Parse the 80-byte header + frame index from a .gsq byte buffer.
+    Mirror of viser_headless.parse_gsq_header but server-side."""
+    if buf[:4] != b"GSQ1":
+        raise ValueError(f"not a .gsq: magic={buf[:4]!r}")
+    version, n_splats, n_frames = struct.unpack_from("<III", buf, 4)
+    (fps_hint,) = struct.unpack_from("<f", buf, 16)
+    bbox_min = np.frombuffer(buf[20:32], dtype=np.float32).copy()
+    bbox_max = np.frombuffer(buf[32:44], dtype=np.float32).copy()
+    static_offset, static_size = struct.unpack_from("<QI", buf, 44)
+    frame_index = []
+    for i in range(n_frames):
+        off, sz, _r = struct.unpack_from("<QII", buf, 80 + i * 16)
+        frame_index.append((off, sz))
+    return {
+        "version": version, "n_splats": n_splats, "n_frames": n_frames,
+        "fps_hint": fps_hint, "bbox_min": bbox_min, "bbox_max": bbox_max,
+        "static_offset": static_offset, "static_size": static_size,
+        "frame_index": frame_index,
+    }
+
+
+def decode_frame_raw_i16(buf: bytes, frame_idx: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return (xyz_i16 (n,3), qxyz_i16 (n,3)) RAW int16 arrays for a frame —
+    no dequantization. Used by the pruner to slice losslessly."""
+    h = parse_header_bytes(buf)
+    n = h["n_splats"]
+    off, sz = h["frame_index"][frame_idx]
+    raw = zstd.ZstdDecompressor().decompress(bytes(buf[off:off + sz]))
+    xyz = np.frombuffer(raw[: n * 3 * 2], dtype=np.int16).reshape(n, 3)
+    qxyz = np.frombuffer(raw[n * 3 * 2 : n * 3 * 2 * 2], dtype=np.int16).reshape(n, 3)
+    return xyz, qxyz
+
+
 # ---- helper functions copied verbatim from tools/pack_splats.py ------------
 
 

@@ -76,3 +76,73 @@ def retention_curve(
             "prune_ratio": 1.0 - k / n if n else 0.0,
         })
     return out
+
+
+import struct
+import zstandard as zstd
+
+from gsfluent.core.codecs.gsq import parse_header_bytes
+
+_HEADER_SIZE = 80
+_INDEX_ENTRY = 16
+_ZSTD_LEVEL = 9
+
+
+def prune_gsq_bytes(raw: bytes, keep: np.ndarray) -> bytes:
+    """Return a new .gsq byte buffer keeping only splats at `keep` indices.
+
+    `keep` must be a 1-D int array of original splat indices, sorted ascending.
+    Lossless for kept splats: slices raw int16 frame data + raw static bytes
+    by `keep`, re-compresses. bbox + fps_hint are preserved (kept splats are
+    a subset, so the original bbox still bounds them).
+    """
+    keep = np.asarray(keep, dtype=np.int64)
+    h = parse_header_bytes(raw)
+    n_old = h["n_splats"]
+    n_frames = h["n_frames"]
+    k = len(keep)
+
+    dctx = zstd.ZstdDecompressor()
+    cctx = zstd.ZstdCompressor(level=_ZSTD_LEVEL)
+
+    # --- static block: rgb f16 (n×3×2) ++ opacity u8 (n) ++ scales f16 (n×3×2)
+    s_off, s_sz = h["static_offset"], h["static_size"]
+    static = dctx.decompress(bytes(raw[s_off:s_off + s_sz]))
+    rgb = np.frombuffer(static[: n_old * 3 * 2], dtype=np.float16).reshape(n_old, 3)
+    op_start = n_old * 3 * 2
+    opacity = np.frombuffer(static[op_start: op_start + n_old], dtype=np.uint8)
+    sc_start = op_start + n_old
+    scales = np.frombuffer(static[sc_start: sc_start + n_old * 3 * 2], dtype=np.float16).reshape(n_old, 3)
+    new_static = rgb[keep].tobytes() + opacity[keep].tobytes() + scales[keep].tobytes()
+    new_static_c = cctx.compress(new_static)
+
+    # --- frame chunks: slice raw int16 by keep
+    new_frames_c = []
+    for fidx in range(n_frames):
+        off, sz = h["frame_index"][fidx]
+        fraw = dctx.decompress(bytes(raw[off:off + sz]))
+        xyz = np.frombuffer(fraw[: n_old * 3 * 2], dtype=np.int16).reshape(n_old, 3)
+        qxyz = np.frombuffer(fraw[n_old * 3 * 2: n_old * 3 * 2 * 2], dtype=np.int16).reshape(n_old, 3)
+        new_chunk = xyz[keep].tobytes() + qxyz[keep].tobytes()
+        new_frames_c.append(cctx.compress(new_chunk))
+
+    # --- reassemble
+    static_offset = _HEADER_SIZE + n_frames * _INDEX_ENTRY
+    out = bytearray()
+    out += b"GSQ1"
+    out += struct.pack("<III", h["version"], k, n_frames)
+    out += struct.pack("<f", float(h["fps_hint"]))
+    out += h["bbox_min"].astype(np.float32).tobytes()
+    out += h["bbox_max"].astype(np.float32).tobytes()
+    out += struct.pack("<QI", static_offset, len(new_static_c))
+    out += b"\x00" * 24
+    assert len(out) == _HEADER_SIZE
+    off = static_offset + len(new_static_c)
+    for c in new_frames_c:
+        out += struct.pack("<QII", off, len(c), 0)
+        off += len(c)
+    assert len(out) == static_offset
+    out += new_static_c
+    for c in new_frames_c:
+        out += c
+    return bytes(out)

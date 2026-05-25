@@ -53,3 +53,82 @@ def test_keep_count_clamped_to_n() -> None:
     sig = np.array([0.5, 0.5], dtype=np.float32)
     keep = select_keep_indices(sig, keep_count=10)
     assert len(keep) == 2
+
+
+import io
+import struct
+import zstandard as zstd
+
+
+def _make_tiny_gsq(n_splats: int, n_frames: int) -> bytes:
+    """Build a minimal valid GSQ1 file in memory for tests. Mirrors
+    server/gsfluent/core/codecs/gsq.py layout exactly."""
+    MAGIC = b"GSQ1"; VERSION = 1
+    HEADER_SIZE = 80; INDEX_ENTRY = 16
+    cctx = zstd.ZstdCompressor(level=1)
+    rng = np.random.default_rng(0)
+    rgb = rng.random((n_splats, 3)).astype(np.float16)
+    opacity = (rng.random(n_splats) * 255).astype(np.uint8)
+    scales = (rng.random((n_splats, 3)).astype(np.float16))
+    static = rgb.tobytes() + opacity.tobytes() + scales.tobytes()
+    static_c = cctx.compress(static)
+    static_off = HEADER_SIZE + n_frames * INDEX_ENTRY
+    frames_c = []
+    for _ in range(n_frames):
+        xyz = rng.integers(-100, 100, (n_splats, 3), dtype=np.int16)
+        qxyz = rng.integers(-100, 100, (n_splats, 3), dtype=np.int16)
+        frames_c.append(cctx.compress(xyz.tobytes() + qxyz.tobytes()))
+    out = io.BytesIO()
+    out.write(MAGIC)
+    out.write(struct.pack("<III", VERSION, n_splats, n_frames))
+    out.write(struct.pack("<f", 24.0))
+    out.write(np.array([-1, -1, -1], dtype=np.float32).tobytes())
+    out.write(np.array([1, 1, 1], dtype=np.float32).tobytes())
+    out.write(struct.pack("<QI", static_off, len(static_c)))
+    out.write(b"\x00" * 24)
+    off = static_off + len(static_c)
+    for c in frames_c:
+        out.write(struct.pack("<QII", off, len(c), 0)); off += len(c)
+    out.write(static_c)
+    for c in frames_c:
+        out.write(c)
+    return out.getvalue()
+
+
+def test_prune_reduces_n_splats_and_stays_valid() -> None:
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
+    from gsfluent.core.codecs.gsq import parse_header_bytes  # see Task 3 note
+
+    raw = _make_tiny_gsq(n_splats=100, n_frames=5)
+    keep = np.sort(np.random.default_rng(1).choice(100, 40, replace=False))
+    pruned = prune_gsq_bytes(raw, keep)
+
+    # The pruned file parses, has n_splats == len(keep), same n_frames.
+    h = parse_header_bytes(pruned)
+    assert h["n_splats"] == 40
+    assert h["n_frames"] == 5
+    assert pruned[:4] == b"GSQ1"
+
+
+def test_prune_preserves_kept_frame_data_losslessly() -> None:
+    """Raw int16 slicing must keep the exact bytes of kept splats."""
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
+    from gsfluent.core.codecs.gsq import decode_frame_raw_i16  # see Task 3 note
+
+    raw = _make_tiny_gsq(n_splats=50, n_frames=3)
+    keep = np.array([0, 7, 49], dtype=np.int64)
+    pruned = prune_gsq_bytes(raw, keep)
+
+    for fidx in range(3):
+        orig_xyz, orig_q = decode_frame_raw_i16(raw, fidx)
+        new_xyz, new_q = decode_frame_raw_i16(pruned, fidx)
+        np.testing.assert_array_equal(new_xyz, orig_xyz[keep])
+        np.testing.assert_array_equal(new_q, orig_q[keep])
+
+
+def test_prune_is_smaller() -> None:
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
+    raw = _make_tiny_gsq(n_splats=200, n_frames=4)
+    keep = np.arange(0, 200, 4)  # keep 25%
+    pruned = prune_gsq_bytes(raw, keep)
+    assert len(pruned) < len(raw)
