@@ -483,3 +483,26 @@ def test_real_ring_close_does_not_break_decide(tmp_path):
     # next_idx is 1 (we want to advance), but push_now is False because
     # the ring was cleared in close(). Render loop holds.
     assert push_now is False
+
+
+def test_cov_matmul_matches_einsum() -> None:
+    """matmul formulation must equal the einsum result within fp tolerance."""
+    import sys
+    sys.path.insert(0, "frontend/python")
+    import numpy as np
+    import viser_headless as vh
+
+    rng = np.random.default_rng(0)
+    n = 5000
+    q = rng.standard_normal((n, 4)).astype(np.float32)
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    S2 = (rng.random((n, 3)).astype(np.float32) + 0.01)
+    data = {"version": 2, "scales_sq": S2}
+
+    cov = vh._cov_for_frame(data, 0, quat_override=q)
+    # reference einsum
+    R = vh._quats_to_R(q)
+    ref = np.einsum("nij,nkj->nik", R * S2[:, None, :], R).astype(np.float32)
+    np.testing.assert_allclose(cov, ref, rtol=1e-4, atol=1e-5)
+    assert cov.dtype == np.float32
+    assert cov.shape == (n, 3, 3)
