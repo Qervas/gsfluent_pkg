@@ -115,6 +115,8 @@ def _sequence_dict(seq: Sequence, *, active_names: set[str] | None = None) -> di
     d["cache"] = {
         "splats_gsq_mtime": _stat_mtime(_VISER_CACHE / f"{seq.name}.gsq"),
         "splats_gsq_bytes": _stat_size(_VISER_CACHE / f"{seq.name}.gsq"),
+        "base_gsq_mtime": _stat_mtime(_VISER_CACHE / f"{seq.name}.base.gsq"),
+        "base_gsq_bytes": _stat_size(_VISER_CACHE / f"{seq.name}.base.gsq"),
         "frames_bin_mtime": _stat_mtime(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
         "frames_bin_bytes": _stat_size(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
     }
@@ -249,9 +251,49 @@ def _gsq_etag(size: int, mtime: float) -> str:
     return f'"{size}-{int(mtime)}"'
 
 
+def _serve_cache_gsq(name: str, filename: str, request: Request) -> Response:
+    """Serve <filename> from the viser cache with weak ETag + Range + 304.
+
+    `filename` is the on-disk basename (e.g. f"{name}.gsq" or f"{name}.base.gsq").
+    Shared by the full and base-layer routes. 404 if the file is absent.
+    """
+    if not Sequence.exists(name):
+        raise HTTPException(404, f"sequence not found: {name}")
+    path = _VISER_CACHE / filename
+    if not path.is_file():
+        if not filename.endswith(".base.gsq"):
+            # Splats route: include the build hint so existing tooling messages
+            # are preserved.
+            raise HTTPException(
+                404,
+                f".gsq not built for '{name}'. Run "
+                f"`python server/tools/pack_splats.py {name}` on the server.",
+            )
+        raise HTTPException(404, f"cache artifact not built: {filename}")
+    target = path.resolve()
+    cache_root = _VISER_CACHE.resolve()
+    try:
+        target.relative_to(cache_root)
+    except ValueError:
+        raise HTTPException(400, f"refusing to serve outside cache: {filename}") from None
+    st = target.stat()
+    etag = _gsq_etag(st.st_size, st.st_mtime)
+    if request.headers.get("if-none-match") == etag:
+        # 304 carries no body but must repeat ETag + Cache-Control so
+        # downstream caches stay consistent.
+        return Response(status_code=304,
+                        headers={"etag": etag, "cache-control": _GSQ_CACHE_CONTROL})
+    return FileResponse(
+        target,
+        media_type="application/octet-stream",
+        filename=filename,
+        headers={"etag": etag, "cache-control": _GSQ_CACHE_CONTROL},
+    )
+
+
 @router.get("/{name}/cache/splats.gsq")
 def get_splats_gsq(name: str, request: Request):
-    """Serve the .gsq visual-lossless streamable cache.
+    """Serve the full .gsq visual-lossless streamable cache (Range + ETag).
 
     Produced by `server/tools/pack_splats.py` as a smaller, byte-range
     addressable alternative to the .npz cache. Typical size: 0.4-1 GB
@@ -261,59 +303,24 @@ def get_splats_gsq(name: str, request: Request):
 
     Headers:
       Cache-Control: public, immutable, max-age=31536000
-        Tells any intermediate cache that the body is safe to keep
-        forever for this URL+ETag pair. .gsq is content-addressable
-        via (name, size, mtime).
       ETag: "<size>-<mtime_int>"
-        Weak ETag per spec Open Question 3 default. Cheap to compute
-        (stat already on the hot path); strong ETag (content hash)
-        would cost a full-file read per response.
 
     Conditional GET:
-      If-None-Match matches current ETag -> 304 (no body) so the
-      viser_headless client can keep its local file authoritative
-      without re-downloading.
+      If-None-Match matches current ETag -> 304 (no body).
 
-    Range:
-      FileResponse already provides byte-range. Verified by
-      tests/api/test_sequences_cache_headers.py.
-
-    Falls through to 404 with a build hint if the .gsq doesn't exist
-    yet.
+    Falls through to 404 with a build hint if the .gsq doesn't exist yet.
     """
-    if not Sequence.exists(name):
-        raise HTTPException(404, f"sequence not found: {name}")
-    path = _VISER_CACHE / f"{name}.gsq"
-    if not path.is_file():
-        raise HTTPException(
-            404,
-            f".gsq not built for '{name}'. Run "
-            f"`python server/tools/pack_splats.py {name}` on the server.",
-        )
-    target = path.resolve()
-    cache_root = _VISER_CACHE.resolve()
-    try:
-        target.relative_to(cache_root)
-    except ValueError:
-        raise HTTPException(400, f"refusing to serve outside cache: {name}") from None
+    return _serve_cache_gsq(name, f"{name}.gsq", request)
 
-    st = target.stat()
-    etag = _gsq_etag(st.st_size, st.st_mtime)
 
-    if request.headers.get("if-none-match") == etag:
-        # 304 carries no body but must repeat ETag + Cache-Control so
-        # downstream caches stay consistent.
-        return Response(
-            status_code=304,
-            headers={"etag": etag, "cache-control": _GSQ_CACHE_CONTROL},
-        )
+@router.get("/{name}/cache/base.gsq")
+def get_base_gsq(name: str, request: Request):
+    """Serve the LOD base layer (top-K significant splats) if it exists.
 
-    return FileResponse(
-        target,
-        media_type="application/octet-stream",
-        filename=f"{name}.gsq",
-        headers={"etag": etag, "cache-control": _GSQ_CACHE_CONTROL},
-    )
+    Same Range + ETag machinery as splats.gsq. 404 when no base layer was
+    packed — the client falls back to full-only streaming.
+    """
+    return _serve_cache_gsq(name, f"{name}.base.gsq", request)
 
 
 # ── cache build (on-demand) ─────────────────────────────────────────────────
