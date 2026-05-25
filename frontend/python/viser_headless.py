@@ -2058,17 +2058,18 @@ def main() -> int:
                 pair = _cell_get_xyz_quat(data, next_idx)
                 if pair is not None:
                     xyz, quat = pair
+                    # Compute cov + centers OUTSIDE the lock — these are the
+                    # expensive ops (cov is ~40-80ms even after matmul). Holding
+                    # the lock during them stalls /set + /state for that long.
+                    cov = _cov_for_frame(data, next_idx, quat_override=quat)
+                    centers = np.ascontiguousarray(np.asarray(xyz) * _VISER_K)
                     wrote = False
                     with lock:
                         local_splat = splat
                         if local_splat is not None:
                             try:
-                                local_splat.covariances = _cov_for_frame(
-                                    data, next_idx, quat_override=quat,
-                                )
-                                local_splat.centers = np.ascontiguousarray(
-                                    np.asarray(xyz) * _VISER_K
-                                )
+                                local_splat.covariances = cov
+                                local_splat.centers = centers
                                 wrote = True
                             except RuntimeError:
                                 pass  # handle removed mid-write; retry next tick
