@@ -1219,7 +1219,17 @@ def main() -> int:
                     # the render loop's frame lookup would raise IndexError
                     # and silently kill the render thread. Clamp.
                     n_new = _cell_n_frames(cells[state["cell"]])
-                    if state["frame"] >= n_new:
+                    # Apply the requested frame BEFORE rebuilding, so the
+                    # scene node's first paint is the requested frame — not
+                    # the stale frame index left over from the previous
+                    # cell. Without this, switching to a new sequence while
+                    # the previous one was parked at a late frame paints the
+                    # new cell at that late index first (e.g. a demolition's
+                    # fully-scattered frame 140, which reads as "almost
+                    # empty") before the scrub path recovers it.
+                    if body.frame is not None:
+                        state["frame"] = max(0, min(int(body.frame), n_new - 1))
+                    elif state["frame"] >= n_new:
                         state["frame"] = max(0, n_new - 1)
                     _rebuild_scene_node()
             if body.frame is not None:
