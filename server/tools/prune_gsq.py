@@ -27,6 +27,7 @@ if str(_BOOTSTRAP / "server") not in sys.path:
 from gsfluent.core.codecs.gsq import parse_header_bytes  # noqa: E402
 from gsfluent.core.codecs.gsq_prune import (  # noqa: E402
     compute_significance, select_keep_indices, retention_curve, prune_gsq_bytes,
+    prune_to_retention,
 )
 
 
@@ -56,19 +57,21 @@ def cmd_analyze(args) -> int:
 
 def cmd_prune(args) -> int:
     raw = Path(args.gsq).read_bytes()
-    h, op, sc = _load_static(raw)
-    sig = compute_significance(op, sc)
-    if args.keep is not None:
-        keep_count = args.keep
-    else:
-        c = next(c for c in retention_curve(sig, (args.retention,)))
-        keep_count = c["keep_count"]
-    keep = select_keep_indices(sig, keep_count)
+    h = parse_header_bytes(raw)
     t0 = time.time()
-    pruned = prune_gsq_bytes(raw, keep)
+    if args.keep is not None:
+        # Explicit keep-count path (no retention target).
+        _, op, sc = _load_static(raw)
+        sig = compute_significance(op, sc)
+        keep = select_keep_indices(sig, args.keep)
+        pruned = prune_gsq_bytes(raw, keep)
+    else:
+        # Shared retention path — same helper the pack pipeline uses.
+        pruned = prune_to_retention(raw, args.retention)
     Path(args.out).write_bytes(pruned)
-    print(f"pruned {h['n_splats']:,} → {len(keep):,} splats "
-          f"({(1-len(keep)/h['n_splats'])*100:.1f}% dropped)  "
+    n_after = parse_header_bytes(pruned)["n_splats"]
+    print(f"pruned {h['n_splats']:,} → {n_after:,} splats "
+          f"({(1-n_after/h['n_splats'])*100:.1f}% dropped)  "
           f"{len(raw)/1e6:.0f} MB → {len(pruned)/1e6:.0f} MB  "
           f"in {time.time()-t0:.1f}s → {args.out}")
     return 0

@@ -132,3 +132,63 @@ def test_prune_is_smaller() -> None:
     keep = np.arange(0, 200, 4)  # keep 25%
     pruned = prune_gsq_bytes(raw, keep)
     assert len(pruned) < len(raw)
+
+
+# ---- prune_to_retention: the single helper shared by CLI + pack pipeline ----
+
+
+def test_prune_to_retention_reduces_splats_and_stays_valid() -> None:
+    """Pruning at a sub-1.0 retention must drop splat count and keep the
+    file a valid, parseable GSQ1."""
+    from gsfluent.core.codecs.gsq_prune import prune_to_retention
+    from gsfluent.core.codecs.gsq import parse_header_bytes
+
+    raw = _make_tiny_gsq(n_splats=500, n_frames=4)
+    n_before = parse_header_bytes(raw)["n_splats"]
+    pruned = prune_to_retention(raw, 0.98)
+    h = parse_header_bytes(pruned)
+    # random opacity×volume → 0.98 retention drops a meaningful fraction
+    assert h["n_splats"] < n_before
+    assert h["n_frames"] == 4
+    assert pruned[:4] == b"GSQ1"
+    assert len(pruned) < len(raw)
+
+
+def test_prune_to_retention_matches_manual_pipeline() -> None:
+    """The helper must produce exactly what compute→curve→select→prune does
+    by hand, so the CLI and pack pipeline can't drift from each other."""
+    from gsfluent.core.codecs.gsq_prune import (
+        prune_to_retention, prune_gsq_bytes, select_keep_indices,
+        retention_curve, compute_significance,
+    )
+    from gsfluent.core.codecs.gsq import parse_header_bytes
+    import zstandard as zstd
+
+    raw = _make_tiny_gsq(n_splats=300, n_frames=3)
+    h = parse_header_bytes(raw)
+    n = h["n_splats"]
+    static = zstd.ZstdDecompressor().decompress(
+        bytes(raw[h["static_offset"]:h["static_offset"] + h["static_size"]])
+    )
+    op = np.frombuffer(static[n * 3 * 2:n * 3 * 2 + n], dtype=np.uint8).astype(np.float32) / 255.0
+    sc = np.frombuffer(static[n * 3 * 2 + n:n * 3 * 2 + n + n * 3 * 2], dtype=np.float16).reshape(n, 3).astype(np.float32)
+    sig = compute_significance(op, sc)
+    kc = retention_curve(sig, (0.99,))[0]["keep_count"]
+    expected = prune_gsq_bytes(raw, select_keep_indices(sig, kc))
+
+    assert prune_to_retention(raw, 0.99) == expected
+
+
+def test_prune_to_retention_full_retention_is_noop() -> None:
+    """retention == 1.0 keeps every splat → returns the original bytes."""
+    from gsfluent.core.codecs.gsq_prune import prune_to_retention
+    raw = _make_tiny_gsq(n_splats=100, n_frames=2)
+    assert prune_to_retention(raw, 1.0) is raw
+
+
+def test_prune_to_retention_rejects_bad_retention() -> None:
+    from gsfluent.core.codecs.gsq_prune import prune_to_retention
+    raw = _make_tiny_gsq(n_splats=10, n_frames=1)
+    for bad in (0.0, -0.5, 1.5):
+        with pytest.raises(ValueError):
+            prune_to_retention(raw, bad)

@@ -146,3 +146,38 @@ def prune_gsq_bytes(raw: bytes, keep: np.ndarray) -> bytes:
     for c in new_frames_c:
         out += c
     return bytes(out)
+
+
+def prune_to_retention(raw: bytes, retention: float) -> bytes:
+    """Prune a .gsq byte buffer to the smallest splat set retaining `retention`
+    of total significance. Single entry point shared by the CLI and the pack
+    pipeline so the two never drift.
+
+    Reads the static block (opacity + scales), computes per-splat significance,
+    finds the keep_count for the target retention via `retention_curve`, selects
+    the top-significance indices, and slices the file losslessly.
+
+    `retention` must be in (0, 1]. retention >= 1.0 (or a keep_count == n) is a
+    no-op that returns the original bytes unchanged.
+    """
+    if not (0.0 < retention <= 1.0):
+        raise ValueError(f"retention must be in (0, 1], got {retention}")
+
+    h = parse_header_bytes(raw)
+    n = h["n_splats"]
+    s_off, s_sz = h["static_offset"], h["static_size"]
+    static = zstd.ZstdDecompressor().decompress(bytes(raw[s_off:s_off + s_sz]))
+    op_start = n * 3 * 2
+    opacity = np.frombuffer(static[op_start:op_start + n], dtype=np.uint8).astype(np.float32) / 255.0
+    sc_start = op_start + n
+    scales = np.frombuffer(
+        static[sc_start:sc_start + n * 3 * 2], dtype=np.float16
+    ).reshape(n, 3).astype(np.float32)
+
+    sig = compute_significance(opacity, scales)
+    keep_count = retention_curve(sig, (retention,))[0]["keep_count"]
+    if keep_count >= n:
+        # Nothing to drop at this retention — return the original unchanged.
+        return raw
+    keep = select_keep_indices(sig, keep_count)
+    return prune_gsq_bytes(raw, keep)
