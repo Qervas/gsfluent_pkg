@@ -2008,6 +2008,7 @@ def main() -> int:
 
     # --- render loop -----------------------------------------------------
     while not stop_flag["v"]:
+        _tick_start = time.perf_counter()
         with lock:
             cell = state["cell"]
             desired = state["frame"]
@@ -2156,7 +2157,13 @@ def main() -> int:
             with lock:
                 state["scene_dirty"] = False
 
-        time.sleep(1 / 30)
+        # Adaptive pacing: sleep only the remainder of the frame budget so a
+        # slow tick doesn't stack the full 33ms on top of its work. The cell
+        # dict does not carry an fps_hint, so target 24fps. Floor at 1ms so a
+        # slow tick still yields the GIL.
+        _target_dt = 1.0 / 24.0
+        _elapsed = time.perf_counter() - _tick_start
+        time.sleep(max(0.001, _target_dt - _elapsed))
 
     # Clean shutdown — try to stop viser's WS so the browser sees a
     # proper close frame rather than a TCP reset.
