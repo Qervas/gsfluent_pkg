@@ -1,4 +1,7 @@
 """Tests for .gsq significance pruning."""
+import importlib.util as _ilu
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -226,3 +229,24 @@ def test_prune_to_count_rejects_nonpositive() -> None:
         prune_to_count(raw, 0)
     with pytest.raises(ValueError):
         prune_to_count(raw, -5)
+
+
+# ---- CLI: base subcommand ----
+
+_PRUNE_GSQ_TOOL = Path(__file__).resolve().parents[2] / "tools" / "prune_gsq.py"
+_spec_tool = _ilu.spec_from_file_location("_prune_gsq_tool", _PRUNE_GSQ_TOOL)
+_prune_gsq_tool = _ilu.module_from_spec(_spec_tool)
+_spec_tool.loader.exec_module(_prune_gsq_tool)
+
+
+def test_cli_base_writes_topk_sibling(tmp_path) -> None:
+    import argparse
+    from gsfluent.core.codecs.gsq import parse_header_bytes
+
+    full = tmp_path / "seq.gsq"
+    full.write_bytes(_make_tiny_gsq(n_splats=100, n_frames=2))
+    args = argparse.Namespace(gsq=str(full), splats=25, out=None)
+    assert _prune_gsq_tool.cmd_base(args) == 0
+    base = tmp_path / "seq.base.gsq"
+    assert base.is_file()
+    assert parse_header_bytes(base.read_bytes())["n_splats"] == 25

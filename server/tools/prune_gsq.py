@@ -27,7 +27,7 @@ if str(_BOOTSTRAP / "server") not in sys.path:
 from gsfluent.core.codecs.gsq import parse_header_bytes  # noqa: E402
 from gsfluent.core.codecs.gsq_prune import (  # noqa: E402
     compute_significance, select_keep_indices, retention_curve, prune_gsq_bytes,
-    prune_to_retention,
+    prune_to_retention, prune_to_count,
 )
 
 
@@ -60,11 +60,8 @@ def cmd_prune(args) -> int:
     h = parse_header_bytes(raw)
     t0 = time.time()
     if args.keep is not None:
-        # Explicit keep-count path (no retention target).
-        _, op, sc = _load_static(raw)
-        sig = compute_significance(op, sc)
-        keep = select_keep_indices(sig, args.keep)
-        pruned = prune_gsq_bytes(raw, keep)
+        # Explicit keep-count path — delegates to the shared helper.
+        pruned = prune_to_count(raw, args.keep)
     else:
         # Shared retention path — same helper the pack pipeline uses.
         pruned = prune_to_retention(raw, args.retention)
@@ -74,6 +71,20 @@ def cmd_prune(args) -> int:
           f"({(1-n_after/h['n_splats'])*100:.1f}% dropped)  "
           f"{len(raw)/1e6:.0f} MB → {len(pruned)/1e6:.0f} MB  "
           f"in {time.time()-t0:.1f}s → {args.out}")
+    return 0
+
+
+def cmd_base(args) -> int:
+    raw = Path(args.gsq).read_bytes()
+    h = parse_header_bytes(raw)
+    out = Path(args.out) if args.out else Path(args.gsq).with_suffix(".base.gsq")
+    t0 = time.time()
+    base = prune_to_count(raw, args.splats)
+    out.write_bytes(base)
+    n_after = parse_header_bytes(base)["n_splats"]
+    print(f"base {h['n_splats']:,} -> {n_after:,} splats  "
+          f"{len(raw)/1e6:.0f} MB -> {len(base)/1e6:.0f} MB  "
+          f"in {time.time()-t0:.1f}s -> {out}")
     return 0
 
 
@@ -87,6 +98,10 @@ def main() -> int:
     pr.add_argument("--keep", type=int, default=None)
     pr.add_argument("--out", required=True)
     pr.set_defaults(fn=cmd_prune)
+    b = sub.add_parser("base"); b.add_argument("gsq")
+    b.add_argument("--splats", type=int, required=True)
+    b.add_argument("--out", default=None)
+    b.set_defaults(fn=cmd_base)
     args = p.parse_args()
     return args.fn(args)
 
