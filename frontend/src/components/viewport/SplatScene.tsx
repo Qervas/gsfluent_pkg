@@ -3,7 +3,8 @@ import * as THREE from "three";
 import { SplatMesh, PackedSplats } from "@sparkjsdev/spark";
 import { useStore } from "@/lib/store";
 import { useActiveCell } from "@/lib/use-active-cell";
-import { splatsGsqUrl } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { api, splatsGsqUrl, modelPlyUrl } from "@/lib/api";
 import { splatArgs, makeSplatArgs } from "@/lib/gsq/splat-writer";
 import { useGsqPlayer } from "./use-gsq-player";
 import { useThreeScene } from "./use-three-scene";
@@ -14,7 +15,9 @@ import type { GsqFrame, GsqStatic } from "@/lib/gsq";
  *  rendered cursor into viserState so PlaybackBar/Driver work (no-skip:
  *  pushed_frame set after the GPU write). */
 export function SplatScene() {
-  const { activeCell, isSequence } = useActiveCell();
+  const { activeCell, isSequence, isModel } = useActiveCell();
+  const { data: models = [] } = useQuery({ queryKey: ["models"], queryFn: api.models.list });
+  const modelPath = isModel ? (models.find((m) => m.name === activeCell?.name)?.path ?? null) : null;
   const name = isSequence ? activeCell?.name ?? null : null;
   const url = name ? splatsGsqUrl(name) : null;
 
@@ -83,6 +86,26 @@ export function SplatScene() {
     player.requestFrame(currentFrameIdx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentFrameIdx, player.status]);
+
+  // model cell: load the static .ply via Spark (no worker, no animation)
+  useEffect(() => {
+    if (!isModel || !modelPath) return;
+    const mesh = new SplatMesh({ url: modelPlyUrl(modelPath) });
+    scene.add(mesh);
+    setViserState({ cell: activeCell?.name ?? null, frame: 0, n_frames: 0, pushed_frame: 0 });
+    let alive = true;
+    void mesh.initialized.then((loadedMesh) => {
+      if (!alive) return;
+      const box = loadedMesh.getBoundingBox();
+      if (box.isEmpty()) {
+        scene.frame([-1, -1, -1], [1, 1, 1]);
+      } else {
+        scene.frame(box.min.toArray(), box.max.toArray());
+      }
+    });
+    return () => { alive = false; scene.remove(mesh); scene.clearGround(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isModel, modelPath, activeCell?.name]);
 
   return (
     <div ref={scene.mountRef} className="h-full w-full relative bg-canvas">
