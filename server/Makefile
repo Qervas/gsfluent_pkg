@@ -13,14 +13,12 @@
 ROOT_VENV := ../.venv
 ROOT_PY   := $(ROOT_VENV)/bin/python
 
-# Reproducible install via uv into the unified root venv. `[dev,client]`
-# is the laptop/dev-box flavor; for headless production servers that
-# don't render anything, drop `,client` and you save ~120 MB of viser.
+# Reproducible install via uv into the root venv (backend + dev/test deps).
 install:
-	uv pip install --python $(ROOT_PY) -e '.[dev,client]'
+	uv pip install --python $(ROOT_PY) -e '.[dev]'
 
-# Server-only flavor (no viser/httpx/eval_type_backport). Useful on the
-# GPU box where the renderer never runs.
+# Alias kept for muscle memory; identical to `install` now that the SPA
+# renders in-browser and the backend has no client-side render deps.
 install-server:
 	uv pip install --python $(ROOT_PY) -e '.[dev]'
 

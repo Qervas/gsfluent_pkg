@@ -619,29 +619,3 @@ class SplatRing:
                 self._ring[idx] = (xyz, quat)
                 self._decoded_count += 1
         return xyz, quat
-
-
-def make_static_cell(ring: SplatRing, viser_k: float = 1.0) -> dict:
-    """Build a static-attrs cell dict mirroring _build_gsq_cell_dict.
-
-    The render loop in viser_headless reads these fields directly off
-    the cell. ``frames`` and ``quats`` are NOT present here — those go
-    through the ring. ``ring`` is stashed under the ``_ring`` key so
-    the render loop has a back-reference without needing a second dict
-    lookup.
-    """
-    static = ring.static
-    K2 = viser_k * viser_k
-    bbox_lo = (static["bbox_min"] * viser_k).astype(np.float32)
-    bbox_hi = (static["bbox_max"] * viser_k).astype(np.float32)
-    scales_f32 = static["scales_f16"].astype(np.float32)
-    return {
-        "version": 2,
-        "ring": ring,                 # new entry point for sliding-window cells
-        "n_frames": ring.n_frames,    # mirrored convenience read
-        "scales_sq": (scales_f32 * scales_f32) * K2,
-        "rgb": static["rgb_f16"].astype(np.float32),
-        "opacity": (static["opacity_u8"].astype(np.float32) / 255.0).reshape(-1, 1),
-        "bbox_lo": bbox_lo,
-        "bbox_hi": bbox_hi,
-    }

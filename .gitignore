@@ -53,3 +53,7 @@ docs/slides/
 CLAUDE.md
 AGENTS.md
 frontend/test-results/
+
+# throwaway Spark spike (Stage 2a)
+/spike-spark/
+.gstack/

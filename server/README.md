@@ -16,19 +16,11 @@ server and client deps (Python 3.12, managed by `uv`). It is normally
 created by `npm install` in `../frontend/` (which runs
 `frontend/scripts/install.mjs`).
 
-For a server-only install (no viser/SPA — useful on a GPU box that
-never renders):
+Install the backend + dev/test deps:
 
 ```bash
 cd server
 make install-server        # uv pip install -e .[dev] into ../.venv/
-```
-
-Or pull the full client+dev stack into the unified venv:
-
-```bash
-cd server
-make install               # uv pip install -e .[dev,client]
 ```
 
 That registers the `gsfluent` console script in `../.venv/bin/`. For
@@ -51,8 +43,8 @@ gsfluent serve --no-browser
 gsfluent serve --reload     # dev: auto-reload on code changes
 ```
 
-For the integrated workbench (backend + viser headless together),
-use `../run-server.sh` (this box) + `../run-laptop.sh` (laptop) instead.
+The SPA runs separately on each teammate's machine and renders splats
+in-browser — `cd ../frontend && npm install && npm start`.
 
 ## Test
 

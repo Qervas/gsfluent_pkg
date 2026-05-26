@@ -22,7 +22,7 @@ const WS_URL = BACKEND_URL.replace(/^http/, "ws");
 // /api/* (and the /api/stream WS) are the v1 frontend's surface; /v1/*
 // is the v2 api surface. Both are served by the same backend host —
 // client deploys point this at your server (http://your-backend:port) so the
-// SPA + viser can run locally while the API stays remote.
+// SPA can run locally while the API stays remote.
 const proxy = {
   "/api/stream": { target: WS_URL, ws: true, changeOrigin: true },
   "/api":        { target: BACKEND_URL, changeOrigin: true },

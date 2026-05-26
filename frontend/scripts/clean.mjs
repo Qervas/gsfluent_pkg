@@ -10,10 +10,9 @@
 //   - frontend/tsconfig*.tsbuildinfo    tsc -b incremental state
 //   - frontend/vite.config.js / .d.ts   emitted from vite.config.ts
 //
-// Then sweeps stray viser_headless + `vite preview` processes that a
-// previous `npm start` left running (ECONNRESET on Ctrl-C, orphans
-// after a terminal close, etc.). pkill is best-effort — failure to
-// find a process is fine.
+// Then sweeps stray `vite preview` processes that a previous `npm start`
+// left running (orphans after a terminal close, etc.). pkill is
+// best-effort — failure to find a process is fine.
 //
 // Intentionally does NOT nuke frontend/node_modules itself — that's a
 // 5-minute reinstall on cold cache, and `npm install` will reconcile
@@ -50,11 +49,10 @@ for (const p of targets) {
   }
 }
 
-// Best-effort: kill leftover viser_headless / `vite preview` processes
-// that a previous `npm start` may have orphaned. Patterns are hardcoded
-// constants (no user-supplied input — execFileSync, not exec).
+// Best-effort: kill a leftover `vite preview` process that a previous
+// `npm start` may have orphaned. Pattern is a hardcoded constant (no
+// user-supplied input — execFileSync, not exec).
 const patterns = [
-  "python/viser_headless.py",
   "vite preview --port",
 ];
 for (const pat of patterns) {

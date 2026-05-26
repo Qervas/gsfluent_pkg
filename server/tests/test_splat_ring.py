@@ -35,7 +35,6 @@ def _load_splat_ring():
 
 splat_ring = _load_splat_ring()
 SplatRing = splat_ring.SplatRing
-make_static_cell = splat_ring.make_static_cell
 
 
 # ----- v2 fixture helpers (build via the real codec, decode via ground truth)-
@@ -502,27 +501,6 @@ def test_concurrent_gets_are_safe(tmp_path):
             t.join()
         # No crashes; that's the goal.
         assert all(seen)
-    finally:
-        ring.close()
-
-
-# ----- static cell wrapper ------------------------------------------------
-
-
-def test_make_static_cell_shape(tmp_path):
-    gsq = tmp_path / "seq.gsq"
-    _write_minimal_gsq(gsq, n_splats=6, n_frames=8)
-    ring = SplatRing(gsq, window_size=3)
-    try:
-        cell = make_static_cell(ring, viser_k=1.0)
-        assert cell["version"] == 2
-        assert cell["ring"] is ring
-        assert cell["n_frames"] == 8
-        assert cell["rgb"].shape == (6, 3)
-        assert cell["opacity"].shape == (6, 1)
-        assert cell["scales_sq"].shape == (6, 3)
-        assert cell["bbox_lo"].shape == (3,)
-        assert cell["bbox_hi"].shape == (3,)
     finally:
         ring.close()
 
