@@ -119,11 +119,13 @@ def _kind_to_exception(kind: str, message: str) -> Exception:
 class MPMSimulationEngine:
     """Concrete SimulationEngine for the MPM sim (warp + taichi + torch).
 
-    Spawns two subprocesses per run() call:
+    Spawns two subprocesses per run() call, sequentially (sim is awaited to
+    completion before the fuse starts):
       1. The canonical MPM sim (gs_simulation_building.py)
       2. The fuse stage (server/tools/fuse_to_full_ply.py)
-    Both inherit the new process group created at sim spawn so a single
-    killpg(pgid, SIGTERM/SIGKILL) on cancel/timeout takes down both.
+    Each gets its own new process group (the sim's pg is already gone by the
+    time the fuse spawns, so they can't share one); killpg(pgid) on
+    cancel/timeout targets whichever stage is currently running.
 
     Construction:
         eng = MPMSimulationEngine(
@@ -281,12 +283,16 @@ class MPMSimulationEngine:
         )
 
         t1 = time.monotonic()
-        fuse_proc = await self._spawn_in_existing_pg(
+        # The sim has already exited (awaited above), so its process group is
+        # gone — the fuse cannot join it (setpgid into a dead pg raises in the
+        # preexec_fn). The two stages run sequentially, so give the fuse its
+        # own process group; killpg on cancel/timeout targets fuse_pgid here.
+        fuse_proc = await self._spawn_in_new_pg(
             argv=fuse_argv,
             cwd=str(PKG_ROOT),
-            pgid=pgid,
         )
-        on_event.emit("fuse.spawned", pid=fuse_proc.pid, argv=fuse_argv)
+        fuse_pgid = os.getpgid(fuse_proc.pid)
+        on_event.emit("fuse.spawned", pid=fuse_proc.pid, pgid=fuse_pgid, argv=fuse_argv)
         fuse_stderr_chunks: list[str] = []
         fuse_rc = await _wait_capturing_stderr(fuse_proc, fuse_stderr_chunks)
         fuse_duration = time.monotonic() - t1
@@ -375,26 +381,6 @@ class MPMSimulationEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
-        )
-
-    async def _spawn_in_existing_pg(
-        self, argv: list[str], cwd: str, pgid: int
-    ) -> asyncio.subprocess.Process:
-        """Launch the fuse child into the sim's existing process group.
-
-        Uses preexec_fn=os.setpgid to slot the child into pgid before
-        the target program loads. This means a single killpg call covers
-        both stages on cancel/timeout.
-        """
-        def _join_pg() -> None:
-            os.setpgid(0, pgid)
-
-        return await _spawn(
-            *argv,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            preexec_fn=_join_pg,
         )
 
 
