@@ -72,8 +72,7 @@ export type BCFieldSpec = {
 export type BCSchemas = Record<string, BCFieldSpec[]>;
 export type MaterialDefaults = Record<string, Record<string, number>>;
 
-// Playback cursor published into the store by SplatScene. Distinct from the
-// diag-poll ViserState below (which carries the full viser /state shape).
+// Playback cursor published into the store by SplatScene.
 export type PlaybackState = {
   cell: string | null;
   frame: number;
@@ -88,18 +87,6 @@ export type PlaybackState = {
 // reported."
 export type BackendHealth = { status: string; pkg_root: string };
 
-export type ViserState = {
-  cell: string;
-  frame: number;
-  // The frame the render loop has actually pushed to viser. Distinct
-  // from `frame` (the SPA's desired cursor) so the scrub bar can
-  // display the actually-rendered index. -1 before the first paint.
-  pushed_frame: number;
-  n_frames: number;
-  cells: string[];
-  bbox: { lo: [number, number, number]; hi: [number, number, number] };
-};
-
 export type DiagPart = {
   ok: boolean;
   detail?: string;        // short human-readable status (e.g. "last sync 4s ago")
@@ -108,5 +95,4 @@ export type DiagPart = {
 
 export type DiagSnapshot = {
   backend: DiagPart;
-  viser:   DiagPart & { raw?: ViserState };
 };
