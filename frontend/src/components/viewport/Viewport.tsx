@@ -10,11 +10,11 @@ import { PlaybackDriver } from "./PlaybackDriver";
 import { PlaybackBar } from "./PlaybackBar";
 
 export function Viewport() {
-  const { activeCell, isSequence } = useActiveCell();
+  const { activeCell, isSequence, isModel } = useActiveCell();
   const hasContent = !!activeCell;
   const viserEnabled = useStore((s) => s.viserEnabled);
   const inBrowserRenderer = useStore((s) => s.inBrowserRenderer);
-  const useSplatScene = inBrowserRenderer && isSequence;
+  const useSplatScene = inBrowserRenderer && (isSequence || isModel);
 
   return (
     <div className="h-full w-full relative bg-canvas">
