@@ -10,7 +10,6 @@ from plyfile import PlyData, PlyElement
 from gsfluent.core.fusers.knn_kabsch import (
     KNNKabschFuser,
     _norm_xyz_to_origin_cube,
-    _rotmat_to_quat,
 )
 from gsfluent.protocols.fuse import (
     Correspondence,
@@ -67,22 +66,6 @@ def test_norm_xyz_to_origin_cube_centers_data() -> None:
     out_max = out.max(axis=0)
     np.testing.assert_allclose((out_min + out_max) / 2, [1.0, 1.0, 1.0], atol=1e-5)
     assert extent == 10.0  # longest axis was x
-
-
-def test_rotmat_to_quat_identity_round_trip() -> None:
-    """Identity rotation should produce (1, 0, 0, 0)."""
-    R = np.eye(3, dtype=np.float32)[None, :, :]  # (1, 3, 3)
-    q = _rotmat_to_quat(R)
-    np.testing.assert_allclose(q[0], [1.0, 0.0, 0.0, 0.0], atol=1e-5)
-
-
-def test_rotmat_to_quat_90deg_z_rotation() -> None:
-    """90 deg rotation about Z axis: quat = (cos(45), 0, 0, sin(45))."""
-    c = np.cos(np.pi / 4)
-    s = np.sin(np.pi / 4)
-    R = np.array([[[0, -1, 0], [1, 0, 0], [0, 0, 1]]], dtype=np.float32)
-    q = _rotmat_to_quat(R)
-    np.testing.assert_allclose(q[0], [c, 0.0, 0.0, s], atol=1e-5)
 
 
 def test_build_correspondence_returns_correspondence(tmp_path: Path) -> None:

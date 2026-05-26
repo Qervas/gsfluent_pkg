@@ -43,40 +43,6 @@ from gsfluent.protocols.fuse import (
 # ---- math helpers copied verbatim from tools/fuse_to_full_ply.py -----------
 
 
-def _rotmat_to_quat(R):
-    """Batched (N, 3, 3) rotation matrices -> (N, 4) quaternions in (w,x,y,z) order."""
-    m = R
-    t = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
-    out = np.zeros((m.shape[0], 4), dtype=m.dtype)
-    mask_a = t > 0
-    s = np.sqrt(t[mask_a] + 1.0) * 2.0
-    out[mask_a, 0] = 0.25 * s
-    out[mask_a, 1] = (m[mask_a, 2, 1] - m[mask_a, 1, 2]) / s
-    out[mask_a, 2] = (m[mask_a, 0, 2] - m[mask_a, 2, 0]) / s
-    out[mask_a, 3] = (m[mask_a, 1, 0] - m[mask_a, 0, 1]) / s
-    remaining = ~mask_a
-    rem_idx = np.argmax(np.stack([m[:, 0, 0], m[:, 1, 1], m[:, 2, 2]], axis=1), axis=1)
-    mb = remaining & (rem_idx == 0)
-    s = np.sqrt(1.0 + m[mb, 0, 0] - m[mb, 1, 1] - m[mb, 2, 2]) * 2.0
-    out[mb, 0] = (m[mb, 2, 1] - m[mb, 1, 2]) / s
-    out[mb, 1] = 0.25 * s
-    out[mb, 2] = (m[mb, 0, 1] + m[mb, 1, 0]) / s
-    out[mb, 3] = (m[mb, 0, 2] + m[mb, 2, 0]) / s
-    mc = remaining & (rem_idx == 1)
-    s = np.sqrt(1.0 + m[mc, 1, 1] - m[mc, 0, 0] - m[mc, 2, 2]) * 2.0
-    out[mc, 0] = (m[mc, 0, 2] - m[mc, 2, 0]) / s
-    out[mc, 1] = (m[mc, 0, 1] + m[mc, 1, 0]) / s
-    out[mc, 2] = 0.25 * s
-    out[mc, 3] = (m[mc, 1, 2] + m[mc, 2, 1]) / s
-    md = remaining & (rem_idx == 2)
-    s = np.sqrt(1.0 + m[md, 2, 2] - m[md, 0, 0] - m[md, 1, 1]) * 2.0
-    out[md, 0] = (m[md, 1, 0] - m[md, 0, 1]) / s
-    out[md, 1] = (m[md, 0, 2] + m[md, 2, 0]) / s
-    out[md, 2] = (m[md, 1, 2] + m[md, 2, 1]) / s
-    out[md, 3] = 0.25 * s
-    return out
-
-
 def _norm_xyz_to_origin_cube(
     xyz: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, float]:
