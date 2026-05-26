@@ -10,7 +10,7 @@ their own keys.
 """
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -78,12 +78,6 @@ class CacheCodec(Protocol):
     ) -> CacheMetadata:
         """Encode the sequence to out. Emits structured progress events.
         Raises CodecError on unsanitizable input."""
-        ...
-
-    async def decode_streaming(
-        self, src: AsyncIterator[bytes]
-    ) -> AsyncIterator[DecodedFrame]:
-        """Decode-as-bytes-arrive. Yields one DecodedFrame per available frame."""
         ...
 
     def decode_all(self, src: BinaryIO) -> Sequence[DecodedFrame]:

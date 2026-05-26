@@ -306,20 +306,6 @@ async def cancel(
     return {"status": "cancelled"}
 
 
-def _seq_root() -> Path:
-    """Resolve the sequences root.
-
-    Looks first at `_LEGACY_RUNS_DIR` for backward compat with tests that
-    monkeypatch it (those tests build a `<tmp>/fused/<name>/manifest.json`
-    layout pre-Phase-1). If `_LEGACY_RUNS_DIR` is the real
-    `lib.SEQUENCES_DIR` (the production setup) we ignore it — production
-    reads from the library directly. Tests pointing `_LEGACY_RUNS_DIR` at
-    a temp path keep working because their layout is what the legacy
-    branch reads.
-    """
-    return lib.SEQUENCES_DIR
-
-
 def _active_run_names(run_mgr: RunManager) -> set[str]:
     """Names of active (non-terminal) runs, for the "don't delete a
     live sequence" guard. Returns a set so callers can do O(1) lookups

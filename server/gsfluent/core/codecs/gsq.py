@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import struct
 import time
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import BinaryIO
 
@@ -484,28 +484,6 @@ class GSQCodec:
             fps_hint=24.0,
         )
 
-    async def decode_streaming(
-        self, src: AsyncIterator[bytes]
-    ) -> AsyncIterator[DecodedFrame]:
-        """Streaming decode is the viser_headless client's job today.
-
-        Phase 2 leaves this as a thin pass-through that buffers and then yields
-        decoded frames from `decode_all`. Frontend-side streaming decode lives
-        in frontend/python/viser_headless.py and stays there for now (the
-        Storage layer fronts the bytes via get_range). Returning a buffered
-        iterator here is sufficient for backend callers that don't need
-        first-frame-fast latency.
-        """
-        chunks: list[bytes] = []
-        async for c in src:
-            chunks.append(c)
-        body = b"".join(chunks)
-
-        async def _gen():
-            for frame in self.decode_all(_BytesReader(body)):
-                yield frame
-        return _gen()
-
     def decode_all(self, src: BinaryIO) -> Sequence[DecodedFrame]:
         """Synchronous all-at-once loader. Returns a list of DecodedFrame.
 
@@ -582,19 +560,3 @@ class GSQCodec:
                 },
             ))
         return frames_out
-
-
-class _BytesReader:
-    """Minimal BinaryIO-ish wrapper for use by decode_streaming."""
-    def __init__(self, body: bytes) -> None:
-        self._body = body
-        self._pos = 0
-
-    def read(self, n: int = -1) -> bytes:
-        if n < 0:
-            chunk = self._body[self._pos:]
-            self._pos = len(self._body)
-            return chunk
-        chunk = self._body[self._pos:self._pos + n]
-        self._pos += len(chunk)
-        return chunk

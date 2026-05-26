@@ -47,12 +47,3 @@ class CellRef:
         if self.kind != "sequence":
             raise ValueError(f"library_dir only defined for sequences, got {self.kind!r}")
         return _paths.sequence_dir_for(self.name)
-
-    @classmethod
-    def parse_wire(cls, s: str) -> CellRef:
-        if ":" not in s:
-            raise ValueError(f"missing ':' in cell wire: {s!r}")
-        kind, _, name = s.partition(":")
-        if kind not in ("sequence", "model"):
-            raise ValueError(f"invalid cell kind in wire: {kind!r}")
-        return cls(kind=kind, name=name)  # type: ignore[arg-type]

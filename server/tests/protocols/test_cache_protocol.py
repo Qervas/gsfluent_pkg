@@ -4,7 +4,7 @@ Phase 2 will implement GSQCodec against this contract. Phase 1 verifies
 the Protocol shape with an in-memory stub.
 """
 import io
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from typing import BinaryIO
 
 import pytest
@@ -41,13 +41,6 @@ class _IdentityCodec:
             count += 1
             out.write(b"f")
         return CacheMetadata(n_splats=0, n_frames=count, bbox=(0, 0, 0, 0, 0, 0))
-
-    async def decode_streaming(
-        self, src: AsyncIterator[bytes]
-    ) -> AsyncIterator[DecodedFrame]:
-        async for chunk in src:
-            for _ in chunk:
-                yield DecodedFrame(frame_index=0, data={})
 
     def decode_all(self, src: BinaryIO) -> Sequence[DecodedFrame]:
         body = src.read()

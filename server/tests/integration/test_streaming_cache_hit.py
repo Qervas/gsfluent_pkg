@@ -19,7 +19,6 @@ production sizes (xyz int16 * 3 + quat int16 * 3 per splat).
 """
 from __future__ import annotations
 
-import importlib
 import struct
 from pathlib import Path
 
@@ -137,24 +136,3 @@ def test_second_sync_uses_head_and_skips_body(real_gsq, tmp_path: Path, monkeypa
     )
     assert r3.status_code == 206
     assert r3.content == real_gsq["body"][:16]
-
-
-def test_local_etag_matches_server_etag(real_gsq) -> None:
-    """The client's _local_etag and the server's _gsq_etag must produce
-    byte-identical strings — the whole HEAD-skip path depends on it."""
-    pytest.importorskip("numpy")
-    pytest.importorskip("zstandard")
-
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "frontend" / "python"))
-    try:
-        viser_headless = importlib.import_module("viser_headless")
-    finally:
-        sys.path.pop(0)
-
-    from gsfluent.api.sequences import _gsq_etag
-
-    local = viser_headless._local_etag(real_gsq["path"])
-    st = real_gsq["path"].stat()
-    server = _gsq_etag(st.st_size, st.st_mtime)
-    assert local == server

@@ -233,25 +233,6 @@ class _CellLRU(collections.abc.MutableMapping):
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
-def _local_etag(path: Path) -> str:
-    """Compute the weak ETag the server would emit for `path`.
-
-    Format MUST match server/gsfluent/api/sequences.py:_gsq_etag — the
-    contract is the literal byte equality of the quoted ETag string.
-
-        '"<size>-<mtime_int>"'
-
-    Recomputed from os.stat() each call; no persistent sidecar file. The
-    .gsq cache is small enough (sub-GB) that a stat is free and the
-    sidecar maintenance cost would outweigh its benefit.
-
-    Raises FileNotFoundError if path doesn't exist — callers should
-    check is_file() first.
-    """
-    st = path.stat()
-    return f'"{st.st_size}-{int(st.st_mtime)}"'
-
-
 # Workbench dark palette (mirrors frontend/tailwind.config.js). Keeping
 # this in sync visually means the iframe inside the React workbench
 # doesn't look like a foreign element pasted in. RGB tuples are 0-255.

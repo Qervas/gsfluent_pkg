@@ -29,11 +29,3 @@ def gsq_for(name: str) -> Path:
 
 def sequence_dir_for(name: str) -> Path:
     return SEQUENCES / name
-
-
-def frames_dir_for(name: str) -> Path:
-    return SEQUENCES / name / "frames"
-
-
-def run_log_for(name: str) -> Path:
-    return SEQUENCES / name / "run.log"

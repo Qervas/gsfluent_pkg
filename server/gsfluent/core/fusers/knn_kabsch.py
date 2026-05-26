@@ -43,40 +43,6 @@ from gsfluent.protocols.fuse import (
 # ---- math helpers copied verbatim from tools/fuse_to_full_ply.py -----------
 
 
-def _batched_kabsch_rotation(p_rel_0, q_rel_t, weights):
-    """Weighted Kabsch over a batch of N point-clouds."""
-    H = np.einsum("nk,nki,nkj->nij", weights, q_rel_t, p_rel_0)
-    U, _, Vt = np.linalg.svd(H)
-    det = np.linalg.det(np.einsum("nij,njk->nik", U, Vt))
-    D = np.broadcast_to(np.eye(3, dtype=H.dtype), (H.shape[0], 3, 3)).copy()
-    D[:, 2, 2] = np.sign(det)
-    return np.einsum("nij,njk,nkl->nil", U, D, Vt)
-
-
-def _cov6_to_quat_logscale(cov6: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Decompose per-particle covariance into per-frame quaternion + log-scale."""
-    n = cov6.shape[0]
-    C = np.empty((n, 3, 3), dtype=cov6.dtype)
-    C[:, 0, 0] = cov6[:, 0]
-    C[:, 0, 1] = cov6[:, 1]
-    C[:, 1, 0] = cov6[:, 1]
-    C[:, 0, 2] = cov6[:, 2]
-    C[:, 2, 0] = cov6[:, 2]
-    C[:, 1, 1] = cov6[:, 3]
-    C[:, 1, 2] = cov6[:, 4]
-    C[:, 2, 1] = cov6[:, 4]
-    C[:, 2, 2] = cov6[:, 5]
-    eigvals, eigvecs = np.linalg.eigh(C)
-    eigvals = eigvals[:, ::-1]
-    eigvecs = eigvecs[:, :, ::-1]
-    dets = np.linalg.det(eigvecs)
-    flip = (dets < 0).astype(eigvecs.dtype)
-    eigvecs[..., 2] *= (1.0 - 2.0 * flip)[:, None]
-    quat = _rotmat_to_quat(eigvecs.astype(np.float32, copy=False))
-    log_s = 0.5 * np.log(np.maximum(eigvals, 1e-12)).astype(np.float32)
-    return quat, log_s
-
-
 def _rotmat_to_quat(R):
     """Batched (N, 3, 3) rotation matrices -> (N, 4) quaternions in (w,x,y,z) order."""
     m = R
@@ -109,18 +75,6 @@ def _rotmat_to_quat(R):
     out[md, 2] = (m[md, 1, 2] + m[md, 2, 1]) / s
     out[md, 3] = 0.25 * s
     return out
-
-
-def _quat_mul(q1, q2):
-    """Hamilton product q1 x q2, both (N, 4) in (w,x,y,z) order."""
-    w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
-    w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
-    return np.stack([
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-    ], axis=1)
 
 
 def _norm_xyz_to_origin_cube(

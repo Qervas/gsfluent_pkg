@@ -28,7 +28,6 @@ import struct as _struct
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
@@ -471,16 +470,13 @@ class SplatRing:
             return idx
         return None
 
-    def _evict_one_for_insert(self, new_idx: int) -> None:
-        """Make room for ``new_idx``: drop the entry farthest from cursor.
+    def _evict_one_for_insert(self) -> None:
+        """Make room for one insert: drop the entry farthest from cursor.
 
         Called under ``_lock``. If the ring is below capacity this is a
-        no-op. If the existing farthest entry is closer to cursor than
-        ``new_idx``, we drop ``new_idx`` instead by leaving the ring as
-        is and signaling failure via not inserting — but that path is
-        actually fine to insert too (it just means the new frame replaces
-        a slightly-closer one). To keep semantics simple: we always make
-        room and let the caller insert ``new_idx``.
+        no-op. Otherwise we always make room and let the caller insert
+        the new frame (which may replace a slightly-closer one; the next
+        advance trims it again if so).
         """
         if len(self._ring) < self._window_size:
             return
@@ -531,7 +527,7 @@ class SplatRing:
                 with self._lock:
                     if self._closed:
                         return
-                    self._evict_one_for_insert(idx)
+                    self._evict_one_for_insert()
                     self._ring[idx] = (xyz, quat)
                     self._decoded_count += 1
             with self._lock:
@@ -619,27 +615,10 @@ class SplatRing:
         xyz, quat = self._decode_one(idx)
         with self._lock:
             if not self._closed:
-                self._evict_one_for_insert(idx)
+                self._evict_one_for_insert()
                 self._ring[idx] = (xyz, quat)
                 self._decoded_count += 1
         return xyz, quat
-
-    def wait_for_frame(self, idx: int, timeout: float = 5.0) -> bool:
-        """Block until ``has_frame(idx)`` is True or ``timeout`` elapses.
-
-        Returns True on success, False on timeout. Polls at 5 ms — the
-        decoder posts to the ring via the same lock, so a short poll
-        loop is cheap and avoids adding a condition variable just for
-        this rarely-used helper.
-        """
-        import time
-
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.has_frame(idx):
-                return True
-            time.sleep(0.005)
-        return self.has_frame(idx)
 
 
 def make_static_cell(ring: SplatRing, viser_k: float = 1.0) -> dict:
@@ -666,21 +645,3 @@ def make_static_cell(ring: SplatRing, viser_k: float = 1.0) -> dict:
         "bbox_lo": bbox_lo,
         "bbox_hi": bbox_hi,
     }
-
-
-def iter_frame_indices_around(center: int, k: int, n_frames: int) -> Iterable[int]:
-    """Yield up to ``k`` valid frame indices around ``center``, nearest first.
-
-    Used by tests and by sanity-check tooling — not by the ring itself
-    (which inlines the same math inside request_window).
-    """
-    if n_frames <= 0:
-        return
-    center = max(0, min(int(center), n_frames - 1))
-    half = max(1, k // 2)
-    lo = max(0, center - half)
-    hi = min(n_frames - 1, center + half)
-    candidates = list(range(lo, hi + 1))
-    candidates.sort(key=lambda j: abs(j - center))
-    for c in candidates[:k]:
-        yield c

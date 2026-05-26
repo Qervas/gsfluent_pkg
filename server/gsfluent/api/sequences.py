@@ -244,8 +244,7 @@ _GSQ_CACHE_CONTROL = "public, immutable, max-age=31536000"
 
 
 def _gsq_etag(size: int, mtime: float) -> str:
-    """Weak ETag '"<size>-<mtime_int>"' — matches the client's
-    _local_etag() formula in frontend/python/viser_headless.py."""
+    """Weak ETag '"<size>-<mtime_int>"' for the on-disk .gsq cache file."""
     return f'"{size}-{int(mtime)}"'
 
 

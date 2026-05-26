@@ -9,8 +9,6 @@ from plyfile import PlyData, PlyElement
 
 from gsfluent.core.fusers.knn_kabsch import (
     KNNKabschFuser,
-    _batched_kabsch_rotation,
-    _cov6_to_quat_logscale,
     _norm_xyz_to_origin_cube,
     _rotmat_to_quat,
 )
@@ -85,28 +83,6 @@ def test_rotmat_to_quat_90deg_z_rotation() -> None:
     R = np.array([[[0, -1, 0], [1, 0, 0], [0, 0, 1]]], dtype=np.float32)
     q = _rotmat_to_quat(R)
     np.testing.assert_allclose(q[0], [c, 0.0, 0.0, s], atol=1e-5)
-
-
-def test_batched_kabsch_returns_proper_rotation() -> None:
-    """Two identical point clouds -> identity rotation; det should be +1."""
-    rng = np.random.default_rng(0)
-    pts = rng.normal(size=(1, 5, 3)).astype(np.float32)
-    weights = np.full((1, 5), 1.0 / 5, dtype=np.float32)
-    R = _batched_kabsch_rotation(pts, pts, weights)
-    np.testing.assert_allclose(R[0], np.eye(3), atol=1e-5)
-    assert np.linalg.det(R[0]) > 0
-
-
-def test_cov6_to_quat_logscale_identity_cov() -> None:
-    """Cov = identity -> log_s = log(sqrt(1)) = 0; quat is unit-norm but
-    rotation is arbitrary for degenerate eigenvalues (isotropic covariance)."""
-    cov = np.array([[1.0, 0.0, 0.0, 1.0, 0.0, 1.0]], dtype=np.float32)
-    quat, log_s = _cov6_to_quat_logscale(cov)
-    # Log-scale is the unambiguous output: all eigenvalues = 1 -> log_s = 0.
-    np.testing.assert_allclose(log_s[0], [0.0, 0.0, 0.0], atol=1e-5)
-    # Quaternion is unit-norm (whatever rotation eigh chose).
-    qn = np.linalg.norm(quat[0])
-    np.testing.assert_allclose(qn, 1.0, atol=1e-5)
 
 
 def test_build_correspondence_returns_correspondence(tmp_path: Path) -> None:
