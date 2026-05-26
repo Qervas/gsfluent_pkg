@@ -1,0 +1,21 @@
+{
+  "name": "wrap",
+  "nSplats": 8,
+  "nFrames": 3,
+  "fpsHint": 24.0,
+  "bboxMin": [
+    -10.0,
+    -10.0,
+    -10.0
+  ],
+  "bboxMax": [
+    10.0,
+    10.0,
+    10.0
+  ],
+  "frameFlags": [
+    1,
+    0,
+    0
+  ]
+}
