@@ -36,6 +36,13 @@ export function splatsGsqUrl(name: string): string {
   return apiUrl(`/api/sequences/${encodeURIComponent(name)}/cache/splats.gsq`);
 }
 
+/** Absolute URL streaming a model's highest-iteration point_cloud.ply.
+ *  The endpoint takes the model's on-disk path (allowlist-checked server-side);
+ *  callers resolve name→path via the models list. */
+export function modelPlyUrl(path: string): string {
+  return apiUrl(`/api/models/file?path=${encodeURIComponent(path)}`);
+}
+
 const j = async <T>(r: Response): Promise<T> => {
   if (!r.ok) {
     const text = await r.text().catch(() => "");
