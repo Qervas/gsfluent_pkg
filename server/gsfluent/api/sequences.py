@@ -284,9 +284,14 @@ def _serve_cache_gsq(name: str, filename: str, request: Request) -> Response:
     )
 
 
-@router.get("/{name}/cache/splats.gsq")
+@router.api_route("/{name}/cache/splats.gsq", methods=["GET", "HEAD"])
 def get_splats_gsq(name: str, request: Request):
     """Serve the full .gsq visual-lossless streamable cache (Range + ETag).
+
+    GET streams the bytes; HEAD returns the same headers with no body so a
+    client can read the download size (Content-Length) and resumability
+    (Accept-Ranges) up front before committing to the pull. Starlette's
+    FileResponse skips the body automatically when the request method is HEAD.
 
     Produced by `server/tools/pack_splats.py` as a smaller, byte-range
     addressable alternative to the .npz cache. Typical size: 0.4-1 GB

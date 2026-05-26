@@ -144,6 +144,53 @@ def test_range_request_open_ended_to_eof(cache_setup) -> None:
     assert r.content == cache_setup["body"][n:]
 
 
+# --------- HEAD: metadata without a body (download-size probe) --------------
+
+
+def test_head_returns_200_with_no_body(cache_setup) -> None:
+    """A production client (any frontend, not just our demo) wants the
+    download size + range-support up front, without pulling the bytes.
+    HEAD must mirror the GET headers but carry an empty body."""
+    r = cache_setup["client"].head(
+        f"/api/sequences/{cache_setup['name']}/cache/splats.gsq"
+    )
+    assert r.status_code == 200
+    assert r.content == b""  # header-only
+
+
+def test_head_carries_content_length_etag_and_ranges(cache_setup) -> None:
+    r = cache_setup["client"].head(
+        f"/api/sequences/{cache_setup['name']}/cache/splats.gsq"
+    )
+    assert r.status_code == 200
+    # Content-Length is the progress-bar denominator the client reads first.
+    assert r.headers.get("content-length") == str(cache_setup["size"])
+    # Accept-Ranges advertises resumable / chunked download.
+    assert r.headers.get("accept-ranges") == "bytes"
+    # Same immutable-cache contract as GET.
+    etag = r.headers.get("etag")
+    assert etag is not None
+    size, _ = _parse_etag(etag)
+    assert size == cache_setup["size"]
+    cc = r.headers.get("cache-control", "")
+    assert "immutable" in cc
+
+
+def test_head_304_when_etag_matches(cache_setup) -> None:
+    """HEAD honours conditional requests too — a client that already has the
+    file confirms freshness with zero bytes transferred."""
+    etag = cache_setup["client"].head(
+        f"/api/sequences/{cache_setup['name']}/cache/splats.gsq"
+    ).headers["etag"]
+    r = cache_setup["client"].head(
+        f"/api/sequences/{cache_setup['name']}/cache/splats.gsq",
+        headers={"If-None-Match": etag},
+    )
+    assert r.status_code == 304
+    assert r.headers.get("etag") == etag
+    assert r.content == b""
+
+
 # --------- 404 path unchanged ----------------------------------------------
 
 
