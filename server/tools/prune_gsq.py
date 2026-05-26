@@ -74,20 +74,6 @@ def cmd_prune(args) -> int:
     return 0
 
 
-def cmd_base(args) -> int:
-    raw = Path(args.gsq).read_bytes()
-    h = parse_header_bytes(raw)
-    out = Path(args.out) if args.out else Path(args.gsq).with_suffix(".base.gsq")
-    t0 = time.time()
-    base = prune_to_count(raw, args.splats)
-    out.write_bytes(base)
-    n_after = parse_header_bytes(base)["n_splats"]
-    print(f"base {h['n_splats']:,} -> {n_after:,} splats  "
-          f"{len(raw)/1e6:.0f} MB -> {len(base)/1e6:.0f} MB  "
-          f"in {time.time()-t0:.1f}s -> {out}")
-    return 0
-
-
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -98,10 +84,6 @@ def main() -> int:
     pr.add_argument("--keep", type=int, default=None)
     pr.add_argument("--out", required=True)
     pr.set_defaults(fn=cmd_prune)
-    b = sub.add_parser("base"); b.add_argument("gsq")
-    b.add_argument("--splats", type=int, required=True)
-    b.add_argument("--out", default=None)
-    b.set_defaults(fn=cmd_base)
     args = p.parse_args()
     return args.fn(args)
 
