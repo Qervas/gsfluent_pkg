@@ -8,15 +8,14 @@ import {
 import { useDiag } from "@/lib/use-diag";
 import type { DiagPart } from "@/lib/types";
 
-/** Three-dot diagnostics pill for the top bar.
+/** Diagnostics pill for the top bar.
  *
- * One dot per moving part of the split-topology stack: server backend
- * (reached via the vite proxy), the client sync_daemon (via
- * viser_headless's pass-through), and viser_headless itself. Green
- * means the last poll succeeded; red means the last poll failed or
- * the component reports offline. Hover for one-line details per part.
+ * One dot per moving part of the stack: currently just the server
+ * backend (reached via the vite proxy). Green means the last poll
+ * succeeded; red means the last poll failed or the component reports
+ * offline. Hover for one-line details per part.
  *
- * Why dots not labels? Three labels in the top bar would compete with
+ * Why dots not labels? Labels in the top bar would compete with
  * the model/recipe name + run state pill that already live there.
  * Dots stay invisible until something goes red, which is when the
  * user actually needs them.

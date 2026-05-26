@@ -42,7 +42,7 @@ export function PlaybackBar() {
   // We display pushed_frame as the primary cursor (so the bar never
   // leads the splats during a stutter), falling back to `frame` when
   // pushed_frame is -1 (no frame pushed yet, initial paint pending).
-  const viserFrame = useStore((s) => s.playbackState.frame);
+  const playbackFrame = useStore((s) => s.playbackState.frame);
   const pushedFrame = useStore((s) => s.playbackState.pushed_frame);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
@@ -138,25 +138,25 @@ export function PlaybackBar() {
   ]);
 
   // Prefer the server-authoritative total so the scrubber spans the
-  // full range from the start of streaming. Fall back to viser's
-  // n_frames for orphan sequences with no metadata.
+  // full range from the start of playback. Fall back to the in-browser
+  // decoder's n_frames for orphan sequences with no metadata.
   const totalFrames = simTotalFrames > 0 ? simTotalFrames : nFrames;
-  const loadedFrames = nFrames;             // how many frames viser has cached
+  const loadedFrames = nFrames;             // how many frames SplatScene has decoded
   const lastIdx = Math.max(totalFrames - 1, 0);
 
   // Visibility gate: bar shows once we know the run has more than one
-  // frame — either from the server total or by viser's n_frames. Hides
-  // the single-frame static-model preview entirely (kind !== sequence).
+  // frame — either from the server total or from n_frames. Hides the
+  // single-frame static-model preview entirely (kind !== sequence).
   if (!isSequence || (totalFrames < 2 && nFrames < 2)) return null;
 
   const isLive = simState === "running";
   // During a manual scrub the user owns the slider, so show their
-  // intent (currentFrameIdx). During autoplay show what viser has
-  // actually rendered (pushed_frame) so the bar matches the splat
-  // one-for-one even when decode lags. pushed_frame=-1 means no
-  // frame pushed yet (initial paint or no cell); fall back to viserFrame
+  // intent (currentFrameIdx). During autoplay show what SplatScene has
+  // actually pushed to the GPU (pushed_frame) so the bar matches the
+  // splat one-for-one even when decode lags. pushed_frame=-1 means no
+  // frame pushed yet (initial paint or no cell); fall back to playbackFrame
   // for the SPA-side state cursor.
-  const renderedFrame = pushedFrame >= 0 ? pushedFrame : viserFrame;
+  const renderedFrame = pushedFrame >= 0 ? pushedFrame : playbackFrame;
   const displayFrame = scrubbing ? currentFrameIdx : renderedFrame;
 
   const onScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {

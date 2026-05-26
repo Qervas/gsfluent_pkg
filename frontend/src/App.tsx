@@ -32,11 +32,10 @@ export default function App() {
   const activeSequenceName =
     activeCell?.kind === "sequence" ? activeCell.name : null;
   useEffect(() => {
-    // 12 fps is the steady-state ceiling for viser→browser splat
-    // streaming over WAN: each frame push is ~8 MB for cluster_6_15-
-    // class scenes, the link is ~100 Mbps, and the WASM sorter chews
-    // through one frame at a time. 24 fps overruns the pipe, stalls
-    // the main thread for seconds at a time, and the bar looks frozen.
+    // 12 fps is the steady-state ceiling for in-browser .gsq playback:
+    // each frame decodes ~8 MB for cluster_6_15-class scenes and the
+    // WASM sorter processes one frame at a time. 24 fps overruns the
+    // decoder budget, stalls the main thread, and the bar looks frozen.
     // Clamp whatever meta.fps_hint declares to that ceiling.
     const MAX_PLAYBACK_FPS = 12;
     if (!activeSequenceName) {
@@ -58,8 +57,8 @@ export default function App() {
 
   // Switching to a model preview is dispatched imperatively (not via a
   // useEffect on `activeModel`), so clicking the same model twice still
-  // re-fires the swap. Viser handles the actual model load via the
-  // /set push from ViserSplatScene's effect on activeCell change.
+  // re-fires the swap. SplatScene reacts to the activeCell change and
+  // loads the new model in-browser.
   const onPickModel = useCallback(
     (m: ModelItem) => {
       setActiveModel(m);

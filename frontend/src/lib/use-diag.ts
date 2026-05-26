@@ -4,9 +4,9 @@
  * folds the result into a DiagSnapshot the pill can render without
  * further logic.
  *
- * Viser and sync_daemon legs were removed: viser_headless is retired
- * (the SPA now renders .gsq sequences in-browser via Spark), and the
- * sync daemon was already dropped when the stack moved to a single host.
+ * Only the backend health leg remains: the SPA renders .gsq sequences
+ * in-browser via Spark, and the sync daemon was dropped when the stack
+ * moved to a single host.
  */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";

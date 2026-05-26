@@ -5,7 +5,7 @@ import { SwitchInput } from "./widgets/SwitchInput";
 
 // NOTE: all Camera params drive the upstream preview-rasterizer
 // (gs_simulation_building.py renders per-frame RGB pngs using these).
-// The workbench plays back simulation_ply/*.ply via R3F / viser with
+// The workbench plays back sequences in-browser via SplatScene with
 // its own interactive camera, so these fields are sim-side preview
 // only — they don't affect anything you see in the viewport.
 const SLIDER_FIELDS: Array<[string, string, [number, number, number], string?]> = [

@@ -70,9 +70,9 @@ type State = {
   // also produce no output for minutes at a stretch.
   simLastLogAt: number | null;
 
-  // Playback cursor — viser owns the actual frame buffer; this is just
-  // the canonical scrubber index. ViserSplatScene forwards each change
-  // to viser's /set endpoint.
+  // Playback cursor — SplatScene owns the actual frame buffer; this is
+  // just the canonical scrubber index. SplatScene reads each change
+  // and decodes the corresponding .gsq frame in-browser.
   currentFrameIdx: number;
   playing: boolean;
 
@@ -87,9 +87,9 @@ type State = {
   scrubbing: boolean;
 
   // Scene scale — diag of the active model's bbox. Phase 1 used this to
-  // size the three.js grid + camera fade; viser owns its own camera fit
-  // now, so these fields are vestigial but cheap to keep around in case
-  // a future overlay needs world-scale info.
+  // size the three.js grid + camera fade. These fields are vestigial
+  // but cheap to keep around in case a future overlay needs world-scale
+  // info.
   sceneScale: number;
   sceneCenter: [number, number, number];
   // World-Z of the bbox bottom — the "floor" that the model sits on.
