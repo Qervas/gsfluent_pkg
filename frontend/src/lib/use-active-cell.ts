@@ -1,13 +1,14 @@
 import { useStore } from "./store";
 
 /** Returns the active cell + its wire-format name (with `model:` /
- *  `sequence:` prefix) for forwarding to viser's /set endpoint.
+ *  `sequence:` prefix).
  *
- *  Cells on the wire MUST carry the kind prefix — viser uses it to
- *  decide whether to fetch a .ply or mmap a .gsq. The store holds a
- *  `CellRef` which encapsulates the round-trip; everything that talks
- *  to viser must use this hook (or `getActiveCellWireName`) rather
- *  than concatenating `${kind}:${name}` by hand. */
+ *  Cells on the wire MUST carry the kind prefix — it encodes whether
+ *  the cell is a static-model preview or a `.gsq` playback sequence.
+ *  The store holds a `CellRef` which encapsulates the round-trip;
+ *  everything that references the active cell should use this hook
+ *  (or `getActiveCellWireName`) rather than concatenating
+ *  `${kind}:${name}` by hand. */
 export function useActiveCell() {
   const activeCell = useStore((s) => s.activeCell);
   const setActiveCell = useStore((s) => s.setActiveCell);

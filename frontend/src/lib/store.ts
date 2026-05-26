@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ModelItem, Workspace } from "./types";
+import type { ModelItem, Workspace, PlaybackState } from "./types";
 import { CellRef } from "./cell";
 
 type SimState = "idle" | "running" | "done" | "error" | "cancelled";
@@ -12,30 +12,17 @@ export type SpeedX = 0.25 | 0.5 | 1 | 2 | 4;
 export const SPEED_X_VALUES: SpeedX[] = [0.25, 0.5, 1, 2, 4];
 
 type State = {
-  /** Polled from viser's /state endpoint by ViserSplatScene's mount
-   *  effect. Source of truth for cell + frame + n_frames now that the
-   *  websocket positions stream is gone.
+  /** Playback cursor published by SplatScene. Source of truth for
+   *  cell + frame + n_frames for the in-browser renderer.
    *
    *  `frame` is the SPA's *desired* playback cursor (driven by
    *  PlaybackDriver's wall-clock advance). `pushed_frame` is what the
-   *  render loop has actually pushed to viser — never leads `frame`
+   *  render loop has actually pushed to the GPU — never leads `frame`
    *  during continuous playback (no-skip invariant). When decode is
    *  fast, `pushed_frame == frame`; when slow, `pushed_frame < frame`
    *  and the UI shows the held-frame index. */
-  viserState: { cell: string | null; frame: number; n_frames: number; pushed_frame: number };
-  setViserState: (s: { cell: string | null; frame: number; n_frames: number; pushed_frame: number }) => void;
-
-  /** Manual on/off for the viser splat viewer iframe. When `false` the
-   *  iframe is unmounted (no WebGL, no /state polling, no sorter WASM).
-   *  Lets the user keep working in the rest of the app when the viser
-   *  renderer crashes or NaN's. Persisted to localStorage. */
-  viserEnabled: boolean;
-  setViserEnabled: (b: boolean) => void;
-
-  // When true, sequence cells render in-browser (SplatScene) instead of the
-  // viser iframe. Lets us A/B the new renderer before retiring viser (Stage 3).
-  inBrowserRenderer: boolean;
-  setInBrowserRenderer: (b: boolean) => void;
+  playbackState: PlaybackState;
+  setPlaybackState: (s: PlaybackState) => void;
 
   // Workspace selection
   activeWorkspace: Workspace;
@@ -83,9 +70,9 @@ type State = {
   // also produce no output for minutes at a stretch.
   simLastLogAt: number | null;
 
-  // Playback cursor — viser owns the actual frame buffer; this is just
-  // the canonical scrubber index. ViserSplatScene forwards each change
-  // to viser's /set endpoint.
+  // Playback cursor — SplatScene owns the actual frame buffer; this is
+  // just the canonical scrubber index. SplatScene reads each change
+  // and decodes the corresponding .gsq frame in-browser.
   currentFrameIdx: number;
   playing: boolean;
 
@@ -100,9 +87,9 @@ type State = {
   scrubbing: boolean;
 
   // Scene scale — diag of the active model's bbox. Phase 1 used this to
-  // size the three.js grid + camera fade; viser owns its own camera fit
-  // now, so these fields are vestigial but cheap to keep around in case
-  // a future overlay needs world-scale info.
+  // size the three.js grid + camera fade. These fields are vestigial
+  // but cheap to keep around in case a future overlay needs world-scale
+  // info.
   sceneScale: number;
   sceneCenter: [number, number, number];
   // World-Z of the bbox bottom — the "floor" that the model sits on.
@@ -159,8 +146,7 @@ type State = {
   setFpsHint: (fps: number) => void;
   setScrubbing: (b: boolean) => void;
   // Step the current frame by `delta` (positive or negative). Clamped to
-  // [0, viserState.n_frames - 1] so we don't run off either end —
-  // viser is the truth-source for frame availability.
+  // [0, playbackState.n_frames - 1] so we don't run off either end.
   stepFrame: (delta: number) => void;
   resetForNewRun: (name: string) => void;
   // Frame-progress setter driven by the run-log parser (tqdm `n/total`
@@ -186,33 +172,9 @@ function loadPanels(): State["panels"] {
   return { outliner: "expanded", properties: "expanded" };
 }
 
-function loadViserEnabled(): boolean {
-  try {
-    const raw = localStorage.getItem("gsfluent.viserEnabled");
-    if (raw === "false") return false;
-    if (raw === "true") return true;
-  } catch { /* private mode / no storage */ }
-  return true; // default: on
-}
-
 export const useStore = create<State>((set) => ({
-  viserState: { cell: null, frame: 0, n_frames: 0, pushed_frame: -1 },
-  setViserState: (s) => set({ viserState: s }),
-  viserEnabled: loadViserEnabled(),
-  setViserEnabled: (b) =>
-    set(() => {
-      try { localStorage.setItem("gsfluent.viserEnabled", b ? "true" : "false"); } catch { /* private mode */ }
-      return { viserEnabled: b };
-    }),
-  inBrowserRenderer: (() => {
-    try { return localStorage.getItem("gsfluent.inBrowserRenderer") === "true"; }
-    catch { return false; }
-  })(),
-  setInBrowserRenderer: (b) =>
-    set(() => {
-      try { localStorage.setItem("gsfluent.inBrowserRenderer", b ? "true" : "false"); } catch { /* private mode */ }
-      return { inBrowserRenderer: b };
-    }),
+  playbackState: { cell: null, frame: 0, n_frames: 0, pushed_frame: -1 },
+  setPlaybackState: (s) => set({ playbackState: s }),
   activeWorkspace: "sim",
   setActiveWorkspace: (w) => set({ activeWorkspace: w }),
   activeModel: null,
@@ -323,7 +285,7 @@ export const useStore = create<State>((set) => ({
   setScrubbing: (b) => set({ scrubbing: b }),
   stepFrame: (delta) =>
     set((st) => {
-      const upper = Math.max(0, st.viserState.n_frames - 1);
+      const upper = Math.max(0, st.playbackState.n_frames - 1);
       const next = Math.min(upper, Math.max(0, st.currentFrameIdx + delta));
       return { currentFrameIdx: next };
     }),

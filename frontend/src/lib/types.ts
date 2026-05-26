@@ -72,24 +72,20 @@ export type BCFieldSpec = {
 export type BCSchemas = Record<string, BCFieldSpec[]>;
 export type MaterialDefaults = Record<string, Record<string, number>>;
 
+// Playback cursor published into the store by SplatScene.
+export type PlaybackState = {
+  cell: string | null;
+  frame: number;
+  n_frames: number;
+  pushed_frame: number;
+};
+
 // Diagnostics — one row per moving part of the split-topology dev stack.
 // Surfaced through the StatusPill in the top bar so the user sees which
 // piece is down when something silently breaks. Shapes mirror what each
 // endpoint actually returns; null fields mean "not applicable / not yet
 // reported."
 export type BackendHealth = { status: string; pkg_root: string };
-
-export type ViserState = {
-  cell: string;
-  frame: number;
-  // The frame the render loop has actually pushed to viser. Distinct
-  // from `frame` (the SPA's desired cursor) so the scrub bar can
-  // display the actually-rendered index. -1 before the first paint.
-  pushed_frame: number;
-  n_frames: number;
-  cells: string[];
-  bbox: { lo: [number, number, number]; hi: [number, number, number] };
-};
 
 export type DiagPart = {
   ok: boolean;
@@ -99,5 +95,4 @@ export type DiagPart = {
 
 export type DiagSnapshot = {
   backend: DiagPart;
-  viser:   DiagPart & { raw?: ViserState };
 };

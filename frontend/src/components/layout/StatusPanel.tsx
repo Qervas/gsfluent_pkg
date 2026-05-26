@@ -110,11 +110,11 @@ export function StatusPanel() {
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const simLog = useStore((s) => s.simLog);
   const simFirstFrameAt = useStore((s) => s.simFirstFrameAt);
-  const nFrames = useStore((s) => s.viserState.n_frames);
+  const nFrames = useStore((s) => s.playbackState.n_frames);
   // The model splat count used to come from a streamed `static-attrs`
-  // message. Viser owns model loading now, so we no longer have a count
-  // surface — the StatusPanel shows the model name + viser handles the
-  // splat count internally. Leaving the slot in place keeps the layout.
+  // message. SplatScene now loads the model in-browser and does not
+  // surface a splat count — the StatusPanel shows the model name only.
+  // Leaving the slot in place keeps the layout.
   const activeCellName = activeCell?.name ?? null;
   // Track the unified left rail so the console drawer doesn't collide
   // with it. The right side has no glass card after Phase 3, so only

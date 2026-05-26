@@ -2,10 +2,10 @@
 
 GaussianFluent physics simulation workbench, split between server and client.
 
-The backend + GPU simulation runs on your server; the SPA + viser splat
-renderer runs on each teammate's own machine. The backend is exposed
-to the team through a public NAT port; splat traffic stays on the client's
-loopback and never touches the network.
+The backend + GPU simulation runs on your server; the SPA runs on each
+teammate's own machine and renders splats in-browser (Spark + three.js,
+download-then-play). The backend is exposed to the team through a public
+NAT port.
 
 Chinese version: [README.md](README.md).
 
@@ -18,18 +18,17 @@ Requires Python 3.10+ and Node 18+ locally. No conda, no sudo.
 ```bash
 git clone <repo> gsfluent_pkg
 cd gsfluent_pkg/frontend
-npm install      # creates .venv/, installs pip deps, builds dist/
-npm start        # launches viser_headless + vite preview
+npm install      # installs JS deps, builds dist/
+npm start        # launches vite preview
 ```
 
 The browser opens `http://localhost:5173/` automatically. Ctrl-C tears
 the whole stack down.
 
 `npm install` triggers `frontend/scripts/install.mjs` via postinstall:
-it creates `.venv/` at the repo root, pip-installs `viser`, `fastapi`,
-`uvicorn`, `httpx`, `eval_type_backport`, then runs `vite build`.
-`npm start` runs `frontend/scripts/start.mjs`, which uses `concurrently`
-to launch viser_headless + vite preview under a shared Ctrl-C.
+it installs JS dependencies and runs `vite build`.
+`npm start` runs `frontend/scripts/start.mjs`, which starts vite preview
+(proxying `/api/*` to your server) under a shared Ctrl-C.
 
 Default backend comes from `BACKEND_URL` in `.env`. To override per
 invocation:
@@ -52,9 +51,9 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 │   ├─ /api/*  → proxy → server :24701       │
 │   └─ /       → frontend/dist/              │
 │                                            │
-│  viser_headless                            │
-│   ├─ 127.0.0.1:8091 (splat WS)             │
-│   └─ 127.0.0.1:8092 (control API)          │
+│  SPA (SplatScene)                          │
+│   downloads + renders splats in-browser    │
+│   (Spark + three.js, no extra process)     │
 │                                            │
 └────────────────┬───────────────────────────┘
                  │ HTTP /api/*  (public NAT)
@@ -76,9 +75,10 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 └────────────────────────────────────────────┘
 ```
 
-The splat WebSocket stays on client loopback — no public bandwidth
-used for splat playback. Simulation results live as PLY frame sequences
-on the server and the frontend pulls them on demand over the REST API.
+Splat data is fetched from the server over the same HTTP channel as the
+REST API and rendered locally in-browser by `SplatScene`. Simulation
+results live as PLY frame sequences on the server; the frontend pulls
+them on demand over the REST API.
 
 ---
 
@@ -178,15 +178,15 @@ Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 |-----------------------|-------------------------------------------------------------------------|
 | `frontend/`           | React + Vite SPA. `npm install` / `npm start` entry points.             |
 | `frontend/scripts/`   | Node launchers: `install.mjs`, `start.mjs`, `clean.mjs`.                |
-| `frontend/python/`    | Client-side Python: `viser_headless.py`, `sync_daemon.py`, `vkgs_play.py`. |
-| `frontend/patches/`   | Upstream viser rendering patches (no-cull, point precision).            |
+| `frontend/python/`    | Client-side Python (legacy): `vkgs_play.py`. (`viser_headless.py` and `sync_daemon.py` removed.) |
+| `frontend/patches/`   | Upstream rendering patches (no-cull, point precision).                  |
 | `server/`             | FastAPI v1 backend. Six-Protocol layout + composition root under `gsfluent/`. |
 | `server/tools/`       | Sim wrapper (`run_sim.sh`, now a ~20-line conda-activate shim) and CLI wrappers around `core/` impls. |
 | `server/recipes/`     | Built-in simulation recipe JSONs.                                       |
 | `server/patches/`     | Upstream GaussianFluent sim patches.                                    |
 | `deploy/`             | systemd units (`gsfluent-backend.service` + `gsfluent-backend.dev.service`) and deploy guide (`README.md`). |
 | `docs/`               | API reference, architecture doc.                                        |
-| `work/`               | Runtime data (gitignored): `library/sequences/<run>/`, `cache/viser/*.gsq`. |
+| `work/`               | Runtime data (gitignored): `library/sequences/<run>/`, `cache/splats/*.gsq`. |
 
 ---
 
@@ -210,7 +210,7 @@ Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 | Symptom                                | One-line fix                                                                |
 |----------------------------------------|-----------------------------------------------------------------------------|
 | SPA won't open / `:5173` error         | Port in use — check `lsof -i :5173`, or `UI_PORT=5174 npm start`            |
-| Splat viewport stays blank             | viser not up — `curl http://127.0.0.1:8092/state`                           |
+| Splat viewport stays blank             | Check browser console for errors; verify `/api/sequences/{name}/cache/splats.gsq` is reachable |
 | All `/api/*` calls 502 / refused       | Server backend is down — run `systemctl status gsfluent-backend.service` (add `--user` on a dev box) |
 | Sim errors right after submission      | `curl <backend>/api/runs/<name>/log?offset=0` to see sim stdout             |
 | Local `.venv/` is broken               | `rm -rf .venv/ frontend/dist/ && cd frontend && npm install`                |

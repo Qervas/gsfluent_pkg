@@ -2,9 +2,9 @@
 
 GaussianFluent 物理仿真工作台,前后端分离部署。
 
-后端和 GPU 仿真跑在服务器上,前端和 viser splat 渲染跑在每个团队成员
-自己的客户端机器上。后端通过公网 NAT 端口对外暴露;splat 数据走本地
-loopback,不进网络。
+后端和 GPU 仿真跑在服务器上,前端跑在每个团队成员自己的客户端机器上,
+splat 直接在浏览器内渲染(Spark + three.js,下载后播放)。后端通过
+公网 NAT 端口对外暴露。
 
 英文版见 [README.en.md](README.en.md)。
 
@@ -17,17 +17,16 @@ loopback,不进网络。
 ```bash
 git clone <repo> gsfluent_pkg
 cd gsfluent_pkg/frontend
-npm install      # 自动建 .venv/、装 pip 依赖、构建 dist/
-npm start        # 起 viser_headless + vite preview
+npm install      # 装 JS 依赖、构建 dist/
+npm start        # 起 vite preview
 ```
 
 浏览器会自动打开 `http://localhost:5173/`,Ctrl-C 一并停掉整套栈。
 
 `npm install` 背后走的是 `frontend/scripts/install.mjs`(postinstall 钩子):
-在仓库根建 `.venv/`,pip 装 `viser`、`fastapi`、`uvicorn`、`httpx`、
-`eval_type_backport`,然后 `vite build`。`npm start` 走的是
-`frontend/scripts/start.mjs`,用 `concurrently` 拉起 viser_headless + vite
-preview,共用一个 Ctrl-C 关停。
+装 JS 依赖,然后跑 `vite build`。`npm start` 走的是
+`frontend/scripts/start.mjs`,启动 vite preview(把 `/api/*` 代理到服务器),
+共用一个 Ctrl-C 关停。不需要额外的 Python 进程。
 
 后端地址默认走 `.env` 里的 `BACKEND_URL`。要换的话:
 
@@ -49,9 +48,9 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 │   ├─ /api/*  → proxy → 服务器 :24701       │
 │   └─ /       → frontend/dist/              │
 │                                            │
-│  viser_headless                            │
-│   ├─ 127.0.0.1:8091 (splat WS)             │
-│   └─ 127.0.0.1:8092 (control API)          │
+│  SPA (SplatScene)                          │
+│   浏览器内下载 + 渲染 splat                │
+│   (Spark + three.js,无额外进程)           │
 │                                            │
 └────────────────┬───────────────────────────┘
                  │ HTTP /api/*  (公网 NAT)
@@ -73,8 +72,8 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 └────────────────────────────────────────────┘
 ```
 
-splat WebSocket 全程走本机 127.0.0.1,不吃公网带宽。仿真结果以 PLY
-帧序列存在服务器上,前端通过 REST API 按需拉。
+splat 数据通过和 REST API 同一条 HTTP 通道从服务器下载,由浏览器内的
+`SplatScene` 本地渲染。仿真结果以 PLY 帧序列存在服务器上,前端按需拉取。
 
 ---
 
@@ -166,15 +165,15 @@ cap 触发返回的错误结构:
 |---------------------|----------------------------------------------------------------------|
 | `frontend/`         | React + Vite SPA。`npm install` / `npm start` 入口都在这。           |
 | `frontend/scripts/` | Node 启动脚本 `install.mjs` / `start.mjs` / `clean.mjs`。            |
-| `frontend/python/`  | 客户端跑的 Python:`viser_headless.py`、`sync_daemon.py`、`vkgs_play.py`。 |
-| `frontend/patches/` | 上游 viser 包的渲染补丁(no-cull、point precision)。                |
+| `frontend/python/`  | 客户端 Python(历史遗留):`vkgs_play.py`。(`viser_headless.py`、`sync_daemon.py` 已移除) |
+| `frontend/patches/` | 上游渲染补丁(no-cull、point precision)。                            |
 | `server/`           | FastAPI v1 backend,只在服务器跑。六层 Protocol + composition root 在 `gsfluent/`。 |
 | `server/tools/`     | 仿真包装薄壳(`run_sim.sh` 现在 ≈20 行 conda-activate),其余 PLY/打包脚本是 `core/` 实现的 CLI 包装。 |
 | `server/recipes/`   | 内置仿真 recipe JSON。                                               |
 | `server/patches/`   | 上游 GaussianFluent 仿真补丁。                                       |
 | `deploy/`           | systemd unit (`gsfluent-backend.service` + `gsfluent-backend.dev.service`) 和部署手册 (`README.md`)。 |
 | `docs/`             | API 参考、架构文档。                                                 |
-| `work/`             | 运行时数据(已 gitignore):`library/sequences/<run>/`、`cache/viser/*.gsq`。 |
+| `work/`             | 运行时数据(已 gitignore):`library/sequences/<run>/`、`cache/splats/*.gsq`。 |
 
 ---
 
@@ -198,7 +197,7 @@ cap 触发返回的错误结构:
 | 现象                                | 一句话排查                                                                 |
 |-------------------------------------|----------------------------------------------------------------------------|
 | 前端打不开 / `:5173` 报错           | 端口被占,`lsof -i :5173`;或者 `UI_PORT=5174 npm start`                   |
-| Splat 没画面                        | viser 没起,`curl http://127.0.0.1:8092/state`                             |
+| Splat 没画面                        | 看浏览器控制台报错;确认 `/api/sequences/{name}/cache/splats.gsq` 可访问      |
 | `/api/*` 全部 502 / connection refused | 服务器后端挂了,跑 `systemctl status gsfluent-backend.service`(或加 `--user`)         |
 | 提交仿真后立刻 error                | `curl <backend>/api/runs/<name>/log?offset=0` 看 stdout                    |
 | 本机 `.venv/` 坏了                  | `rm -rf .venv/ frontend/dist/ && cd frontend && npm install`               |

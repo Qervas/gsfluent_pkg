@@ -3,18 +3,13 @@ import { useStore } from "@/lib/store";
 
 /** Drives currentFrameIdx advancement for sequence playback.
  *
- *  Synchronous-to-viser model: instead of a free-running RAF that
- *  advances at fpsHint regardless of what viser can keep up with, we
- *  drive the bar from viser's actual ready signal. Each iteration:
- *  bump currentFrameIdx, await ViserSplatScene's /set POST to drain
- *  (so the splat geometry is on the server), then wait the inter-
- *  frame delay. Backpressure is automatic — when viser is slow, the
- *  bar slows; bar position and rendered splat stay in lockstep.
- *
- *  We don't await the /set fetch here directly (that's owned by
- *  ViserSplatScene). Instead we read the same `inflight` ref the
- *  ViserSplatScene exposes on the store, polling at a coarse cadence
- *  while a /set is in flight before advancing to the next frame. */
+ *  Wall-clock paced model: each iteration bumps currentFrameIdx by one
+ *  and waits the inter-frame delay (1000/fpsHint ms scaled by speedX).
+ *  SplatScene decodes and pushes each frame in-browser via Spark; when
+ *  decode lags, it holds the previous frame instead of skipping (no-skip
+ *  invariant). Backpressure is reflected in `pushed_frame` vs `frame`
+ *  inside playbackState — the bar displays `pushed_frame` so it never
+ *  leads the rendered splat. */
 export function PlaybackDriver(): null {
   const playing = useStore((s) => s.playing);
   const scrubbing = useStore((s) => s.scrubbing);
@@ -23,8 +18,8 @@ export function PlaybackDriver(): null {
   const loop = useStore((s) => s.loop);
   const speedX = useStore((s) => s.speedX);
   const fpsHint = useStore((s) => s.fpsHint);
-  const nFrames = useStore((s) => s.viserState.n_frames);
-  const viserFrame = useStore((s) => s.viserState.frame);
+  const nFrames = useStore((s) => s.playbackState.n_frames);
+  const playbackFrame = useStore((s) => s.playbackState.frame);
 
   useEffect(() => {
     if (!playing || scrubbing) return;
@@ -42,7 +37,7 @@ export function PlaybackDriver(): null {
         // scrubs and external setCurrentFrame calls aren't lost.
         const st = useStore.getState();
         const cur = st.currentFrameIdx;
-        const lastIdx = st.viserState.n_frames - 1;
+        const lastIdx = st.playbackState.n_frames - 1;
         if (lastIdx < 1) return;
         const next = cur + 1;
         if (next > lastIdx) {
@@ -51,17 +46,16 @@ export function PlaybackDriver(): null {
         } else {
           setCurrentFrame(next);
         }
-        // Wait the inter-frame interval. We don't need to also wait
-        // for viser to ack — ViserSplatScene's trailing-edge sender
-        // drops intermediate POSTs automatically, so as long as we
-        // tick at a sane rate the bar stays paced with the splat.
+        // Wait the inter-frame interval. SplatScene's in-browser decode
+        // loop runs independently; it holds frames when decode is slow
+        // rather than skipping, so bar pacing stays sane at any speed.
         await sleep(delay);
       }
     };
     void tick();
     return () => { cancelled = true; };
   }, [
-    playing, scrubbing, nFrames, viserFrame,
+    playing, scrubbing, nFrames, playbackFrame,
     setCurrentFrame, setPlaying, loop, speedX, fpsHint,
   ]);
 

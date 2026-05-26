@@ -1,8 +1,8 @@
 export type CellKind = "sequence" | "model";
 
-/** Typed reference to a cell loaded in the viser viewer.
+/** Typed reference to a cell displayed in the SPA viewport.
  *
- *  The viser control API speaks "wire format" — a single string with the
+ *  Cells are identified by a "wire format" — a single string with a
  *  kind prefix, e.g. `sequence:cluster_6_15` or `model:tower_01`. The
  *  frontend store used to carry the kind and name as a separate
  *  `{ kind, name }` object and stringify them on demand; that left every

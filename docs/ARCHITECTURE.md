@@ -1,11 +1,10 @@
 # gsfluent_pkg — Architecture
 
-Status: 2026-05-22 (post backend-bulletproofing slice). Describes the
+Status: 2026-05-26 (post in-browser renderer). Describes the
 system as deployed today: a single v1 backend on your server (split
 into six Protocols + composition root, supervised by systemd), a
-client-local SPA + viser pair on each teammate's machine (with
-HEAD-skip + Range-resume on the streaming cache), and a public NAT port
-linking the two.
+client-local SPA that renders splats in-browser (Spark + three.js,
+download-then-play), and a public NAT port linking the two.
 
 ---
 
@@ -13,8 +12,8 @@ linking the two.
 
 A pipeline from a trained 3DGS scene + a physics recipe to an animated
 3DGS sequence that scrubs interactively in the browser. The MPM solver
-is server-side (GPU); the viewer (viser splat renderer + React SPA) is
-client-side.
+is server-side (GPU); the viewer (React SPA with in-browser splat
+rendering via `@sparkjsdev/spark` + three.js) is client-side.
 
 ```
 3DGS reference (.ply, trained)         physics recipe (json)
@@ -43,7 +42,7 @@ client-side.
 │  React workbench    │    │  Native Vulkan     │
 │  (client-local)     │    │  (sibling repo,    │
 │  • Points (R3F+WS)  │    │   not in use today)│
-│  • Splats (viser)   │    │                    │
+│  • Splats (Spark)   │    │                    │
 │  • Z-up, raw frames │    │                    │
 └─────────────────────┘    └────────────────────┘
 ```
@@ -64,9 +63,9 @@ client-side.
 - **Owns**: the library API surface, the WS frame pump, the run
   lifecycle controller (Layer 1, `RunManager`), and the sim orchestrator
   (Layer 2, `SimulationEngine`).
-- **Does NOT own**: viewer rendering (client-side), per-cell viser
-  caches (built by `core/codecs/gsq.py:GSQCodec`, served by
-  `frontend/python/viser_headless.py`).
+- **Does NOT own**: viewer rendering (client-side), per-cell `.gsq`
+  caches (built by `core/codecs/gsq.py:GSQCodec`, served via
+  `GET /api/sequences/{name}/cache/splats.gsq`).
 - Process management: a systemd unit at `deploy/gsfluent-backend.service`
   (production) or `deploy/gsfluent-backend.dev.service` (dev box) keeps
   the backend up. `Type=notify` + `WatchdogSec=30s` detects wedged
@@ -110,9 +109,9 @@ conformance suite.
 3. **HTTP cache hygiene.** `api/sequences.py` returns `.gsq` with
    `Cache-Control: public, immutable, max-age=31536000` and
    `ETag: "<size>-<mtime>"`. `If-None-Match` matching returns 304.
-   Client `viser_headless._sync_cell_gsq_streaming` HEAD-checks before
-   download (cache hit → skip) and uses `Range: bytes=<n>-` to resume
-   from `.partial` (cache miss with prior interrupted download).
+   The SPA HEAD-checks before download (cache hit → skip) and uses
+   `Range: bytes=<n>-` to resume from `.partial` (cache miss with prior
+   interrupted download).
 4. **Structured observability.** Every state transition emits one
    structured JSON event through `EventEmitter`. Events have the shape
    `{"ts": "<ISO-8601>", "level": "INFO", "event": "<dotted.noun.verb>",
@@ -149,13 +148,12 @@ for ssh-driven one-shot runs.
   per-frame Kabsch rotation.
 - `pack_splats.py` — CLI wrapper around
   `core/codecs/gsq.py:GSQCodec`. Encodes frame_*.ply →
-  `splats.gsq` (visual-lossless streamable splat cache:
-  int16-quantized xyz + axis-vec quats per frame, fp16 rgb/scales +
-  uint8 opacity static, zstd-compressed per-frame chunks. ~3× smaller
-  than the retired `.npz` format. Format spec in the
-  pack_splats.py docstring). Served on demand via
-  `/api/sequences/{name}/cache/splats.gsq` and streamed by
-  viser_headless's `/sync_cell`.
+  `splats.gsq` (visual-lossless splat cache: int16-quantized xyz +
+  axis-vec quats per frame, fp16 rgb/scales + uint8 opacity static,
+  zstd-compressed per-frame chunks. ~3× smaller than the retired `.npz`
+  format. Format spec in the pack_splats.py docstring). Served on demand
+  via `/api/sequences/{name}/cache/splats.gsq`; the SPA downloads and
+  plays back in-browser via `frontend/src/lib/gsq` + `SplatScene`.
 - `pack_sim_splats.py` — same encode but reads raw `sim_*.ply` instead
   of fused frame plys. Produces a "no-fuse" A/B sequence for
   comparison. Run manually; not part of the default build flow.
@@ -178,44 +176,42 @@ Backend process supervision is handled by the systemd units in
 `deploy/`; see `deploy/README.md` for install and migration notes
 (supervise.sh was removed in Phase 4).
 
-### `frontend/python/` — client-side Python utilities
+### `frontend/python/` — client-side Python utilities (legacy)
 
-- `viser_headless.py` — viser splat renderer on `:8091` + FastAPI
-  control sidecar on `:8092`. The SPA drives sequence / frame / camera
-  via the control API; viser handles WebGL rendering.
-- `sync_daemon.py` — legacy bulk-mirror tool. Not used by the current
-  flow (the SPA streams individual `.gsq` files on demand via
-  `viser_headless`'s `/sync_cell`). Kept for occasional manual library
-  mirroring; not started by `npm start`.
 - `vkgs_play.py` — viewer-specific adapter for the vkgs native renderer
   (Z-up→Y-up rotation, launch wrapper). Operates on a copy in
   `work/cache/vkgs_yup/`; never mutates library frames.
+
+Note: `viser_headless.py` and `sync_daemon.py` have been removed.
+Splat rendering is now done entirely in-browser by `SplatScene`
+(`frontend/src/components/viewport/SplatScene.tsx`) using
+`@sparkjsdev/spark` + three.js. The SPA downloads `.gsq` files
+directly from `GET /api/sequences/{name}/cache/splats.gsq` and decodes
+them via `frontend/src/lib/gsq`.
 
 ### `frontend/` — React + Vite + R3F workbench (client-local)
 
 - Built once via `vite build` and served by `vite preview` on the
   client. Read-only against the backend over `/api/*`.
 - **Build-time env** (frontend/.env.production):
-  - `VITE_VISER_URL=http://127.0.0.1:8091/` — splat WS endpoint
-    (trailing slash matters; viser strips it to build its WS URL)
-  - `VITE_VISER_CONTROL_URL=http://127.0.0.1:8092` — viser control
-    sidecar
   - `VITE_BACKEND_URL=` — left empty so `/api/*` flows through the
     vite preview proxy; set to a full URL only when shipping the
     bundle to a static host without a preview server.
-- **Points mode** (`SplatScene.tsx`): R3F renders `THREE.Points` driven
+- **Points mode** (`PointsScene.tsx`): R3F renders `THREE.Points` driven
   by per-frame xyz over `/api/stream`. Static attrs (cov, rgb, opacity)
   ship in frame 0; subsequent frames are int16-quantized xyz only.
-- **Splats mode** (`ViserSplatScene.tsx`): iframes `:8091`. On
-  `simRunName` or `currentFrameIdx` change, POSTs to `:8092/set`. On
-  mode toggles, POSTs to `:8092/camera` to keep the viewpoint in sync
-  with Points mode's OrbitControls.
+- **Splats mode** (`SplatScene.tsx`): renders `.gsq` v2 sequences and
+  static `.ply` models in-browser using `@sparkjsdev/spark` + raw
+  three.js. The SPA downloads `splats.gsq` from
+  `GET /api/sequences/{name}/cache/splats.gsq`, decodes it frame-by-frame
+  via `frontend/src/lib/gsq`, and feeds decoded splat data to Spark's
+  `setSplat` API. No external process or iframe is involved.
 
 ### `vk_gaussian_splatting/` (sibling repo)
 
 - Native Vulkan splat renderer at `~/Desktop/work/vk_gaussian_splatting/`,
   with a `--frames_dir` animation patch (236 fps validated).
-- **Not currently in use** — viser is the renderer for the client SPA.
+- **Not currently in use** — the SPA renders splats in-browser.
   Kept available for native-playback demos.
 
 ---
@@ -284,7 +280,7 @@ work/library/sequences/<name>/
 
 ```
 work/cache/
-  ├── viser/<name>.gsq           ← Splats-mode streamable playback
+  ├── viser/<name>.gsq           ← in-browser playback (dir name is vestigial)
   └── vkgs_yup/<name>/frames/    ← rotated copies for the vkgs native viewer
 ```
 
@@ -318,7 +314,8 @@ frame chunks  (zstd-compressed each, byte-range addressable)
 Properties:
 - **Streamable**: each frame chunk's bytes are self-contained, so a
   partial download can render frames 0..K as soon as their bytes
-  land. See `viser_headless._sync_cell_gsq_streaming`.
+  land. The SPA uses `Range:` resume (`frontend/src/lib/gsq`) for
+  interrupted downloads.
 - **Visual-lossless**: int16 position quantum is ~bbox-span/65535
   (≈ 1 mm at scene scale); quat axis-vec quantum is ~3e-5; fp16
   for rgb/scales is below visible threshold.
@@ -338,14 +335,13 @@ as sequences. The viewer wrappers know how to derive them.
 │  Browser  ───────► http://localhost:5173/                   │
 │                                                             │
 │  vite preview :5173                                         │
-│    proxy /api/*       ─────────────► your server :24701           │
-│    proxy /api/stream (WS) ─────────► your server :24701           │
+│    proxy /api/*       ─────────────► your server :24701     │
+│    proxy /api/stream (WS) ─────────► your server :24701     │
 │    static /           ─────────────► frontend/dist/         │
 │                                                             │
-│  viser_headless                                             │
-│    127.0.0.1:8091 (splat WS)    ◄── iframe in SPA           │
-│    127.0.0.1:8092 (control API) ◄── fetch from SPA          │
-│    streams ← /sync_cell → work/cache/viser/*.gsq            │
+│  SPA (SplatScene)                                           │
+│    downloads splats.gsq via /api/sequences/{name}/cache/    │
+│    decodes + renders in-browser (Spark + three.js)          │
 │                                                             │
 └────────────────────────────┬────────────────────────────────┘
                              │ HTTP (/api/*, /api/stream WS)
@@ -365,15 +361,15 @@ as sequences. The viewer wrappers know how to derive them.
 
 Launch on your server: enable the systemd unit at
 `deploy/gsfluent-backend.service` (or `.dev.service` for a dev box).
-That brings up the v1 backend on `:7869`; viser_headless on
-`:8091/:8092` is started by the frontend dev script on the client side.
-See `deploy/README.md` for install commands.
+That brings up the v1 backend on `:7869`. See `deploy/README.md` for
+install commands.
 Launch on a teammate's client: `cd frontend && npm start` (runs
-`frontend/scripts/start.mjs`, which brings up viser_headless on the client's
-own loopback + vite preview proxying `/api/*` to your server).
+`frontend/scripts/start.mjs`, which starts vite preview proxying
+`/api/*` to your server). No extra Python process is required.
 
-The splat WebSocket stays on the client's loopback in both topologies —
-there is no high-bandwidth WAN hop for splat playback.
+Splat data is fetched from the server over the same HTTP channel as the
+REST API; the browser renders it locally using `SplatScene` — no
+high-bandwidth WAN hop beyond the one-time `.gsq` download.
 
 ---
 
@@ -386,7 +382,7 @@ there is no high-bandwidth WAN hop for splat playback.
 | A new sim engine (alternative physics, mock) | A new class implementing `protocols/sim.py:SimulationEngine` under `core/sim_engines/<name>.py`; wire in `composition.py` |
 | A new cache codec (SPZ, 4DGS, ...) | A new class implementing `protocols/cache.py:CacheCodec` under `core/codecs/<name>.py`; wire in `composition.py` |
 | A new storage backend (S3, GCS, ...) | A new class implementing `protocols/storage.py:Storage` under `storage/<name>.py`; wire in `composition.py` |
-| A viewer-specific transform | The viewer's wrapper (`vkgs_play.py` for vkgs; `viser_headless.py` for splat). NEVER mutate library frames. |
+| A viewer-specific transform | The viewer's wrapper (`vkgs_play.py` for vkgs; `SplatScene.tsx` for in-browser splat). NEVER mutate library frames. |
 | A new backend endpoint | `server/gsfluent/api/<route>.py`; mount in `composition.py:build_app` |
 | A web-side renderer mode | `frontend/src/components/viewport/<NewMode>.tsx` |
 | A one-shot migration | `server/tools/_oneshot/<date>_<purpose>.py`, not flat in `server/tools/` |
