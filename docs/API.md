@@ -96,85 +96,6 @@ Liveness probe. Always returns 200 while the process is up.
 curl ${BACKEND_URL}/api/health
 ```
 
-### GET /api/gpu-check
-
-Probes the host's NVIDIA GPUs via `nvidia-smi`. Used as a deployment
-handshake; does not run any CUDA code, just shells out and parses CSV.
-
-**Response (success)**
-
-```json
-{
-  "ok": true,
-  "gpus": [
-    "0, NVIDIA A100-SXM4-80GB, 565.57.01, 81920 MiB, 58765 MiB"
-  ]
-}
-```
-
-**Response (failure)**
-
-```json
-{
-  "ok": false,
-  "error": "nvidia-smi not on PATH",
-  "hint": "If running in Docker: was the container started with `--gpus all` ..."
-}
-```
-
-Other failure shapes: `{"ok": false, "error": "nvidia-smi timed out (>5s)"}`,
-`{"ok": false, "error": "nvidia-smi exit <N>", "stderr": "..."}`.
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `ok` | bool | True iff at least one GPU was enumerated. |
-| `gpus` | string[] | CSV rows: `index, name, driver_version, memory.total, memory.free`. Present iff `ok=true`. |
-| `error` | string | Single-line failure summary. Present iff `ok=false`. |
-| `hint` | string | Operator-facing remediation hint. Optional. |
-| `stderr` | string | nvidia-smi stderr. Optional. |
-
-Always returns HTTP 200, even on failure — the JSON `ok` field is the gate.
-
-**curl**
-
-```bash
-curl ${BACKEND_URL}/api/gpu-check
-```
-
-### GET /api/system
-
-Container / host introspection. No secrets exposed.
-
-**Response**
-
-```json
-{
-  "hostname": "jy-r308-f01-7",
-  "platform": "Linux-5.15.0-171-generic-x86_64-with-glibc2.35",
-  "python": "3.11.15",
-  "pkg_root": "/path/to/gsfluent_pkg",
-  "sim_script": "<default>",
-  "sim_home": "<default>",
-  "in_container": false
-}
-```
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `hostname` | string | `socket.gethostname()`. |
-| `platform` | string | `platform.platform()`. |
-| `python` | string | Interpreter version (e.g. `3.11.15`). |
-| `pkg_root` | string | Server-side package root. |
-| `sim_script` | string | Value of `GSFLUENT_SIM_SCRIPT_RUNNER`, or `"<default>"`. |
-| `sim_home` | string | Value of `GSFLUENT_SIM_HOME`, or `"<default>"`. |
-| `in_container` | bool | True iff `/.dockerenv` exists. |
-
-**curl**
-
-```bash
-curl ${BACKEND_URL}/api/system
-```
-
 ---
 
 ## Recipes
@@ -1018,15 +939,114 @@ URL shape.
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 ```
 
-### GET /api/sequences/{name}/cache/splats.gsq
+### POST /api/sequences/{name}/cache/build
 
-Serve the `.gsq` visual-lossless streamable splat cache (produced by
-`server/tools/pack_splats.py`). `FileResponse` supports HTTP `Range` so
-clients can fetch arbitrary byte spans for progressive playback.
+Kick off building the `.gsq` cache for a sequence as a background
+subprocess (runs `server/tools/pack_splats.py`). Idempotent: if the
+`.gsq` already exists on disk it returns `done` immediately without
+spawning anything; if a build is already running it returns the existing
+job. Job state lives in process memory only (lost on restart), but the
+subprocess writes to disk, so a restart simply re-detects the finished
+file.
 
-Format: 80-byte header + 16-byte index entry per frame + zstd static
-block + per-frame zstd chunks. See `docs/ARCHITECTURE.md` for the
-on-disk layout.
+**Path params**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `name` | string | Sequence name. Validated against `^[A-Za-z0-9_.\-]+$`. |
+
+**Response** (the job descriptor)
+
+```json
+{
+  "name": "cluster_6_15_eq_v3",
+  "state": "building",
+  "started_at": 1779266060.81,
+  "finished_at": null,
+  "stdout_tail": "",
+  "error": null
+}
+```
+
+When the cache already exists: `{"name": "...", "state": "done", "note": "cache already exists on disk"}`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Echo of the sequence name. |
+| `state` | string | `"building"` (new or in-flight) or `"done"` (fast-path). |
+| `started_at` | float\|absent | Unix epoch when this build started. |
+| `finished_at` | float\|null | Set when the subprocess exits. |
+| `stdout_tail` | string | Tail of the packer's stdout (grows as it runs). |
+| `error` | string\|null | `repr()` of the exception if the build failed. |
+| `note` | string | Only on the `done` fast-path. |
+
+**Status codes**
+
+| Code | Cause |
+| --- | --- |
+| 404 | Sequence not found. |
+| 422 | Name fails the validation regex. |
+
+**curl**
+
+```bash
+curl -X POST ${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/build
+```
+
+### GET /api/sequences/{name}/cache/build-status
+
+Poll the build job for a sequence. Use after `POST .../cache/build` to
+wait for `state: "done"` before downloading `splats.gsq`.
+
+**Path params**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `name` | string | Sequence name. Validated against `^[A-Za-z0-9_.\-]+$`. |
+
+**Response**
+
+```json
+{ "name": "cluster_6_15_eq_v3", "state": "done" }
+```
+
+| State | Meaning |
+| --- | --- |
+| `"idle"` | No build requested in this process and no `.gsq` on disk. |
+| `"building"` | Subprocess is running. The full job descriptor (see `build`) is returned, including `stdout_tail`. |
+| `"done"` | `.gsq` is on disk. (If no job is tracked but the file exists, `note: "cache exists (no job tracked)"` is added.) |
+| `"error"` | Subprocess failed; `error` holds the exception repr. |
+
+**Status codes**
+
+| Code | Cause |
+| --- | --- |
+| 422 | Name fails the validation regex. |
+
+**curl**
+
+```bash
+curl ${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/build-status
+```
+
+### GET, HEAD /api/sequences/{name}/cache/splats.gsq
+
+Download the `.gsq` splat-sequence cache (produced by
+`server/tools/pack_splats.py`). This is the canonical playback artifact:
+the client downloads the whole file once, then plays it back locally — the
+server only serves bytes, it never decodes. **`GET`** streams the bytes;
+**`HEAD`** returns the same headers with no body, so a client can read the
+download size (`Content-Length`) and resumability (`Accept-Ranges`) up
+front before committing to the pull.
+
+The file is treated as immutable for a given (size, mtime): every response
+carries a weak `ETag` of the form `"<size>-<mtime_int>"` and
+`Cache-Control: public, immutable, max-age=31536000`.
+
+Format: 80-byte header + 16-byte index entry per frame + zstd static block
+(color/opacity/scale, stored once) + per-frame zstd chunks. As of codec
+**v2** the per-frame chunks are temporal deltas against periodic keyframes
+(bit-exact). See `docs/ARCHITECTURE.md` for the on-disk layout.
 
 **Path params**
 
@@ -1034,21 +1054,43 @@ on-disk layout.
 | --- | --- | --- |
 | `name` | string | Sequence name. |
 
-**Response**
+**Response headers** (GET and HEAD)
 
-`application/octet-stream`; the raw `.gsq` bytes.
+| Header | Value |
+| --- | --- |
+| `Content-Length` | Full file size in bytes — the progress-bar denominator. |
+| `Accept-Ranges` | `bytes` — the download is resumable / chunkable. |
+| `ETag` | `"<size>-<mtime_int>"`. |
+| `Cache-Control` | `public, immutable, max-age=31536000`. |
+
+**Conditional + partial requests**
+
+| Request header | Result |
+| --- | --- |
+| `If-None-Match: <etag>` matches | `304 Not Modified`, no body (ETag repeated). |
+| `Range: bytes=N-` (or `N-M`) | `206 Partial Content` + `Content-Range`. Resume a broken transfer by ranging from the bytes you already have. |
+| `HEAD` | `200` with the headers above and an empty body. |
+
+**Response body**
+
+`application/octet-stream`; the raw `.gsq` bytes (GET / 206 only).
 
 **Status codes**
 
 | Code | Cause |
 | --- | --- |
 | 400 | Resolved path escapes the cache root (defensive). |
-| 404 | Sequence not found, or the `.gsq` cache has not been built yet (run `server/tools/pack_splats.py <name>` on the server, or POST `/api/sequences/{name}/cache/build`). |
+| 404 | Sequence not found, or the `.gsq` cache has not been built yet (POST `/api/sequences/{name}/cache/build`, or run `server/tools/pack_splats.py <name>` on the server). |
 
 **curl**
 
 ```bash
+# size + headers only (no body):
+curl -sI "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
+# full download:
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
+# resume from byte N:
+curl -H "Range: bytes=N-" -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
 ```
 
 ### GET /api/sequences/{name}/cache/frames.bin
@@ -1296,22 +1338,27 @@ socket.
 
 ### 4. Downloading the resulting .gsq cache
 
-The cache is built automatically at the end of a successful run by the
-runner. To trigger / inspect it explicitly:
+The cache is built automatically at the end of a successful run. To
+trigger / inspect it explicitly:
 
 ```bash
 # kick off (idempotent — fast-paths if the file already exists):
 curl -X POST ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build
-# poll until done:
+# poll until "state":"done":
 curl ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build-status
 ```
 
-Then pull it down (HTTP `Range` is supported so partial fetches /
-progressive streaming both work):
+The model is **download-then-play**: pull the whole file once (HTTP `Range`
+makes it resumable, so a broken transfer continues instead of restarting),
+then play it back locally.
 
 ```bash
+# read the size first (HEAD), then download:
+curl -sI "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/splats.gsq"
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/splats.gsq"
 ```
 
-`cache.splats_gsq_mtime` / `splats_gsq_bytes` in `GET /api/sequences`
-tell the client whether the artifact is built without needing a HEAD.
+For a progress bar, the client reads the total size from `Content-Length`
+(via HEAD) or from `cache.splats_gsq_bytes` in `GET /api/sequences`, then
+tracks bytes received. The server is stateless — it does not track
+per-client download progress.

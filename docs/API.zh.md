@@ -70,83 +70,6 @@ FastAPI 默认结构。任何非 2xx 响应都是:
 curl ${BACKEND_URL}/api/health
 ```
 
-### GET /api/gpu-check
-
-调 `nvidia-smi` 看主机 GPU,部署时用来做握手。这里不会碰 CUDA,只是 shell 出去把 CSV 解出来。
-
-**Response (success)**
-
-```json
-{
-  "ok": true,
-  "gpus": [
-    "0, NVIDIA A100-SXM4-80GB, 565.57.01, 81920 MiB, 58765 MiB"
-  ]
-}
-```
-
-**Response (failure)**
-
-```json
-{
-  "ok": false,
-  "error": "nvidia-smi not on PATH",
-  "hint": "If running in Docker: was the container started with `--gpus all` ..."
-}
-```
-
-其他失败形态:`{"ok": false, "error": "nvidia-smi timed out (>5s)"}`、`{"ok": false, "error": "nvidia-smi exit <N>", "stderr": "..."}`。
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `ok` | bool | 至少枚举到一块 GPU 时为 true。 |
-| `gpus` | string[] | CSV 行:`index, name, driver_version, memory.total, memory.free`。仅 `ok=true` 时存在。 |
-| `error` | string | 单行失败摘要,仅 `ok=false` 时存在。 |
-| `hint` | string | 给运维的修复提示,可选。 |
-| `stderr` | string | nvidia-smi 的 stderr,可选。 |
-
-不管成功失败,HTTP 状态都是 200;判断走 JSON 里的 `ok` 字段。
-
-**curl**
-
-```bash
-curl ${BACKEND_URL}/api/gpu-check
-```
-
-### GET /api/system
-
-主机和容器的自省信息。不会暴露敏感字段。
-
-**Response**
-
-```json
-{
-  "hostname": "jy-r308-f01-7",
-  "platform": "Linux-5.15.0-171-generic-x86_64-with-glibc2.35",
-  "python": "3.11.15",
-  "pkg_root": "/path/to/gsfluent_pkg",
-  "sim_script": "<default>",
-  "sim_home": "<default>",
-  "in_container": false
-}
-```
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `hostname` | string | `socket.gethostname()`。 |
-| `platform` | string | `platform.platform()`。 |
-| `python` | string | 解释器版本(如 `3.11.15`)。 |
-| `pkg_root` | string | 服务端 package 根。 |
-| `sim_script` | string | 环境变量 `GSFLUENT_SIM_SCRIPT_RUNNER` 的值,未设则是 `"<default>"`。 |
-| `sim_home` | string | 环境变量 `GSFLUENT_SIM_HOME` 的值,未设则是 `"<default>"`。 |
-| `in_container` | bool | `/.dockerenv` 存在时为 true。 |
-
-**curl**
-
-```bash
-curl ${BACKEND_URL}/api/system
-```
-
 ---
 
 ## Recipes
@@ -944,11 +867,96 @@ curl -X POST ${BACKEND_URL}/api/sequences/import \
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 ```
 
-### GET /api/sequences/{name}/cache/splats.gsq
+### POST /api/sequences/{name}/cache/build
 
-下载 sequence 的 `.gsq` 视觉无损流式 splat 缓存(由 `server/tools/pack_splats.py` 产生)。`FileResponse` 原生支持 HTTP `Range`,客户端可以按字节区间取任意帧做渐进播放。
+后台子进程构建 sequence 的 `.gsq` 缓存(跑 `server/tools/pack_splats.py`)。幂等:`.gsq` 已经在盘上就直接返回 `done`,不重复起;已经在构建中就返回现有的 job。job 状态只存在进程内存里(重启会丢),但子进程的产物落盘,所以重启后再查会直接认到已完成的文件。
 
-格式:80 字节 header + 每帧 16 字节索引 + zstd 静态块 + 每帧 zstd 压缩 chunk。完整布局见 `docs/ARCHITECTURE.md`。
+**Path params**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | sequence 名,要满足 `^[A-Za-z0-9_.\-]+$`。 |
+
+**Response**(job 描述)
+
+```json
+{
+  "name": "cluster_6_15_eq_v3",
+  "state": "building",
+  "started_at": 1779266060.81,
+  "finished_at": null,
+  "stdout_tail": "",
+  "error": null
+}
+```
+
+缓存已存在时:`{"name": "...", "state": "done", "note": "cache already exists on disk"}`。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | 回显 sequence 名。 |
+| `state` | string | `"building"`(新建或在途)或 `"done"`(快路径)。 |
+| `started_at` | float\|无 | 本次构建开始的 Unix epoch。 |
+| `finished_at` | float\|null | 子进程退出时写入。 |
+| `stdout_tail` | string | packer stdout 的尾部(随构建增长)。 |
+| `error` | string\|null | 构建失败时是异常的 `repr()`。 |
+| `note` | string | 只在 `done` 快路径出现。 |
+
+**状态码**
+
+| 状态码 | 触发原因 |
+| --- | --- |
+| 404 | sequence 不存在。 |
+| 422 | name 不合规。 |
+
+**curl**
+
+```bash
+curl -X POST ${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/build
+```
+
+### GET /api/sequences/{name}/cache/build-status
+
+轮询 sequence 的构建 job。`POST .../cache/build` 之后用它等到 `state: "done"` 再去下载 `splats.gsq`。
+
+**Path params**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | sequence 名,要满足 `^[A-Za-z0-9_.\-]+$`。 |
+
+**Response**
+
+```json
+{ "name": "cluster_6_15_eq_v3", "state": "done" }
+```
+
+| state | 含义 |
+| --- | --- |
+| `"idle"` | 本进程没请求过构建,盘上也没有 `.gsq`。 |
+| `"building"` | 子进程在跑。返回完整 job 描述(见 `build`),含 `stdout_tail`。 |
+| `"done"` | `.gsq` 已在盘上。(没有 job 但文件存在时,会带 `note: "cache exists (no job tracked)"`。) |
+| `"error"` | 子进程失败;`error` 是异常 repr。 |
+
+**状态码**
+
+| 状态码 | 触发原因 |
+| --- | --- |
+| 422 | name 不合规。 |
+
+**curl**
+
+```bash
+curl ${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/build-status
+```
+
+### GET, HEAD /api/sequences/{name}/cache/splats.gsq
+
+下载 sequence 的 `.gsq` splat 序列缓存(由 `server/tools/pack_splats.py` 产生)。这是回放用的标准 artifact:客户端把整个文件下载一次,然后本地回放——服务端只发字节,**从不解码**。**`GET`** 传字节;**`HEAD`** 返回同样的响应头但没有 body,客户端可以在真正开拉之前先拿到下载大小(`Content-Length`)和可续传性(`Accept-Ranges`)。
+
+文件对给定的 (size, mtime) 视为不可变:每个响应都带一个弱 `ETag`(形如 `"<size>-<mtime_int>"`)和 `Cache-Control: public, immutable, max-age=31536000`。
+
+格式:80 字节 header + 每帧 16 字节索引 + zstd 静态块(颜色/不透明度/scale,只存一份)+ 每帧 zstd chunk。从编解码 **v2** 起,每帧 chunk 是相对周期性关键帧的时间差分(bit 级一致)。完整布局见 `docs/ARCHITECTURE.md`。
 
 **Path params**
 
@@ -956,21 +964,43 @@ curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/frame/0.ply"
 | --- | --- | --- |
 | `name` | string | sequence 名。 |
 
-**Response**
+**响应头**(GET 和 HEAD 都有)
 
-`application/octet-stream`,原始 `.gsq` 字节。
+| Header | 值 |
+| --- | --- |
+| `Content-Length` | 文件总字节数——进度条的分母。 |
+| `Accept-Ranges` | `bytes`——下载可续传 / 可分块。 |
+| `ETag` | `"<size>-<mtime_int>"`。 |
+| `Cache-Control` | `public, immutable, max-age=31536000`。 |
+
+**条件 / 区间请求**
+
+| 请求头 | 结果 |
+| --- | --- |
+| `If-None-Match: <etag>` 命中 | `304 Not Modified`,无 body(回显 ETag)。 |
+| `Range: bytes=N-`(或 `N-M`) | `206 Partial Content` + `Content-Range`。断点续传:从已有的字节数往后 range。 |
+| `HEAD` | `200`,带上面那些响应头,body 为空。 |
+
+**Response body**
+
+`application/octet-stream`,原始 `.gsq` 字节(仅 GET / 206)。
 
 **状态码**
 
 | 状态码 | 触发原因 |
 | --- | --- |
 | 400 | 解析后路径逃出 cache 根(防御性)。 |
-| 404 | sequence 不存在,或 `.gsq` 还没建(在服务器跑 `python server/tools/pack_splats.py <name>`,或 POST `/api/sequences/{name}/cache/build`)。 |
+| 404 | sequence 不存在,或 `.gsq` 还没建(POST `/api/sequences/{name}/cache/build`,或在服务器跑 `server/tools/pack_splats.py <name>`)。 |
 
 **curl**
 
 ```bash
+# 只看大小和响应头(不要 body):
+curl -sI "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
+# 完整下载:
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
+# 从第 N 字节续传:
+curl -H "Range: bytes=N-" -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_v3/cache/splats.gsq"
 ```
 
 ### GET /api/sequences/{name}/cache/frames.bin
@@ -1205,21 +1235,21 @@ UI 客户端建议直接走 WebSocket:一条 `subscribe` 消息就够,log 回放
 
 ### 4. 拉生成出来的 .gsq 缓存
 
-run 跑完之后,缓存要在服务端先构一次:
-
 缓存在 run 跑完时由 runner 自动建好。手动触发或查状态:
 
 ```bash
 # 启动构建(已建好就立刻返回 done):
 curl -X POST ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build
-# 轮询:
+# 轮询到 "state":"done":
 curl ${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/build-status
 ```
 
-然后下载(支持 HTTP `Range`,可断点续传 / 边下边播):
+模型是**下载后播放**(download-then-play):把整个文件下载一次(HTTP `Range` 让它可续传,断了接着下而不是重来),然后本地回放。
 
 ```bash
+# 先用 HEAD 拿大小,再下载:
+curl -sI "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/splats.gsq"
 curl -OJ "${BACKEND_URL}/api/sequences/cluster_6_15_eq_demo/cache/splats.gsq"
 ```
 
-`GET /api/sequences` 里的 `cache.splats_gsq_mtime` / `splats_gsq_bytes` 让客户端不发 HEAD 就能判断 artifact 是否已构建。
+做进度条时,客户端从 `Content-Length`(HEAD)或 `GET /api/sequences` 里的 `cache.splats_gsq_bytes` 拿到总大小,再统计已收字节。服务端是无状态的——它不跟踪单个客户端的下载进度。
