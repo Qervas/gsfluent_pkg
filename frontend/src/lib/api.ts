@@ -29,6 +29,13 @@ function apiUrl(path: string): string {
   return BACKEND_URL + path;
 }
 
+/** Absolute URL of a sequence's .gsq cache (download-then-play artifact).
+ *  Same base resolution as every other API call (VITE_BACKEND_URL or
+ *  same-origin). */
+export function splatsGsqUrl(name: string): string {
+  return apiUrl(`/api/sequences/${encodeURIComponent(name)}/cache/splats.gsq`);
+}
+
 const j = async <T>(r: Response): Promise<T> => {
   if (!r.ok) {
     const text = await r.text().catch(() => "");

@@ -1,5 +1,6 @@
 import { useActiveCell } from "@/lib/use-active-cell";
 import { useStore } from "@/lib/store";
+import { SplatScene } from "./SplatScene";
 import { ViserSplatScene } from "./ViserSplatScene";
 import { ViserToggle } from "./ViserToggle";
 import { EmptyState } from "./EmptyState";
@@ -9,9 +10,11 @@ import { PlaybackDriver } from "./PlaybackDriver";
 import { PlaybackBar } from "./PlaybackBar";
 
 export function Viewport() {
-  const { activeCell } = useActiveCell();
+  const { activeCell, isSequence } = useActiveCell();
   const hasContent = !!activeCell;
   const viserEnabled = useStore((s) => s.viserEnabled);
+  const inBrowserRenderer = useStore((s) => s.inBrowserRenderer);
+  const useSplatScene = inBrowserRenderer && isSequence;
 
   return (
     <div className="h-full w-full relative bg-canvas">
@@ -21,7 +24,9 @@ export function Viewport() {
           process; viser owns rendering, React owns everything else.
           Gated by viserEnabled so the user can unmount the iframe when
           the splat renderer crashes or NaN's mid-session. */}
-      {viserEnabled ? (
+      {useSplatScene ? (
+        <SplatScene />
+      ) : viserEnabled ? (
         <ViserSplatScene />
       ) : (
         <div className="h-full w-full flex items-center justify-center bg-canvas text-text-muted text-sm">

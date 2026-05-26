@@ -32,6 +32,10 @@ type State = {
   viserEnabled: boolean;
   setViserEnabled: (b: boolean) => void;
 
+  // When true, sequence cells render in-browser (SplatScene) instead of the
+  // viser iframe. Lets us A/B the new renderer before retiring viser (Stage 3).
+  inBrowserRenderer: boolean;
+  setInBrowserRenderer: (b: boolean) => void;
 
   // Workspace selection
   activeWorkspace: Workspace;
@@ -199,6 +203,15 @@ export const useStore = create<State>((set) => ({
     set(() => {
       try { localStorage.setItem("gsfluent.viserEnabled", b ? "true" : "false"); } catch { /* private mode */ }
       return { viserEnabled: b };
+    }),
+  inBrowserRenderer: (() => {
+    try { return localStorage.getItem("gsfluent.inBrowserRenderer") === "true"; }
+    catch { return false; }
+  })(),
+  setInBrowserRenderer: (b) =>
+    set(() => {
+      try { localStorage.setItem("gsfluent.inBrowserRenderer", b ? "true" : "false"); } catch { /* private mode */ }
+      return { inBrowserRenderer: b };
     }),
   activeWorkspace: "sim",
   setActiveWorkspace: (w) => set({ activeWorkspace: w }),
