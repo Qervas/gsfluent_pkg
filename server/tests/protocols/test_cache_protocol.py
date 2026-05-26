@@ -4,7 +4,7 @@ Phase 2 will implement GSQCodec against this contract. Phase 1 verifies
 the Protocol shape with an in-memory stub.
 """
 import io
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import BinaryIO
 
 import pytest
@@ -13,7 +13,6 @@ from gsfluent.protocols.cache import (
     CacheCodec,
     CacheMetadata,
     CodecError,
-    DecodedFrame,
     SplatFrame,
 )
 from gsfluent.protocols.observability import EventEmitter
@@ -25,7 +24,8 @@ class _StubEmitter:
 
 
 class _IdentityCodec:
-    """Stub codec: emits a single 'frame_count' byte then dummy frame bytes."""
+    """Stub codec: emits one byte per frame. Encode-only, matching the
+    encode-only CacheCodec Protocol."""
 
     media_type = "application/x-stub"
     file_extension = ".stub"
@@ -41,10 +41,6 @@ class _IdentityCodec:
             count += 1
             out.write(b"f")
         return CacheMetadata(n_splats=0, n_frames=count, bbox=(0, 0, 0, 0, 0, 0))
-
-    def decode_all(self, src: BinaryIO) -> Sequence[DecodedFrame]:
-        body = src.read()
-        return [DecodedFrame(frame_index=i, data={}) for i in range(len(body))]
 
 
 def test_stub_satisfies_cache_codec_protocol() -> None:
@@ -108,8 +104,9 @@ def test_real_gsq_codec_satisfies_protocol() -> None:
 
 
 def test_real_gsq_codec_encode_then_decode_round_trip(tmp_path) -> None:
-    """Encode a tiny synthetic sequence, then decode it back."""
-    from gsfluent.core.codecs.gsq import GSQCodec
+    """Encode a tiny synthetic sequence, then decode each frame back via the
+    kept per-frame decoder (decode_frame_raw_i16)."""
+    from gsfluent.core.codecs.gsq import GSQCodec, decode_frame_raw_i16
 
     frames_dir = tmp_path / "seq" / "frames"
     frames_dir.mkdir(parents=True)
@@ -122,8 +119,8 @@ def test_real_gsq_codec_encode_then_decode_round_trip(tmp_path) -> None:
     assert meta.n_frames == 3
     assert meta.n_splats == 4
 
-    with open(out_path, "rb") as fh:
-        decoded = codec.decode_all(fh)
-    assert len(decoded) == 3
-    assert decoded[0].frame_index == 0
-    assert decoded[2].frame_index == 2
+    body = out_path.read_bytes()
+    for t in range(3):
+        xyz_q, quat_q = decode_frame_raw_i16(body, t)
+        assert xyz_q.shape == (4, 3)
+        assert quat_q.shape == (4, 3)

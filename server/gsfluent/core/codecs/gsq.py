@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import struct
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -29,7 +29,6 @@ from gsfluent.protocols.cache import (
     CacheMetadata,
     CodecError,
     CodecUnsanitizableError,
-    DecodedFrame,
     SplatFrame,
 )
 from gsfluent.protocols.observability import EventEmitter
@@ -77,7 +76,7 @@ def read_frame_payload_raw_i16(
     For a keyframe the payload is the absolute frame; for a delta frame it is
     `frame[t] - frame[t-1]` (modular int16). No reconstruction is performed —
     this is the raw stored content. Used by the pruner (slicing commutes with
-    deltas) and by reconstruction logic in decode_frame_raw_i16 / decode_all.
+    deltas) and by reconstruction logic in decode_frame_raw_i16.
     """
     h = parse_header_bytes(buf)
     n = h["n_splats"]
@@ -483,80 +482,3 @@ class GSQCodec:
             ),
             fps_hint=24.0,
         )
-
-    def decode_all(self, src: BinaryIO) -> Sequence[DecodedFrame]:
-        """Synchronous all-at-once loader. Returns a list of DecodedFrame.
-
-        Reads the .gsq header to find frame offsets, then decompresses each
-        frame chunk and the static block. Returns frames with `data` carrying
-        the decompressed numpy arrays (xyz_q, quat_q, rgb, opacity, scales).
-        """
-        header = src.read(HEADER_SIZE)
-        if header[:4] != MAGIC:
-            raise CodecError(f"bad magic: {header[:4]!r}; expected {MAGIC!r}")
-        version, n_splats, n_frames = struct.unpack("<III", header[4:16])
-        if version not in (1, 2):
-            raise CodecError(f"unsupported gsq version: {version}")
-        # bbox is at offset 20..44 (3 floats min + 3 floats max).
-        bbox_min = np.frombuffer(header[20:32], dtype=np.float32)
-        bbox_max = np.frombuffer(header[32:44], dtype=np.float32)
-        static_offset, static_size = struct.unpack("<QI", header[44:56])
-
-        # Index entries
-        index_raw = src.read(n_frames * INDEX_ENTRY_SIZE)
-        entries: list[tuple[int, int, int]] = []
-        for i in range(n_frames):
-            base = i * INDEX_ENTRY_SIZE
-            off, sz, flags = struct.unpack("<QII", index_raw[base:base + INDEX_ENTRY_SIZE])
-            entries.append((off, sz, flags))
-
-        # Static block
-        static_compressed = src.read(static_size)
-        dctx = zstd.ZstdDecompressor()
-        static_uncompressed = dctx.decompress(static_compressed)
-        rgb_bytes = static_uncompressed[:n_splats * 3 * 2]
-        opacity_bytes = static_uncompressed[n_splats * 3 * 2:n_splats * 3 * 2 + n_splats]
-        scales_bytes = static_uncompressed[n_splats * 3 * 2 + n_splats:]
-        rgb = np.frombuffer(rgb_bytes, dtype=np.float16).reshape(n_splats, 3)
-        opacity = np.frombuffer(opacity_bytes, dtype=np.uint8)
-        scales = np.frombuffer(scales_bytes, dtype=np.float16).reshape(n_splats, 3)
-
-        # v1: each stored chunk is absolute. v2: keyframes are absolute, deltas
-        # accumulate onto a running absolute frame (reset at each keyframe).
-        prev_xyz: np.ndarray | None = None
-        prev_quat: np.ndarray | None = None
-
-        frames_out: list[DecodedFrame] = []
-        for i, (_off, sz, flags) in enumerate(entries):
-            chunk = src.read(sz)
-            raw = dctx.decompress(chunk)
-            stored_xyz = np.frombuffer(
-                raw[:n_splats * 3 * 2], dtype=np.int16
-            ).reshape(n_splats, 3)
-            stored_quat = np.frombuffer(
-                raw[n_splats * 3 * 2:], dtype=np.int16
-            ).reshape(n_splats, 3)
-
-            if version == 1 or (flags & 1):
-                # Absolute frame (v1 chunk or v2 keyframe).
-                xyz_q = stored_xyz
-                quat_q = stored_quat
-            else:
-                # v2 delta: modular int16 add onto the running absolute.
-                xyz_q = (prev_xyz + stored_xyz).astype(np.int16)
-                quat_q = (prev_quat + stored_quat).astype(np.int16)
-            prev_xyz = xyz_q
-            prev_quat = quat_q
-            frames_out.append(DecodedFrame(
-                frame_index=i,
-                data={
-                    "xyz_q": xyz_q,
-                    "quat_q": quat_q,
-                    "bbox_min": bbox_min,
-                    "bbox_max": bbox_max,
-                    "rgb": rgb if i == 0 else None,
-                    "opacity": opacity if i == 0 else None,
-                    "scales": scales if i == 0 else None,
-                },
-            ))
-        return frames_out

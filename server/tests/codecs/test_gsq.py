@@ -1,7 +1,6 @@
 """GSQ codec-specific unit tests. Protocol conformance tests live in
 tests/protocols/test_cache_protocol.py (parametrized over impls).
 """
-import io
 import struct
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from gsfluent.core.codecs.gsq import (
     INDEX_ENTRY_SIZE,
     MAGIC,
     GSQCodec,
+    decode_frame_raw_i16,
 )
 from gsfluent.protocols.cache import (
     CacheCodec,
@@ -93,12 +93,12 @@ def test_encode_from_frames_dir_writes_gsq_header(tmp_path: Path) -> None:
     assert n_splats == 4
     assert n_frames == 3
 
-    # Round-trips: decode_all yields all 3 frames with absolute int16 data.
-    decoded = codec.decode_all(io.BytesIO(body))
-    assert len(decoded) == 3
-    for fr in decoded:
-        assert fr.data["xyz_q"].shape == (4, 3)
-        assert fr.data["quat_q"].shape == (4, 3)
+    # Round-trips: decode_frame_raw_i16 yields all 3 frames as absolute
+    # int16 arrays of the expected shape.
+    for t in range(3):
+        xyz_q, quat_q = decode_frame_raw_i16(body, t)
+        assert xyz_q.shape == (4, 3)
+        assert quat_q.shape == (4, 3)
 
 
 def test_encode_empty_dir_raises(tmp_path: Path) -> None:

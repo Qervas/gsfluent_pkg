@@ -1,8 +1,8 @@
 """GSQ v2 (delta + keyframe) codec tests.
 
 Covers: header flags parsing, stored-payload reading, absolute reconstruction
-via decode_frame_raw_i16, decode_all reconstruction, modular int16 wraparound
-losslessness, and v1 version-dispatch (v1 reading must keep working).
+via decode_frame_raw_i16, modular int16 wraparound losslessness, and v1
+version-dispatch (v1 reading must keep working).
 """
 import io
 import struct
@@ -80,17 +80,6 @@ def test_parse_header_v2_flags_and_index_shape():
 # ---- Test 2: decode_frame_raw_i16 absolute reconstruction ----------------
 
 
-def test_decode_frame_raw_i16_matches_decode_all():
-    frames = _make_frames()
-    buf = _encode_v2(frames)
-    decoded = GSQCodec().decode_all(io.BytesIO(buf))
-
-    for t in (0, 1, 29, 30, 31, 39):
-        xyz, qxyz = decode_frame_raw_i16(buf, t)
-        np.testing.assert_array_equal(xyz, decoded[t].data["xyz_q"])
-        np.testing.assert_array_equal(qxyz, decoded[t].data["quat_q"])
-
-
 def test_decode_frame_raw_i16_reconstruction_consistent():
     """Reconstructing absolute from stored deltas must be consistent: the
     accumulation from the nearest keyframe equals the direct raw decode."""
@@ -135,11 +124,22 @@ def test_modular_wraparound_lossless():
         frames.append(f)
 
     buf = _encode_v2(frames)
-    decoded = GSQCodec().decode_all(io.BytesIO(buf))
+    # Reference reconstruction: accumulate stored deltas from the nearest
+    # keyframe with modular int16 add, independent of decode_frame_raw_i16.
+    h = parse_header_bytes(buf)
+    flags = h["frame_flags"]
     for t in range(n_frames):
+        kf = t
+        while not (flags[kf] & 1):
+            kf -= 1
+        ref_xyz, ref_q, _ = read_frame_payload_raw_i16(buf, kf)
+        for i in range(kf + 1, t + 1):
+            dx, dq, _ = read_frame_payload_raw_i16(buf, i)
+            ref_xyz = (ref_xyz + dx).astype(np.int16)
+            ref_q = (ref_q + dq).astype(np.int16)
         xyz, qxyz = decode_frame_raw_i16(buf, t)
-        np.testing.assert_array_equal(xyz, decoded[t].data["xyz_q"])
-        np.testing.assert_array_equal(qxyz, decoded[t].data["quat_q"])
+        np.testing.assert_array_equal(xyz, ref_xyz)
+        np.testing.assert_array_equal(qxyz, ref_q)
 
 
 # ---- Test 3: read_frame_payload_raw_i16 returns STORED payload -----------
@@ -168,20 +168,6 @@ def test_read_frame_payload_keyframe_vs_delta():
     expect_dq = (abs1_q - abs0_q).astype(np.int16)
     np.testing.assert_array_equal(xyz1, expect_dx)
     np.testing.assert_array_equal(q1, expect_dq)
-
-
-# ---- Test 4: decode_all reconstructs absolute frames ---------------------
-
-
-def test_decode_all_yields_absolute_frames():
-    frames = _make_frames()
-    buf = _encode_v2(frames)
-    decoded = GSQCodec().decode_all(io.BytesIO(buf))
-    assert len(decoded) == N_FRAMES
-    for t in range(N_FRAMES):
-        xyz, qxyz = decode_frame_raw_i16(buf, t)
-        np.testing.assert_array_equal(decoded[t].data["xyz_q"], xyz)
-        np.testing.assert_array_equal(decoded[t].data["quat_q"], qxyz)
 
 
 # ---- Test 5: v1 buffers still decode (version dispatch) ------------------
@@ -255,9 +241,11 @@ def test_v1_buffer_still_decodes():
     # v1 flags are all 0.
     assert all(fl == 0 for fl in h["frame_flags"])
 
-    decoded = GSQCodec().decode_all(io.BytesIO(v1))
-    assert len(decoded) == 5
+    # v1 version-dispatch: decode_frame_raw_i16 must read each absolute chunk
+    # directly, and read_frame_payload_raw_i16 must return the same bytes (no
+    # delta reconstruction for v1).
     for t in range(5):
         xyz, qxyz = decode_frame_raw_i16(v1, t)
-        np.testing.assert_array_equal(decoded[t].data["xyz_q"], xyz)
-        np.testing.assert_array_equal(decoded[t].data["quat_q"], qxyz)
+        stored_xyz, stored_qxyz, _ = read_frame_payload_raw_i16(v1, t)
+        np.testing.assert_array_equal(xyz, stored_xyz)
+        np.testing.assert_array_equal(qxyz, stored_qxyz)

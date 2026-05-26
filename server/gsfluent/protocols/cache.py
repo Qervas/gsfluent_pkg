@@ -1,16 +1,17 @@
 """CacheCodec Protocol — layer 4.
 
-Encodes/decodes a sequence of splat frames to the codec's wire format.
-Concrete: GSQCodec (Phase 2). Swap candidates: SPZ-per-frame, raw-PLY-zstd.
+Encodes a sequence of splat frames to the codec's wire format. The codec
+is encode-only on the backend: production serves raw .gsq bytes and
+clients decode them (via splat_ring). Concrete: GSQCodec (Phase 2). Swap
+candidates: SPZ-per-frame, raw-PLY-zstd.
 
-SplatFrame and DecodedFrame use dict[str, Any] for forward-compat: today
-the .gsq codec emits xyz/quat/rgb/opacity/scales arrays; tomorrow a
-SPZ-style codec might emit SH coefficients. Concrete impls type-check
-their own keys.
+SplatFrame uses dict[str, Any] for forward-compat: today the .gsq codec
+emits xyz/quat/rgb/opacity/scales arrays; tomorrow a SPZ-style codec
+might emit SH coefficients. Concrete impls type-check their own keys.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -45,13 +46,6 @@ Standard keys (when present):
 
 
 @dataclass(frozen=True)
-class DecodedFrame:
-    """One frame's worth of decoded splat data, indexed for playback."""
-    frame_index: int
-    data: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class CacheMetadata:
     """Returned by CacheCodec.encode(); summary of the encoded sequence."""
     n_splats: int
@@ -62,8 +56,9 @@ class CacheMetadata:
 
 @runtime_checkable
 class CacheCodec(Protocol):
-    """Encode/decode a sequence of splat frames.
+    """Encode a sequence of splat frames to the wire format.
 
+    Encode-only: production serves raw bytes and clients handle decode.
     Concrete impls declare media_type + file_extension for HTTP serving.
     """
 
@@ -78,8 +73,4 @@ class CacheCodec(Protocol):
     ) -> CacheMetadata:
         """Encode the sequence to out. Emits structured progress events.
         Raises CodecError on unsanitizable input."""
-        ...
-
-    def decode_all(self, src: BinaryIO) -> Sequence[DecodedFrame]:
-        """Synchronous load (used by load-from-disk path)."""
         ...

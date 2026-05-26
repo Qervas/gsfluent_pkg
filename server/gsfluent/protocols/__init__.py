@@ -4,7 +4,6 @@ from gsfluent.protocols.cache import (
     CacheMetadata,
     CodecError,
     CodecUnsanitizableError,
-    DecodedFrame,
     SplatFrame,
 )
 from gsfluent.protocols.fuse import (
@@ -57,7 +56,6 @@ __all__ = [
     "CodecError",
     "CodecUnsanitizableError",
     "Correspondence",
-    "DecodedFrame",
     "EventEmitter",
     "FuseDegenerateClusterError",
     "FuseError",
