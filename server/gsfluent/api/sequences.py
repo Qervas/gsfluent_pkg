@@ -36,12 +36,11 @@ from .runs import get_run_frame as _get_run_frame
 
 router = APIRouter(prefix="/api/sequences", tags=["sequences"])
 
-# Where derived caches live. The viser .gsq cache is built by
-# `server/tools/pack_splats.py` and consumed by
-# `frontend/python/viser_headless.py`. Under the split-topology deployment
-# the server holds the canonical copy and the SPA streams it on demand
-# through viser_headless's /sync_cell.
-_VISER_CACHE = PKG_ROOT / "work" / "cache" / "viser"
+# Where the derived splat caches live. The .gsq cache is built by
+# `server/tools/pack_splats.py`. The server holds the canonical copy and the
+# in-browser SPA renderer downloads it on demand (GET .../cache/splats.gsq,
+# Range-resumable) and plays it back locally.
+_SPLAT_CACHE = PKG_ROOT / "work" / "cache" / "splats"
 
 
 def _sequence_dict(seq: Sequence, *, active_names: set[str] | None = None) -> dict:
@@ -113,8 +112,8 @@ def _sequence_dict(seq: Sequence, *, active_names: set[str] | None = None) -> di
     # pack_splats.py has run; frames.bin only exists after
     # server/tools/pack_sequence.py has run. Missing → field stays null.
     d["cache"] = {
-        "splats_gsq_mtime": _stat_mtime(_VISER_CACHE / f"{seq.name}.gsq"),
-        "splats_gsq_bytes": _stat_size(_VISER_CACHE / f"{seq.name}.gsq"),
+        "splats_gsq_mtime": _stat_mtime(_SPLAT_CACHE / f"{seq.name}.gsq"),
+        "splats_gsq_bytes": _stat_size(_SPLAT_CACHE / f"{seq.name}.gsq"),
         "frames_bin_mtime": _stat_mtime(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
         "frames_bin_bytes": _stat_size(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
     }
@@ -238,7 +237,7 @@ async def get_frame(name: str, frame_idx: int):
 
 # .gsq files are immutable per (name, size, mtime): once produced for a
 # given sequence, the bytes don't change. We surface that with a weak
-# ETag and Cache-Control: immutable so the viser_headless client can
+# ETag and Cache-Control: immutable so the in-browser client can
 # short-circuit on HEAD when its local copy is current.
 _GSQ_CACHE_CONTROL = "public, immutable, max-age=31536000"
 
@@ -249,14 +248,14 @@ def _gsq_etag(size: int, mtime: float) -> str:
 
 
 def _serve_cache_gsq(name: str, filename: str, request: Request) -> Response:
-    """Serve <filename> from the viser cache with weak ETag + Range + 304.
+    """Serve <filename> from the splat cache with weak ETag + Range + 304.
 
     `filename` is the on-disk basename (e.g. f"{name}.gsq").
     404 if the file is absent.
     """
     if not Sequence.exists(name):
         raise HTTPException(404, f"sequence not found: {name}")
-    path = _VISER_CACHE / filename
+    path = _SPLAT_CACHE / filename
     if not path.is_file():
         raise HTTPException(
             404,
@@ -264,7 +263,7 @@ def _serve_cache_gsq(name: str, filename: str, request: Request) -> Response:
             f"`python server/tools/pack_splats.py {name}` on the server.",
         )
     target = path.resolve()
-    cache_root = _VISER_CACHE.resolve()
+    cache_root = _SPLAT_CACHE.resolve()
     try:
         target.relative_to(cache_root)
     except ValueError:
@@ -312,7 +311,7 @@ def get_splats_gsq(name: str, request: Request):
 
 
 # ── cache build (on-demand) ─────────────────────────────────────────────────
-# When the client selects a sequence whose viser .npz hasn't been built yet,
+# When the client selects a sequence whose .gsq hasn't been built yet,
 # it POSTs /cache/build to kick off pack_splats.py server-side. The
 # old flow was "tell the user to ssh in and run the script themselves",
 # which is hostile UX. Now the backend owns the lifecycle and the client
@@ -320,7 +319,7 @@ def get_splats_gsq(name: str, request: Request):
 #
 # Job state lives in memory only (lost on restart). That's fine because the
 # subprocess writes its output to disk — on restart, the next /cache/build
-# call sees the existing .npz and exits early.
+# call sees the existing .gsq and exits early.
 
 _SEQ_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 _build_jobs: dict[str, dict] = {}
@@ -330,10 +329,8 @@ _build_lock = Lock()
 def _run_build_subprocess(name: str, job: dict) -> None:
     """Worker thread: build the .gsq cache for one sequence.
 
-    Single pass since 2026-05-22: pack_splats.py now reads frame_*.ply
-    directly. The .npz intermediate is gone from the build path — old
-    .npz files on disk still play (fallback paths in viser_headless +
-    SPA), but new builds only emit .gsq.
+    pack_splats.py reads frame_*.ply directly and emits the .gsq splat
+    cache (no intermediate format).
     """
     gsq_tool = PKG_ROOT / "server" / "tools" / "pack_splats.py"
     try:
@@ -363,11 +360,11 @@ def _run_build_subprocess(name: str, job: dict) -> None:
 
 
 @router.post("/{name}/cache/build")
-def build_viser_cache(name: str) -> dict:
-    """Kick off the viser .npz build for `name` as a background subprocess.
+def build_splat_cache(name: str) -> dict:
+    """Kick off the .gsq splat-cache build for `name` as a background subprocess.
 
     Idempotent: if a build is already running for this sequence, returns
-    the existing job state without spawning a duplicate. If the .npz
+    the existing job state without spawning a duplicate. If the .gsq
     already exists on disk, returns `{state: "done"}` immediately.
 
     Poll `GET /cache/build-status/{name}` for progress.
@@ -378,7 +375,7 @@ def build_viser_cache(name: str) -> dict:
         raise HTTPException(404, f"sequence not found: {name}")
 
     # Fast path: cache already on disk.
-    if (_VISER_CACHE / f"{name}.gsq").is_file():
+    if (_SPLAT_CACHE / f"{name}.gsq").is_file():
         return {"name": name, "state": "done",
                 "note": "cache already exists on disk"}
 
@@ -403,7 +400,7 @@ def build_viser_cache(name: str) -> dict:
 
 
 @router.get("/{name}/cache/build-status")
-def get_viser_cache_build_status(name: str) -> dict:
+def get_splat_cache_build_status(name: str) -> dict:
     """Poll the build job for `name`.
 
     States:
@@ -419,7 +416,7 @@ def get_viser_cache_build_status(name: str) -> dict:
         if job is not None:
             return dict(job)
     # No job tracked → reflect disk state.
-    if (_VISER_CACHE / f"{name}.gsq").is_file():
+    if (_SPLAT_CACHE / f"{name}.gsq").is_file():
         return {"name": name, "state": "done", "note": "cache exists (no job tracked)"}
     return {"name": name, "state": "idle"}
 
@@ -431,7 +428,7 @@ def get_frames_bin_cache(name: str):
     Mirror of `server/tools/pack_sequence.py`'s output, used by the client
     Points-mode WS server (`frontend/python/local_stream.py`) for fast local
     streaming without per-frame ply reads. Same range-resume semantics
-    as the viser cache endpoint."""
+    as the splat cache endpoint."""
     if not Sequence.exists(name):
         raise HTTPException(404, f"sequence not found: {name}")
     path = lib.SEQUENCES_DIR / name / "frames.bin"

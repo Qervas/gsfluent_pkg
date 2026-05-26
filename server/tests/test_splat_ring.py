@@ -1,8 +1,8 @@
 """Unit tests for frontend/python/splat_ring.py — sliding-window decoder.
 
 Builds a small synthetic .gsq on disk per test and drives a SplatRing
-against it. Avoids importing viser/uvicorn by loading splat_ring directly
-from its source path (same trick test_viser_headless_cell_lru.py uses).
+against it. Loads splat_ring directly
+from its source path.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# ----- import splat_ring without dragging viser/uvicorn in --------------------
+# ----- import splat_ring directly from its source path --------------------
 
 _RING_PATH = (
     Path(__file__).resolve().parents[2]

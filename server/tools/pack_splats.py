@@ -26,7 +26,7 @@ _BOOTSTRAP_ROOT = Path(__file__).resolve().parents[2]
 if str(_BOOTSTRAP_ROOT / "server") not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT / "server"))
 
-from gsfluent._paths import SEQUENCES, CACHE_VISER  # noqa: E402
+from gsfluent._paths import SEQUENCES, CACHE_SPLATS  # noqa: E402
 from gsfluent.core.codecs.gsq import GSQCodec, parse_header_bytes  # noqa: E402
 from gsfluent.core.codecs.gsq_prune import prune_to_retention  # noqa: E402
 from gsfluent.observability.jsonlog import StdlibJSONEmitter  # noqa: E402
@@ -92,7 +92,7 @@ def main() -> int:
                    help="rebuild even if .gsq is newer than the source frames")
     args = p.parse_args()
 
-    CACHE_VISER.mkdir(parents=True, exist_ok=True)
+    CACHE_SPLATS.mkdir(parents=True, exist_ok=True)
 
     if args.sequence:
         seq_names = [args.sequence]
@@ -116,7 +116,7 @@ def main() -> int:
 
     n_built = n_skipped = n_failed = 0
     for name in seq_names:
-        out = CACHE_VISER / f"{name}.gsq"
+        out = CACHE_SPLATS / f"{name}.gsq"
         frames_dir = SEQUENCES / name / "frames"
         if not frames_dir.is_dir():
             print(f"[pack_splats] {name}: no frames/ — skip")

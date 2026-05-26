@@ -872,7 +872,7 @@ List every sequence in the library, newest first by `created_at`.
 | `created_at` | string\|null | ISO-8601 UTC. |
 | `converted_from` | string\|null | `"y-up"` iff frames were converted at import. |
 | `is_broken` | bool | True iff the imported `frames/` symlink is dangling. |
-| `cache.splats_gsq_mtime` | float\|null | mtime of `work/cache/viser/<name>.gsq`, or `null` if absent. |
+| `cache.splats_gsq_mtime` | float\|null | mtime of `work/cache/splats/<name>.gsq`, or `null` if absent. |
 | `cache.splats_gsq_bytes` | int\|null | Size of the same file. |
 | `cache.frames_bin_mtime` | float\|null | mtime of `library/sequences/<name>/frames.bin`. |
 | `cache.frames_bin_bytes` | int\|null | Size of `frames.bin`. |

@@ -1,6 +1,6 @@
 """Filesystem layout — single source of truth.
 
-Anything that wants to know where the repo, the library, the viser cache,
+Anything that wants to know where the repo, the library, the splat cache,
 or a per-sequence dir lives must import from here. Don't re-derive paths
 with `Path(__file__).resolve().parents[N]` elsewhere; the offset changes
 the moment a file moves, and it has bitten us before.
@@ -13,7 +13,7 @@ from pathlib import Path
 PKG_ROOT = Path(__file__).resolve().parents[2]
 
 WORK = PKG_ROOT / "work"
-CACHE_VISER = WORK / "cache" / "viser"
+CACHE_SPLATS = WORK / "cache" / "splats"
 LIBRARY = WORK / "library"
 SEQUENCES = LIBRARY / "sequences"
 LOGS = WORK / "logs"
@@ -24,7 +24,7 @@ SERVER_RECIPES = SERVER_DIR / "recipes"
 
 
 def gsq_for(name: str) -> Path:
-    return CACHE_VISER / f"{name}.gsq"
+    return CACHE_SPLATS / f"{name}.gsq"
 
 
 def sequence_dir_for(name: str) -> Path:

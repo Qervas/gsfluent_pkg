@@ -110,7 +110,7 @@ def _ensure_work_dirs(cfg: AppConfig) -> None:
     """Create the on-disk directory layout the backend expects."""
     (cfg.work_dir / "_state" / "runs").mkdir(parents=True, exist_ok=True)
     (cfg.work_dir / "library" / "sequences").mkdir(parents=True, exist_ok=True)
-    (cfg.work_dir / "cache" / "viser").mkdir(parents=True, exist_ok=True)
+    (cfg.work_dir / "cache" / "splats").mkdir(parents=True, exist_ok=True)
     (cfg.work_dir / "uploads").mkdir(parents=True, exist_ok=True)
 
 
@@ -148,7 +148,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
     obs.emit("backend.boot", work_dir=str(cfg.work_dir), sim_home=str(cfg.sim_home))
 
     # Concrete impls.
-    storage: Storage = FilesystemStorage(root=cfg.work_dir / "cache" / "viser")
+    storage: Storage = FilesystemStorage(root=cfg.work_dir / "cache" / "splats")
     cache_codec: CacheCodec = GSQCodec()
     fuser: Fuser = KNNKabschFuser(k=8)
     state_store = RunStateStore(state_dir=cfg.work_dir / "_state" / "runs")

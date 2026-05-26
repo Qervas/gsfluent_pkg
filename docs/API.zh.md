@@ -804,7 +804,7 @@ curl -OJ "${BACKEND_URL}/api/runs/cluster_6_15_eq_v3/frame/0.ply"
 | `created_at` | string\|null | ISO-8601 UTC。 |
 | `converted_from` | string\|null | import 时做了坐标转换就是 `"y-up"`。 |
 | `is_broken` | bool | 导入 sequence 的 `frames/` 符号链接悬挂时为 true。 |
-| `cache.splats_gsq_mtime` | float\|null | `work/cache/viser/<name>.gsq` 的 mtime,文件不存在就是 `null`。 |
+| `cache.splats_gsq_mtime` | float\|null | `work/cache/splats/<name>.gsq` 的 mtime,文件不存在就是 `null`。 |
 | `cache.splats_gsq_bytes` | int\|null | 同上,文件大小。 |
 | `cache.frames_bin_mtime` | float\|null | `library/sequences/<name>/frames.bin` 的 mtime。 |
 | `cache.frames_bin_bytes` | int\|null | 同上,文件大小。 |

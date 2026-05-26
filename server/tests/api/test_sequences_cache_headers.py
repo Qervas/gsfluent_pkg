@@ -3,7 +3,7 @@
 The .gsq cache for a sequence is treated as immutable: once produced for a
 given (name, size, mtime), the bytes never change. The server emits a weak
 ETag of the form '"<size>-<mtime_int>"' and Cache-Control: public, immutable,
-max-age=31536000. Clients (viser_headless) send If-None-Match on a refresh
+max-age=31536000. Clients send If-None-Match on a refresh
 to skip the body entirely (-> 304), or Range on a resume (-> 206).
 """
 from __future__ import annotations
@@ -22,14 +22,14 @@ from gsfluent.core import library as lib
 @pytest.fixture
 def cache_setup(client, tmp_path: Path, monkeypatch) -> dict:
     """Stand up a tmp library with one sequence directory and a synthetic
-    .gsq cache file under work/cache/viser/.
+    .gsq cache file under work/cache/splats/.
 
     The .gsq body is arbitrary bytes — these tests cover HTTP semantics,
     not codec correctness. The route only cares about (a) sequence exists
-    in library, (b) <name>.gsq exists in _VISER_CACHE.
+    in library, (b) <name>.gsq exists in _SPLAT_CACHE.
     """
     sequences_dir = tmp_path / "library" / "sequences"
-    cache_dir = tmp_path / "work" / "cache" / "viser"
+    cache_dir = tmp_path / "work" / "cache" / "splats"
     sequences_dir.mkdir(parents=True)
     cache_dir.mkdir(parents=True)
 
@@ -40,7 +40,7 @@ def cache_setup(client, tmp_path: Path, monkeypatch) -> dict:
     gsq_path.write_bytes(body)
 
     monkeypatch.setattr(lib, "SEQUENCES_DIR", sequences_dir)
-    monkeypatch.setattr(seq_api, "_VISER_CACHE", cache_dir)
+    monkeypatch.setattr(seq_api, "_SPLAT_CACHE", cache_dir)
 
     return {
         "client": client,
@@ -134,7 +134,7 @@ def test_range_request_returns_206_partial_content(cache_setup) -> None:
 
 def test_range_request_open_ended_to_eof(cache_setup) -> None:
     """`Range: bytes=N-` (no end) means resume to EOF — the exact pattern
-    the viser_headless client sends when a .partial exists."""
+    the client sends when a .partial exists."""
     n = 4096
     r = cache_setup["client"].get(
         f"/api/sequences/{cache_setup['name']}/cache/splats.gsq",

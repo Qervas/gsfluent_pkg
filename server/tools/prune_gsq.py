@@ -1,11 +1,11 @@
 """Analyze + prune .gsq splat sequences.
 
   # show the retention curve (no file written) — find the safe ratio
-  python server/tools/prune_gsq.py analyze work/cache/viser/<name>.gsq
+  python server/tools/prune_gsq.py analyze work/cache/splats/<name>.gsq
 
   # prune to a target retention (keep that fraction of total significance)
-  python server/tools/prune_gsq.py prune work/cache/viser/<name>.gsq \
-      --retention 0.995 --out work/cache/viser/<name>.pruned.gsq
+  python server/tools/prune_gsq.py prune work/cache/splats/<name>.gsq \
+      --retention 0.995 --out work/cache/splats/<name>.pruned.gsq
 
   # prune to an explicit keep-count
   python server/tools/prune_gsq.py prune <in> --keep 250000 --out <out>

@@ -280,7 +280,7 @@ work/library/sequences/<name>/
 
 ```
 work/cache/
-  ├── viser/<name>.gsq           ← in-browser playback (dir name is vestigial)
+  ├── splats/<name>.gsq           ← in-browser playback
   └── vkgs_yup/<name>/frames/    ← rotated copies for the vkgs native viewer
 ```
 

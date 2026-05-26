@@ -25,7 +25,7 @@ def test_range_206_returns_byte_suffix(tmp_path: Path, monkeypatch) -> None:
     from gsfluent.core import library as lib
     from gsfluent.server import create_app
 
-    cache_dir = tmp_path / "work" / "cache" / "viser"
+    cache_dir = tmp_path / "work" / "cache" / "splats"
     cache_dir.mkdir(parents=True)
     seq_name = "demo"
     gsq_path = cache_dir / f"{seq_name}.gsq"
@@ -34,7 +34,7 @@ def test_range_206_returns_byte_suffix(tmp_path: Path, monkeypatch) -> None:
     sequences_dir = tmp_path / "library" / "sequences"
     (sequences_dir / seq_name).mkdir(parents=True)
     monkeypatch.setattr(lib, "SEQUENCES_DIR", sequences_dir)
-    monkeypatch.setattr(seq_api, "_VISER_CACHE", cache_dir)
+    monkeypatch.setattr(seq_api, "_SPLAT_CACHE", cache_dir)
 
     client = TestClient(create_app())
 
@@ -57,7 +57,7 @@ def test_range_resume_round_trip(tmp_path: Path, monkeypatch) -> None:
     from gsfluent.core import library as lib
     from gsfluent.server import create_app
 
-    cache_dir = tmp_path / "work" / "cache" / "viser"
+    cache_dir = tmp_path / "work" / "cache" / "splats"
     cache_dir.mkdir(parents=True)
     seq_name = "demo"
     gsq_path = cache_dir / f"{seq_name}.gsq"
@@ -66,7 +66,7 @@ def test_range_resume_round_trip(tmp_path: Path, monkeypatch) -> None:
     sequences_dir = tmp_path / "library" / "sequences"
     (sequences_dir / seq_name).mkdir(parents=True)
     monkeypatch.setattr(lib, "SEQUENCES_DIR", sequences_dir)
-    monkeypatch.setattr(seq_api, "_VISER_CACHE", cache_dir)
+    monkeypatch.setattr(seq_api, "_SPLAT_CACHE", cache_dir)
 
     client = TestClient(create_app())
 
@@ -94,7 +94,7 @@ def test_range_ignored_returns_200_full_body(tmp_path: Path, monkeypatch) -> Non
     from gsfluent.core import library as lib
     from gsfluent.server import create_app
 
-    cache_dir = tmp_path / "work" / "cache" / "viser"
+    cache_dir = tmp_path / "work" / "cache" / "splats"
     cache_dir.mkdir(parents=True)
     seq_name = "demo"
     gsq_path = cache_dir / f"{seq_name}.gsq"
@@ -103,7 +103,7 @@ def test_range_ignored_returns_200_full_body(tmp_path: Path, monkeypatch) -> Non
     sequences_dir = tmp_path / "library" / "sequences"
     (sequences_dir / seq_name).mkdir(parents=True)
     monkeypatch.setattr(lib, "SEQUENCES_DIR", sequences_dir)
-    monkeypatch.setattr(seq_api, "_VISER_CACHE", cache_dir)
+    monkeypatch.setattr(seq_api, "_SPLAT_CACHE", cache_dir)
 
     client = TestClient(create_app())
 

@@ -46,7 +46,7 @@ _FP16_COV_FLOOR_SQRT = np.float32(np.sqrt(6.1e-5))  # ~7.81e-3
 
 def parse_header_bytes(buf: bytes) -> dict:
     """Parse the 80-byte header + frame index from a .gsq byte buffer.
-    Mirror of viser_headless.parse_gsq_header but server-side."""
+    Parse the .gsq header (server-side)."""
     if buf[:4] != b"GSQ1":
         raise ValueError(f"not a .gsq: magic={buf[:4]!r}")
     version, n_splats, n_frames = struct.unpack_from("<III", buf, 4)

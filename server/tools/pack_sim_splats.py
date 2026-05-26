@@ -3,7 +3,7 @@
 Counterpart to pack_splats.py: instead of reading the fused
 frame_*.ply (683k splats with full 3DGS attrs), this reads the sim's
 own sim_*.ply (200k particles with just xyz) and produces a .gsq that
-viser can render. Output stem is "<seq>_rawsim" so it shows up
+the in-browser renderer can render. Output stem is "<seq>_rawsim" so it shows up
 alongside the fused sequence and you can click between them.
 
 The point: visualize what the MPM solver actually emits, so you can
@@ -47,10 +47,10 @@ _BOOTSTRAP_ROOT = Path(__file__).resolve().parents[2]
 if str(_BOOTSTRAP_ROOT / "server") not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT / "server"))
 
-from gsfluent._paths import PKG_ROOT, SEQUENCES, CACHE_VISER  # noqa: E402
+from gsfluent._paths import PKG_ROOT, SEQUENCES, CACHE_SPLATS  # noqa: E402
 
 REPO = PKG_ROOT
-CACHE = CACHE_VISER
+CACHE = CACHE_SPLATS
 LIB = SEQUENCES
 
 MAGIC = b"GSQ1"

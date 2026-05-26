@@ -90,7 +90,7 @@ def _write_minimal_gsq(path: Path) -> bytes:
 @pytest.fixture
 def real_gsq(tmp_path: Path) -> dict:
     """Stand up server side cache + a real .gsq file in it."""
-    cache_dir = tmp_path / "work" / "cache" / "viser"
+    cache_dir = tmp_path / "work" / "cache" / "splats"
     cache_dir.mkdir(parents=True)
     seq_name = "demo"
     gsq_path = cache_dir / f"{seq_name}.gsq"
@@ -111,7 +111,7 @@ def test_second_sync_uses_head_and_skips_body(real_gsq, tmp_path: Path, monkeypa
     sequences_dir = tmp_path / "library" / "sequences"
     (sequences_dir / real_gsq["name"]).mkdir(parents=True)
     monkeypatch.setattr(lib, "SEQUENCES_DIR", sequences_dir)
-    monkeypatch.setattr(seq_api, "_VISER_CACHE", real_gsq["cache_dir"])
+    monkeypatch.setattr(seq_api, "_SPLAT_CACHE", real_gsq["cache_dir"])
 
     client = TestClient(create_app())
 

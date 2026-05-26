@@ -192,7 +192,7 @@ Architecture details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## API reference
 
-The backend exposes 31 REST endpoints + 1 WebSocket route:
+The backend exposes 29 REST endpoints + 1 WebSocket route:
 
 - English: [`docs/API.md`](docs/API.md)
 - Chinese: [`docs/API.zh.md`](docs/API.zh.md)

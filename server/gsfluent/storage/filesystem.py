@@ -31,7 +31,7 @@ class FilesystemStorage:
 
     Keys are POSIX-style relative paths. Examples:
         "demo.gsq"
-        "cache/viser/demo.gsq"
+        "cache/splats/demo.gsq"
 
     Construction:
         storage = FilesystemStorage(root=Path("/var/lib/gsfluent/cache"))
