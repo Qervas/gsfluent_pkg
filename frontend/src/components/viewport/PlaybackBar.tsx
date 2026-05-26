@@ -26,25 +26,24 @@ export function PlaybackBar() {
   const { isSequence } = useActiveCell();
   const simState = useStore((s) => s.simState);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
-  const nFrames = useStore((s) => s.viserState.n_frames);
-  // The scrubber shows where viser is actually rendering, not where
+  const nFrames = useStore((s) => s.playbackState.n_frames);
+  // The scrubber shows where the renderer is actually painting, not where
   // React intends to be — otherwise the bar leads the splat whenever
-  // /set takes more than 1/fpsHint to land, and the user perceives the
-  // bar and the building as on different clocks.
+  // a frame takes more than 1/fpsHint to decode, and the user perceives
+  // the bar and the splat as on different clocks.
   //
-  // Two related quantities live in viserState:
-  //   - `frame` = SPA's desired playback cursor (echoed back from /set;
-  //     this is the SPA's wall-clock-driven advance target).
-  //   - `pushed_frame` = the frame the render loop has ACTUALLY pushed
-  //     to viser. During continuous playback the no-skip render loop
-  //     only ever advances pushed by 1 per tick; if decode lags, pushed
-  //     trails frame.
+  // Two related quantities live in playbackState:
+  //   - `frame` = SPA's desired playback cursor (wall-clock-driven advance
+  //     target; echoed back from the render loop after the GPU write).
+  //   - `pushed_frame` = the frame the render loop has ACTUALLY pushed to
+  //     the GPU. During continuous playback the no-skip loop only ever
+  //     advances pushed by 1 per tick; if decode lags, pushed trails frame.
   //
   // We display pushed_frame as the primary cursor (so the bar never
   // leads the splats during a stutter), falling back to `frame` when
   // pushed_frame is -1 (no frame pushed yet, initial paint pending).
-  const viserFrame = useStore((s) => s.viserState.frame);
-  const pushedFrame = useStore((s) => s.viserState.pushed_frame);
+  const viserFrame = useStore((s) => s.playbackState.frame);
+  const pushedFrame = useStore((s) => s.playbackState.pushed_frame);
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
   const speedX = useStore((s) => s.speedX);

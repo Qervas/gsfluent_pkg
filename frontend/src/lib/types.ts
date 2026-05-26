@@ -72,6 +72,15 @@ export type BCFieldSpec = {
 export type BCSchemas = Record<string, BCFieldSpec[]>;
 export type MaterialDefaults = Record<string, Record<string, number>>;
 
+// Playback cursor published into the store by SplatScene. Distinct from the
+// diag-poll ViserState below (which carries the full viser /state shape).
+export type PlaybackState = {
+  cell: string | null;
+  frame: number;
+  n_frames: number;
+  pushed_frame: number;
+};
+
 // Diagnostics — one row per moving part of the split-topology dev stack.
 // Surfaced through the StatusPill in the top bar so the user sees which
 // piece is down when something silently breaks. Shapes mirror what each

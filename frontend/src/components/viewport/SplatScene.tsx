@@ -12,7 +12,7 @@ import type { GsqFrame, GsqStatic } from "@/lib/gsq";
 
 /** In-browser splat renderer for the active cell. Sequence cells stream the
  *  .gsq (worker) and animate via per-frame setSplat. Publishes n_frames + the
- *  rendered cursor into viserState so PlaybackBar/Driver work (no-skip:
+ *  rendered cursor into playbackState so PlaybackBar/Driver work (no-skip:
  *  pushed_frame set after the GPU write). */
 export function SplatScene() {
   const { activeCell, isSequence, isModel } = useActiveCell();
@@ -22,7 +22,7 @@ export function SplatScene() {
   const url = name ? splatsGsqUrl(name) : null;
 
   const currentFrameIdx = useStore((s) => s.currentFrameIdx);
-  const setViserState = useStore((s) => s.setViserState);
+  const setPlaybackState = useStore((s) => s.setPlaybackState);
   const setFpsHint = useStore((s) => s.setFpsHint);
 
   const scene = useThreeScene();
@@ -51,8 +51,8 @@ export function SplatScene() {
     }
     packed.numSplats = st.nSplats;
     packed.needsUpdate = true;
-    const s = useStore.getState().viserState;
-    setViserState({ ...s, frame: idx, pushed_frame: idx });
+    const s = useStore.getState().playbackState;
+    setPlaybackState({ ...s, frame: idx, pushed_frame: idx });
   }
 
   const player = useGsqPlayer(url, writeFrame);
@@ -62,7 +62,7 @@ export function SplatScene() {
     const st = player.static;
     staticRef.current = st;
     setFpsHint(st.fpsHint);
-    setViserState({ cell: name, frame: 0, n_frames: st.nFrames, pushed_frame: -1 });
+    setPlaybackState({ cell: name, frame: 0, n_frames: st.nFrames, pushed_frame: -1 });
 
     const packed = new PackedSplats({ maxSplats: st.nSplats });
     packedRef.current = packed;
@@ -92,7 +92,7 @@ export function SplatScene() {
     if (!isModel || !modelPath) return;
     const mesh = new SplatMesh({ url: modelPlyUrl(modelPath) });
     scene.add(mesh);
-    setViserState({ cell: activeCell?.name ?? null, frame: 0, n_frames: 0, pushed_frame: 0 });
+    setPlaybackState({ cell: activeCell?.name ?? null, frame: 0, n_frames: 0, pushed_frame: 0 });
     let alive = true;
     void mesh.initialized.then((loadedMesh) => {
       if (!alive) return;

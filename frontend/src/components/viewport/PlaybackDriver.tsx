@@ -23,8 +23,8 @@ export function PlaybackDriver(): null {
   const loop = useStore((s) => s.loop);
   const speedX = useStore((s) => s.speedX);
   const fpsHint = useStore((s) => s.fpsHint);
-  const nFrames = useStore((s) => s.viserState.n_frames);
-  const viserFrame = useStore((s) => s.viserState.frame);
+  const nFrames = useStore((s) => s.playbackState.n_frames);
+  const viserFrame = useStore((s) => s.playbackState.frame);
 
   useEffect(() => {
     if (!playing || scrubbing) return;
@@ -42,7 +42,7 @@ export function PlaybackDriver(): null {
         // scrubs and external setCurrentFrame calls aren't lost.
         const st = useStore.getState();
         const cur = st.currentFrameIdx;
-        const lastIdx = st.viserState.n_frames - 1;
+        const lastIdx = st.playbackState.n_frames - 1;
         if (lastIdx < 1) return;
         const next = cur + 1;
         if (next > lastIdx) {
