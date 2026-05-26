@@ -115,8 +115,6 @@ def _sequence_dict(seq: Sequence, *, active_names: set[str] | None = None) -> di
     d["cache"] = {
         "splats_gsq_mtime": _stat_mtime(_VISER_CACHE / f"{seq.name}.gsq"),
         "splats_gsq_bytes": _stat_size(_VISER_CACHE / f"{seq.name}.gsq"),
-        "base_gsq_mtime": _stat_mtime(_VISER_CACHE / f"{seq.name}.base.gsq"),
-        "base_gsq_bytes": _stat_size(_VISER_CACHE / f"{seq.name}.base.gsq"),
         "frames_bin_mtime": _stat_mtime(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
         "frames_bin_bytes": _stat_size(lib.SEQUENCES_DIR / seq.name / "frames.bin"),
     }
@@ -254,22 +252,18 @@ def _gsq_etag(size: int, mtime: float) -> str:
 def _serve_cache_gsq(name: str, filename: str, request: Request) -> Response:
     """Serve <filename> from the viser cache with weak ETag + Range + 304.
 
-    `filename` is the on-disk basename (e.g. f"{name}.gsq" or f"{name}.base.gsq").
-    Shared by the full and base-layer routes. 404 if the file is absent.
+    `filename` is the on-disk basename (e.g. f"{name}.gsq").
+    404 if the file is absent.
     """
     if not Sequence.exists(name):
         raise HTTPException(404, f"sequence not found: {name}")
     path = _VISER_CACHE / filename
     if not path.is_file():
-        if not filename.endswith(".base.gsq"):
-            # Splats route: include the build hint so existing tooling messages
-            # are preserved.
-            raise HTTPException(
-                404,
-                f".gsq not built for '{name}'. Run "
-                f"`python server/tools/pack_splats.py {name}` on the server.",
-            )
-        raise HTTPException(404, f"cache artifact not built: {filename}")
+        raise HTTPException(
+            404,
+            f".gsq not built for '{name}'. Run "
+            f"`python server/tools/pack_splats.py {name}` on the server.",
+        )
     target = path.resolve()
     cache_root = _VISER_CACHE.resolve()
     try:
@@ -311,16 +305,6 @@ def get_splats_gsq(name: str, request: Request):
     Falls through to 404 with a build hint if the .gsq doesn't exist yet.
     """
     return _serve_cache_gsq(name, f"{name}.gsq", request)
-
-
-@router.get("/{name}/cache/base.gsq")
-def get_base_gsq(name: str, request: Request):
-    """Serve the LOD base layer (top-K significant splats) if it exists.
-
-    Same Range + ETag machinery as splats.gsq. 404 when no base layer was
-    packed — the client falls back to full-only streaming.
-    """
-    return _serve_cache_gsq(name, f"{name}.base.gsq", request)
 
 
 # ── cache build (on-demand) ─────────────────────────────────────────────────
