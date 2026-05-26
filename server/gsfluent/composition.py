@@ -16,18 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-import platform
-import shutil
-import socket
-import subprocess
 import sys
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from gsfluent._paths import PKG_ROOT
 from gsfluent.config import AppConfig
 from gsfluent.core.codecs.gsq import GSQCodec
 from gsfluent.core.fusers.knn_kabsch import KNNKabschFuser
@@ -121,70 +115,14 @@ def _ensure_work_dirs(cfg: AppConfig) -> None:
 
 
 def _add_legacy_introspection_routes(app: FastAPI) -> None:
-    """Attach the introspection routes the original server.create_app() served.
+    """Attach the root index route the original server.create_app() served.
 
-    Preserved verbatim so the existing test suite + deployment handshake
-    flows (gpu-check, system info, root index) don't regress when the
-    composition root takes over. Health route now lives in
-    gsfluent.api.health and is mounted separately in build_app() — kept
-    out of this helper because it needs the AppConfig + RunStateStore
-    captured at composition time.
+    Preserved so the existing test suite + deployment handshake flows
+    (root index) don't regress when the composition root takes over.
+    Health route now lives in gsfluent.api.health and is mounted
+    separately in build_app() — kept out of this helper because it needs
+    the AppConfig + RunStateStore captured at composition time.
     """
-
-    @app.get("/api/gpu-check")
-    async def gpu_check() -> dict:
-        """Probe the host's NVIDIA GPU(s) via nvidia-smi. Used as a
-        deployment-time handshake: confirms (1) nvidia-smi is reachable
-        from this process (so the container was started with `--gpus all`
-        or the host has the CUDA toolkit on PATH), and (2) at least one
-        GPU is visible. Returns the raw CSV rows for the caller to
-        inspect."""
-        smi = shutil.which("nvidia-smi")
-        if smi is None:
-            return {
-                "ok": False,
-                "error": "nvidia-smi not on PATH",
-                "hint": (
-                    "If running in Docker: was the container started with "
-                    "`--gpus all` and is the nvidia-container-toolkit "
-                    "installed on the host? On bare metal: install the "
-                    "NVIDIA driver + CUDA toolkit so nvidia-smi is on PATH."
-                ),
-            }
-        try:
-            # Note: `cuda_version` was historically queryable but newer
-            # drivers (565+) reject it. Stick to fields available in
-            # both old and new nvidia-smi.
-            out = subprocess.check_output(
-                [smi,
-                 "--query-gpu=index,name,driver_version,memory.total,memory.free",
-                 "--format=csv,noheader"],
-                text=True, timeout=5,
-            ).strip()
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "nvidia-smi timed out (>5s)"}
-        except subprocess.CalledProcessError as e:
-            return {"ok": False, "error": f"nvidia-smi exit {e.returncode}",
-                    "stderr": (e.stderr or "").strip()}
-        return {
-            "ok": True,
-            "gpus": [line.strip() for line in out.splitlines() if line.strip()],
-        }
-
-    @app.get("/api/system")
-    async def system_info() -> dict:
-        """Container/host introspection. Useful before submitting the
-        first sim run — confirms the backend is the version + env the
-        deployer expects. No secrets exposed."""
-        return {
-            "hostname":      socket.gethostname(),
-            "platform":      platform.platform(),
-            "python":        sys.version.split()[0],
-            "pkg_root":      str(PKG_ROOT),
-            "sim_home":      os.environ.get("GSFLUENT_SIM_HOME", "<default>"),
-            "sim_python":    os.environ.get("GSFLUENT_SIM_PYTHON", "<default>"),
-            "in_container":  Path("/.dockerenv").exists(),
-        }
 
     @app.get("/")
     async def root() -> dict:
@@ -192,7 +130,7 @@ def _add_legacy_introspection_routes(app: FastAPI) -> None:
             "service": "gsfluent",
             "version": "0.1.0",
             "hint": "API-only backend. The SPA runs locally — see README.",
-            "endpoints": ["/api/health", "/api/system", "/api/recipes", "/docs"],
+            "endpoints": ["/api/health", "/api/recipes", "/docs"],
         }
 
 
@@ -317,9 +255,9 @@ def build_app(cfg: AppConfig) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Legacy introspection routes (health, gpu-check, system, root index).
-    # These predate the Phase 1 refactor; preserved verbatim so existing
-    # deployment handshakes and the test suite keep working.
+    # Legacy introspection route (root index). Predates the Phase 1
+    # refactor; preserved so existing deployment handshakes and the test
+    # suite keep working. (Health lives in gsfluent.api.health.)
     _add_legacy_introspection_routes(app)
 
     # Mount existing routers (unchanged in Phase 1; Phase 3+ will rewire
