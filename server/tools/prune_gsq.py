@@ -26,8 +26,7 @@ if str(_BOOTSTRAP / "server") not in sys.path:
 
 from gsfluent.core.codecs.gsq import parse_header_bytes  # noqa: E402
 from gsfluent.core.codecs.gsq_prune import (  # noqa: E402
-    compute_significance, select_keep_indices, retention_curve, prune_gsq_bytes,
-    prune_to_retention, prune_to_count,
+    compute_significance, retention_curve, prune_to_retention, prune_to_count,
 )
 
 

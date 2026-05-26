@@ -52,7 +52,7 @@ def _read_window_size_from_env(default: int = 32) -> int:
 
 
 def _parse_gsq_header(buf: bytes) -> dict:
-    """Inline copy of viser_headless.parse_gsq_header.
+    """Parse the 80-byte .gsq header + frame index.
 
     Vendored here so the ring module has no upward dependency on
     viser_headless (which itself imports viser/uvicorn).
@@ -149,7 +149,7 @@ def _dequantize_frame(
     bbox_min: np.ndarray,
     span: np.ndarray,
 ) -> FrameTuple:
-    """Inline copy of viser_headless._gsq_dequantize_frame.
+    """Dequantize a .gsq frame payload (vendored; no dependency on the server codec).
 
     Composes decompress + dequant. Valid for v1 chunks and v2 keyframes
     (both store absolute int16). v2 delta frames must NOT go through here —
@@ -560,7 +560,6 @@ class SplatRing:
         then dequant. The reconstructed absolute int16 is stashed in
         ``self._last_abs`` so the NEXT sequential frame is one decompress.
         """
-        n_splats = self._static["n_splats"]
         bbox_min = self._static["bbox_min"]
 
         if self._header["version"] == 1:
