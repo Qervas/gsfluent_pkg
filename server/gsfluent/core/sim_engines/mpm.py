@@ -12,6 +12,7 @@ core/run_manager.py (the outer asyncio.wait_for + killpg ladder).
 This engine emits structured events through the on_event EventEmitter:
 
   sim.preflight_ok
+  sim.gpu_autopicked  (gpu_index, util, free_mib)  — auto-GPU selection
   sim.spawned         (pid, pgid, argv)
   sim.completed       (returncode, duration_sec, n_frames)
   fuse.spawned        (pid, argv)
@@ -33,6 +34,8 @@ import time
 from asyncio.subprocess import create_subprocess_exec as _spawn  # alias for grep-safety
 from dataclasses import dataclass
 from pathlib import Path
+
+from collections.abc import Callable
 
 import yaml
 
@@ -297,10 +300,17 @@ class MPMSimulationEngine:
             particles=particles,
         )
 
+        # Auto-select the least-busy GPU on a shared box, overriding the
+        # static .env CUDA_VISIBLE_DEVICES pin for this sim only. None ->
+        # inherit the pin unchanged (every failure / disabled path).
+        gpu_overlay = _resolve_sim_gpu_env(on_event=on_event)
+        sim_env = {**os.environ, **gpu_overlay} if gpu_overlay else None
+
         t0 = time.monotonic()
         sim_proc = await self._spawn_in_new_pg(
             argv=sim_argv,
             cwd=str(self._sim_home),
+            env=sim_env,
         )
         pgid = os.getpgid(sim_proc.pid)
         pid_starttime = _read_pid_starttime(sim_proc.pid)
@@ -470,7 +480,10 @@ class MPMSimulationEngine:
         ]
 
     async def _spawn_in_new_pg(
-        self, argv: list[str], cwd: str
+        self,
+        argv: list[str],
+        cwd: str,
+        env: dict[str, str] | None = None,
     ) -> asyncio.subprocess.Process:
         """Launch the sim child in a brand-new process group.
 
@@ -479,6 +492,12 @@ class MPMSimulationEngine:
         of a fresh session AND process group. Any further children it
         spawns inherit that group, so killpg(pgid, SIG) reaches all of
         them with a single call.
+
+        ``env`` is the child's full environment. When None the child
+        inherits the parent's environment unchanged (the historical
+        behaviour — including the static .env CUDA_VISIBLE_DEVICES pin).
+        The sim stage passes ``{**os.environ, "CUDA_VISIBLE_DEVICES": "N"}``
+        to override the pin for an auto-selected GPU on a shared box.
         """
         return await _spawn(
             *argv,
@@ -486,10 +505,184 @@ class MPMSimulationEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=env,
         )
 
 
 # ---------- module-level helpers -----------------------------------------
+
+
+# ---------- auto-GPU selection -------------------------------------------
+#
+# On a shared multi-GPU box the backend's CUDA_VISIBLE_DEVICES is pinned
+# once in .env at startup. That repeatedly landed a fresh sim on a GPU that
+# had since gone busy, where it crawled ~10x or diverged. Instead of trusting
+# the static pin, we query nvidia-smi at *spawn* time and pick the least-busy
+# GPU that still has comfortable free memory, overriding CUDA_VISIBLE_DEVICES
+# for that one sim subprocess only. Any failure falls back to the inherited
+# pin (see _resolve_sim_gpu_env) so GPU selection can never crash a run.
+
+# Default free-memory floor. The sim itself uses ~3 GB, but on a shared box we
+# want headroom so a co-tenant's allocation spike doesn't OOM us mid-run.
+_DEFAULT_MIN_FREE_MIB = 20 * 1024  # 20 GiB
+
+
+def pick_free_gpu(nvidia_smi_csv_text: str, min_free_mib: int) -> int | None:
+    """Pick the least-busy GPU index that has >= min_free_mib free memory.
+
+    Pure function over the text of:
+
+        nvidia-smi --query-gpu=index,utilization.gpu,memory.free \\
+                   --format=csv,noheader,nounits
+
+    which yields one ``<index>, <util%>, <free_MiB>`` row per GPU, e.g.::
+
+        0, 36, 57214
+        7, 100, 47483
+
+    Selection: among GPUs whose free memory is at least ``min_free_mib``,
+    return the index with the lowest utilization. Ties on utilization break
+    toward the GPU with the most free memory, then the lowest index — fully
+    deterministic. Returns ``None`` when no GPU qualifies (all busy/full) or
+    the input is empty/malformed beyond recovery. Individual unparseable rows
+    are skipped, not fatal, so one garbled line never discards the whole query.
+    """
+    candidates: list[tuple[int, int, int]] = []  # (util, -free, index) sort key
+    for line in nvidia_smi_csv_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [c.strip() for c in line.split(",")]
+        if len(parts) != 3:
+            continue
+        try:
+            index = int(parts[0])
+            util = int(parts[1])
+            free_mib = int(parts[2])
+        except (ValueError, TypeError):
+            continue
+        if free_mib < min_free_mib:
+            continue
+        candidates.append((util, -free_mib, index))
+    if not candidates:
+        return None
+    # Lowest util wins; ties -> most free memory; ties -> lowest index.
+    util, neg_free, index = min(candidates)
+    return index
+
+
+def _query_nvidia_smi_csv() -> str | None:
+    """Return raw index,util,free CSV from the local nvidia-smi, or None.
+
+    The sim runs on the same host as the backend, so we query locally (the
+    same way _gpu_reachable does). Conservative: returns None on any error
+    (binary missing, nonzero exit, timeout) so the caller falls back to the
+    inherited CUDA_VISIBLE_DEVICES pin.
+    """
+    nvsmi = shutil.which("nvidia-smi")
+    if nvsmi is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                nvsmi,
+                "--query-gpu=index,utilization.gpu,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _auto_gpu_enabled() -> bool:
+    """Whether auto-GPU selection is on. Default ON; disable-able via env.
+
+    GSFLUENT_AUTO_GPU in {0, false, no, off} (case-insensitive) turns it off,
+    restoring the static .env CUDA_VISIBLE_DEVICES pin behaviour.
+    """
+    raw = os.environ.get("GSFLUENT_AUTO_GPU")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _resolve_sim_gpu_env(
+    *,
+    on_event: EventEmitter,
+    query: Callable[[], str | None] = _query_nvidia_smi_csv,
+) -> dict[str, str] | None:
+    """Compute the env overlay for the sim subprocess's GPU pin, or None.
+
+    Returns a dict to merge over os.environ (``{"CUDA_VISIBLE_DEVICES": "N"}``)
+    when auto-selection succeeds, or ``None`` to mean "inherit the .env pin
+    unchanged" — the fallback for every failure mode:
+
+      * GSFLUENT_AUTO_GPU disabled
+      * nvidia-smi query failed / unavailable
+      * no GPU met the free-memory floor (all busy/full)
+      * any unexpected error (defensive: GPU selection never crashes a run)
+
+    Emits ``sim.gpu_autopicked`` on success and ``sim.gpu_autopick_skipped``
+    (with a reason) otherwise, so the choice is observable in the event log.
+    """
+    if not _auto_gpu_enabled():
+        on_event.emit("sim.gpu_autopick_skipped", reason="disabled")
+        return None
+    try:
+        min_free_mib = int(
+            os.environ.get("GSFLUENT_GPU_MIN_FREE_MIB", _DEFAULT_MIN_FREE_MIB)
+        )
+    except (TypeError, ValueError):
+        min_free_mib = _DEFAULT_MIN_FREE_MIB
+    try:
+        csv_text = query()
+        if not csv_text:
+            on_event.emit("sim.gpu_autopick_skipped", reason="query_failed")
+            return None
+        index = pick_free_gpu(csv_text, min_free_mib)
+        if index is None:
+            on_event.emit(
+                "sim.gpu_autopick_skipped",
+                reason="no_gpu_qualified",
+                min_free_mib=min_free_mib,
+            )
+            return None
+        # Best-effort enrich the event with the picked GPU's stats.
+        util, free_mib = _gpu_stats_for_index(csv_text, index)
+        on_event.emit(
+            "sim.gpu_autopicked",
+            gpu_index=index,
+            util=util,
+            free_mib=free_mib,
+            min_free_mib=min_free_mib,
+        )
+        return {"CUDA_VISIBLE_DEVICES": str(index)}
+    except Exception as exc:  # noqa: BLE001 — selection must never crash a run
+        on_event.emit("sim.gpu_autopick_skipped", reason=f"error:{exc!r}")
+        return None
+
+
+def _gpu_stats_for_index(
+    csv_text: str, index: int
+) -> tuple[int | None, int | None]:
+    """Return (util, free_mib) for `index` from the CSV, or (None, None)."""
+    for line in csv_text.splitlines():
+        parts = [c.strip() for c in line.strip().split(",")]
+        if len(parts) != 3:
+            continue
+        try:
+            if int(parts[0]) == index:
+                return int(parts[1]), int(parts[2])
+        except (ValueError, TypeError):
+            continue
+    return None, None
 
 
 def _gpu_reachable() -> bool:

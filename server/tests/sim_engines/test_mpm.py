@@ -1,4 +1,5 @@
 """MPM-specific unit tests: pattern loading, classifier, preflight."""
+import os
 from pathlib import Path
 
 import pytest
@@ -6,10 +7,13 @@ import pytest
 from gsfluent.core.sim_engines.mpm import (
     MPMErrorPattern,
     MPMSimulationEngine,
+    _auto_gpu_enabled,
     _expected_sim_frames,
+    _resolve_sim_gpu_env,
     check_sim_stability,
     classify_stderr,
     load_error_patterns,
+    pick_free_gpu,
 )
 from gsfluent.protocols.sim import (
     GPUUnavailableError,
@@ -293,3 +297,254 @@ def test_build_sim_argv_has_required_invariant_flags() -> None:
         # GPU sim-R rotation output (Track-1): each particle's polar R emitted
         # per frame for the fuser to consume instead of CPU Kabsch SVD.
         assert "--output_rot" in argv
+
+
+# ---------- auto-GPU selection: pick_free_gpu (pure parser) ---------------
+
+# A representative shared 8-GPU box, exactly as
+#   nvidia-smi --query-gpu=index,utilization.gpu,memory.free \
+#              --format=csv,noheader,nounits
+# prints it (index, util%, free_MiB):
+_REAL_CSV = (
+    "0, 36, 57214\n"
+    "1, 23, 47713\n"
+    "2, 0, 47349\n"
+    "3, 18, 47339\n"
+    "4, 4, 47339\n"
+    "5, 34, 47339\n"
+    "6, 0, 55582\n"
+    "7, 100, 47483\n"
+)
+
+
+def test_pick_free_gpu_picks_lowest_util_with_enough_mem() -> None:
+    # GPUs 2 and 6 are both at 0% util and clear the 20 GiB floor. Tie on util
+    # breaks toward most free memory -> GPU 6 (55582 > 47349 MiB).
+    assert pick_free_gpu(_REAL_CSV, min_free_mib=20 * 1024) == 6
+
+
+def test_pick_free_gpu_skips_gpus_below_free_floor() -> None:
+    # Only GPU 0 (57214 MiB) clears a 55 GiB (56320 MiB) floor — every other
+    # GPU, including the otherwise-idle GPU 6 (55582), is below it. Memory is a
+    # hard filter applied before the util sort, so the busier-but-roomier GPU 0
+    # wins.
+    assert pick_free_gpu(_REAL_CSV, min_free_mib=55 * 1024) == 0
+
+
+def test_pick_free_gpu_lowest_util_wins_when_mem_ample() -> None:
+    csv = "0, 80, 60000\n1, 10, 60000\n2, 50, 60000\n"
+    assert pick_free_gpu(csv, min_free_mib=20 * 1024) == 1
+
+
+def test_pick_free_gpu_util_tie_breaks_to_lowest_index() -> None:
+    # Equal util AND equal free memory -> deterministic: lowest index wins.
+    csv = "3, 0, 50000\n1, 0, 50000\n2, 0, 50000\n"
+    assert pick_free_gpu(csv, min_free_mib=20 * 1024) == 1
+
+
+def test_pick_free_gpu_returns_none_when_all_full() -> None:
+    # Every GPU is below the free-memory floor -> no qualifying GPU.
+    csv = "0, 0, 1000\n1, 5, 2000\n2, 0, 500\n"
+    assert pick_free_gpu(csv, min_free_mib=20 * 1024) is None
+
+
+def test_pick_free_gpu_returns_none_when_all_busy_and_full() -> None:
+    csv = "0, 100, 100\n1, 99, 200\n"
+    assert pick_free_gpu(csv, min_free_mib=20 * 1024) is None
+
+
+def test_pick_free_gpu_empty_input_is_none() -> None:
+    assert pick_free_gpu("", min_free_mib=20 * 1024) is None
+    assert pick_free_gpu("\n\n  \n", min_free_mib=20 * 1024) is None
+
+
+def test_pick_free_gpu_malformed_rows_are_skipped_not_fatal() -> None:
+    # Garbage / short / non-numeric rows are skipped; the one good row wins.
+    csv = (
+        "this is not csv\n"
+        "0, notanint, 60000\n"        # non-numeric util
+        "1, 5\n"                       # too few columns
+        "2, 5, 60000, extra\n"         # too many columns
+        "3, 12, 60000\n"               # the only valid, qualifying row
+    )
+    assert pick_free_gpu(csv, min_free_mib=20 * 1024) == 3
+
+
+def test_pick_free_gpu_all_malformed_is_none() -> None:
+    assert pick_free_gpu("garbage\nmore garbage\n", min_free_mib=1024) is None
+
+
+def test_pick_free_gpu_exactly_at_floor_qualifies() -> None:
+    # free == min_free_mib is acceptable (>= comparison).
+    csv = "0, 50, 20480\n"
+    assert pick_free_gpu(csv, min_free_mib=20480) == 0
+    assert pick_free_gpu("0, 50, 20479\n", min_free_mib=20480) is None
+
+
+# ---------- auto-GPU flag gating ------------------------------------------
+
+
+@pytest.fixture
+def _clear_gpu_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GSFLUENT_AUTO_GPU", raising=False)
+    monkeypatch.delenv("GSFLUENT_GPU_MIN_FREE_MIB", raising=False)
+
+
+def test_auto_gpu_enabled_default_on(_clear_gpu_env: None) -> None:
+    assert _auto_gpu_enabled() is True
+
+
+@pytest.mark.parametrize("val", ["0", "false", "FALSE", "no", "off", "Off", ""])
+def test_auto_gpu_disabled_values(
+    monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.setenv("GSFLUENT_AUTO_GPU", val)
+    assert _auto_gpu_enabled() is False
+
+
+@pytest.mark.parametrize("val", ["1", "true", "yes", "on", "anything"])
+def test_auto_gpu_enabled_values(
+    monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.setenv("GSFLUENT_AUTO_GPU", val)
+    assert _auto_gpu_enabled() is True
+
+
+# ---------- auto-GPU resolution + event emission --------------------------
+
+
+class _RecordingEmitter:
+    """Minimal EventEmitter test double — records (event, context) tuples."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def emit(self, event: str, **context: object) -> None:
+        self.events.append((event, dict(context)))
+
+    def child(self, **context: object) -> "_RecordingEmitter":
+        return self
+
+    def names(self) -> list[str]:
+        return [e for e, _ in self.events]
+
+
+def test_resolve_picks_gpu_and_emits_event(
+    monkeypatch: pytest.MonkeyPatch, _clear_gpu_env: None
+) -> None:
+    em = _RecordingEmitter()
+    overlay = _resolve_sim_gpu_env(on_event=em, query=lambda: _REAL_CSV)
+    # GPU 6 is the least-busy with ample memory (see pick_free_gpu tests).
+    assert overlay == {"CUDA_VISIBLE_DEVICES": "6"}
+    assert "sim.gpu_autopicked" in em.names()
+    ev = next(c for n, c in em.events if n == "sim.gpu_autopicked")
+    assert ev["gpu_index"] == 6
+    assert ev["util"] == 0
+    assert ev["free_mib"] == 55582
+
+
+def test_resolve_respects_custom_min_free_floor(
+    monkeypatch: pytest.MonkeyPatch, _clear_gpu_env: None
+) -> None:
+    # With a 55 GiB floor only GPU 0 qualifies (see pick_free_gpu test).
+    monkeypatch.setenv("GSFLUENT_GPU_MIN_FREE_MIB", str(55 * 1024))
+    em = _RecordingEmitter()
+    overlay = _resolve_sim_gpu_env(on_event=em, query=lambda: _REAL_CSV)
+    assert overlay == {"CUDA_VISIBLE_DEVICES": "0"}
+
+
+def test_resolve_flag_off_returns_none_and_skips(
+    monkeypatch: pytest.MonkeyPatch, _clear_gpu_env: None
+) -> None:
+    monkeypatch.setenv("GSFLUENT_AUTO_GPU", "0")
+    em = _RecordingEmitter()
+
+    # query must NOT be consulted when the flag is off.
+    def _boom() -> str:
+        raise AssertionError("nvidia-smi should not be queried when disabled")
+
+    overlay = _resolve_sim_gpu_env(on_event=em, query=_boom)
+    assert overlay is None
+    skipped = next(c for n, c in em.events if n == "sim.gpu_autopick_skipped")
+    assert skipped["reason"] == "disabled"
+
+
+def test_resolve_query_failure_falls_back(
+    monkeypatch: pytest.MonkeyPatch, _clear_gpu_env: None
+) -> None:
+    em = _RecordingEmitter()
+    overlay = _resolve_sim_gpu_env(on_event=em, query=lambda: None)
+    assert overlay is None
+    skipped = next(c for n, c in em.events if n == "sim.gpu_autopick_skipped")
+    assert skipped["reason"] == "query_failed"
+
+
+def test_resolve_no_qualifying_gpu_falls_back(
+    monkeypatch: pytest.MonkeyPatch, _clear_gpu_env: None
+) -> None:
+    em = _RecordingEmitter()
+    busy = "0, 100, 100\n1, 90, 200\n"
+    overlay = _resolve_sim_gpu_env(on_event=em, query=lambda: busy)
+    assert overlay is None
+    skipped = next(c for n, c in em.events if n == "sim.gpu_autopick_skipped")
+    assert skipped["reason"] == "no_gpu_qualified"
+
+
+def test_resolve_query_exception_never_crashes(
+    monkeypatch: pytest.MonkeyPatch, _clear_gpu_env: None
+) -> None:
+    # A query that raises must be swallowed -> fall back, never propagate.
+    em = _RecordingEmitter()
+
+    def _raise() -> str:
+        raise RuntimeError("nvidia-smi blew up")
+
+    overlay = _resolve_sim_gpu_env(on_event=em, query=_raise)
+    assert overlay is None
+    skipped = next(c for n, c in em.events if n == "sim.gpu_autopick_skipped")
+    assert skipped["reason"].startswith("error:")
+
+
+def test_resolve_malformed_min_free_env_uses_default(
+    monkeypatch: pytest.MonkeyPatch, _clear_gpu_env: None
+) -> None:
+    # A garbage GSFLUENT_GPU_MIN_FREE_MIB must not crash; default floor applies.
+    monkeypatch.setenv("GSFLUENT_GPU_MIN_FREE_MIB", "not-a-number")
+    em = _RecordingEmitter()
+    overlay = _resolve_sim_gpu_env(on_event=em, query=lambda: _REAL_CSV)
+    # Default 20 GiB floor -> GPU 6 still picked.
+    assert overlay == {"CUDA_VISIBLE_DEVICES": "6"}
+
+
+# ---------- spawn env wiring ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_passes_env_to_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Verify _spawn_in_new_pg forwards `env` (the CUDA_VISIBLE_DEVICES override
+    # for an auto-picked GPU) down to the spawn call untouched, and that the
+    # default (env=None) inherits the parent environment.
+    import gsfluent.core.sim_engines.mpm as mpm
+
+    captured: dict[str, object] = {}
+
+    async def _fake_spawn(*argv: str, **kwargs: object) -> object:
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(mpm, "_spawn", _fake_spawn)
+    eng = _make_engine(sim_fast=False)
+
+    overlay = {**os.environ, "CUDA_VISIBLE_DEVICES": "6"}
+    await eng._spawn_in_new_pg(argv=["echo", "hi"], cwd="/tmp", env=overlay)
+    assert captured["kwargs"]["env"] == overlay
+    assert captured["kwargs"]["env"]["CUDA_VISIBLE_DEVICES"] == "6"
+    assert captured["kwargs"]["start_new_session"] is True
+
+    # Default: no env override -> env=None -> child inherits parent's env.
+    captured.clear()
+    await eng._spawn_in_new_pg(argv=["echo", "hi"], cwd="/tmp")
+    assert captured["kwargs"]["env"] is None
