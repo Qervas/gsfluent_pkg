@@ -75,6 +75,84 @@ def _norm_xyz_to_origin_cube(
     return normed, center, extent
 
 
+# ---- fracture-aware re-binding (Phase 1) -----------------------------------
+#
+# The frozen frame-0 K-NN binding makes a splat that straddles a crack average
+# two diverging motions -> it stretches across the gap (the demolition "ghost
+# web"). Phase 1 detects fracture from POSITIONS ALONE -- a splat's bound
+# neighbours flying apart -- and re-partitions that splat's correspondence to a
+# single coherent side (hard 1-NN snap). It re-binds the CORRESPONDENCE, so the
+# position blend AND the rotation gather both follow the new sided binding.
+# Pure numpy, CPU, no codec/sim/GPU change.
+
+# Fracture detection + latch tunables (sane defaults per the proposal §2.1/§2.4).
+# A splat fractures when the MAX relative pairwise stretch of its bound
+# neighbours, dt/d0, exceeds TAU_STRETCH. Hysteresis: it must stay over the
+# threshold for FRACTURE_PATIENCE consecutive frames before it latches, which
+# rejects a single noisy FLIP frame and prevents flip-flop. Once latched, the
+# decision is MONOTONE -- kept for the rest of the sequence (cracks don't heal
+# in these recipes), which also keeps per-splat behaviour temporally coherent
+# for the codec's delta scheme.
+TAU_STRETCH: float = 1.8
+FRACTURE_PATIENCE: int = 2
+# Pairs whose rest distance is below this (cube-frame units) are ignored in the
+# stretch test: a near-coincident neighbour pair has a tiny, noisy denominator
+# that would manufacture spurious giant ratios. The cube frame normalizes the
+# longest axis to 1.0, so 1e-4 is ~0.01% of the body extent.
+_MIN_REST_PAIR_DIST: float = 1e-4
+
+
+def _pairwise_rest_dists(p_rest: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rest pairwise distances over each splat's K bound neighbours.
+
+    Args:
+        p_rest: (n, K, 3) frame-0 neighbour positions (cube frame).
+
+    Returns:
+        (d0, pair_mask):
+          d0        (n, P) rest distance for each of the P = K(K-1)/2 unique
+                    neighbour pairs (upper-triangle order from np.triu_indices).
+          pair_mask (P,)   per-pair validity (rest distance >= _MIN_REST_PAIR_DIST,
+                    broadcast over splats inside the caller). Returned per-pair
+                    here as (n, P) after the >= test for direct use.
+    """
+    n, k, _ = p_rest.shape
+    iu, ju = np.triu_indices(k, k=1)               # (P,), (P,)
+    diff = p_rest[:, iu, :] - p_rest[:, ju, :]     # (n, P, 3)
+    d0 = np.linalg.norm(diff, axis=2)              # (n, P)
+    valid = d0 >= _MIN_REST_PAIR_DIST              # (n, P)
+    return d0.astype(np.float64), valid
+
+
+def _max_pairwise_stretch(
+    p_cur: np.ndarray,
+    d0: np.ndarray,
+    pair_valid: np.ndarray,
+    pair_iu: np.ndarray,
+    pair_ju: np.ndarray,
+) -> np.ndarray:
+    """Per-splat max relative stretch dt/d0 over its valid neighbour pairs.
+
+    A splat is straddling a crack when two of its bound neighbours fly apart:
+    under elastic/plastic deformation neighbours stay roughly equidistant
+    (stretch ~ 1); a crack running between two neighbours sends dt/d0 >> 1.
+
+    Args:
+        p_cur:      (n, K, 3) current neighbour positions (cube frame).
+        d0:         (n, P)    rest pairwise distances (from _pairwise_rest_dists).
+        pair_valid: (n, P)    per-pair validity mask (rest distance not tiny).
+        pair_iu/ju: (P,)      the np.triu_indices that produced d0.
+
+    Returns:
+        (n,) the max stretch per splat; pairs masked out (or no valid pairs)
+        contribute 0.0 so they never trip the threshold.
+    """
+    diff = p_cur[:, pair_iu, :] - p_cur[:, pair_ju, :]   # (n, P, 3)
+    dt = np.linalg.norm(diff, axis=2)                    # (n, P)
+    ratio = np.where(pair_valid, dt / np.maximum(d0, 1e-12), 0.0)
+    return ratio.max(axis=1)                             # (n,)
+
+
 # ---- Kabsch rotation + quaternion helpers ----------------------------------
 
 # Y-up -> Z-up basis change as a rotation matrix: (x, y, z) -> (x, -z, y).
@@ -307,6 +385,28 @@ class _KNNCorrespondence:
     #   rot_* fields; its presence makes fuse_frame use the GPU sim-R path
     #   instead of the CPU-Kabsch fallback.
 
+    # --- fracture-aware re-binding (Phase 1) state ---------------------------
+    # Rest pairwise distances + per-pair validity for the stretch test, and the
+    # triu index pair the pairwise diffs use. Precomputed once at build time.
+    pair_d0: np.ndarray          # (n_ref, P) rest pairwise dists, P = K(K-1)/2
+    pair_valid: np.ndarray       # (n_ref, P) per-pair validity (rest dist big)
+    pair_iu: np.ndarray          # (P,) triu row indices
+    pair_ju: np.ndarray          # (P,) triu col indices
+    # MUTABLE latch state (in-place numpy mutation on a frozen dataclass is
+    # fine; we never reassign the attribute). Advanced once per fuse_frame call;
+    # the per-frame loop calls frames in order, so this latches monotonically.
+    over_count: np.ndarray       # (n_ref,) int: consecutive frames over TAU
+    latched: np.ndarray          # (n_ref,) bool: splat has fractured + committed
+    snap_col: np.ndarray         # (n_ref,) int: KNN column the splat snapped to
+    #   (the single nearest neighbour at the latch frame); -1 until latched.
+
+    # Effective per-frame binding the position blend + R gather both read. For
+    # un-latched splats these equal the original knn_idx/knn_weights; for a
+    # latched splat the row is a one-hot on its snapped neighbour. Rebuilt in
+    # place each frame from the (monotone) latch state.
+    eff_idx: np.ndarray          # (n_ref, K) effective neighbour indices
+    eff_weights: np.ndarray      # (n_ref, K) effective neighbour weights
+
 
 class KNNKabschFuser:
     """Fuser Protocol impl using inverse-distance K-NN skinning + Kabsch.
@@ -320,10 +420,35 @@ class KNNKabschFuser:
     Y-up -> Z-up rotation, source-scale output, centered at origin.
     """
 
-    def __init__(self, k: int = 8) -> None:
+    def __init__(
+        self,
+        k: int = 8,
+        *,
+        enable_fracture: bool = True,
+        tau_stretch: float = TAU_STRETCH,
+        fracture_patience: int = FRACTURE_PATIENCE,
+    ) -> None:
         if k < 1:
             raise ValueError(f"k must be >= 1; got {k}")
+        if tau_stretch <= 1.0:
+            raise ValueError(f"tau_stretch must be > 1.0; got {tau_stretch}")
+        if fracture_patience < 1:
+            raise ValueError(
+                f"fracture_patience must be >= 1; got {fracture_patience}"
+            )
         self.k = k
+        # Fracture-aware re-binding (Phase 1). enable_fracture=False reproduces
+        # the pre-fracture behaviour byte-for-byte (the frozen frame-0 binding),
+        # which is exactly what a coherent / non-fracturing neighbourhood gets
+        # even when enabled -- the latch never trips.
+        self.enable_fracture = enable_fracture
+        self.tau_stretch = tau_stretch
+        self.fracture_patience = fracture_patience
+        # Number of splats re-bound (latched) on the most recent fuse_frame call
+        # and a per-frame history. Diagnostic only; lets a driver report the
+        # re-bound count per frame without re-deriving it.
+        self.last_frame_rebound = 0
+        self.rebound_per_frame: list[int] = []
         # Maps id(Correspondence) -> _KNNCorrespondence side-state. The
         # Protocol's Correspondence is a public frozen dataclass; we keep the
         # K-NN map + reference attrs here to avoid leaking large numpy arrays
@@ -437,9 +562,19 @@ class KNNKabschFuser:
         full_attrs["y"] = rest_xyz[:, 1]
         full_attrs["z"] = rest_xyz[:, 2]
 
+        # --- fracture-aware re-binding (Phase 1) precompute ------------------
+        # Rest pairwise distances over each splat's K bound frame-0 neighbours,
+        # once. With effective_k < 2 there are no pairs -> the stretch test is a
+        # no-op (a single bone carries no divergence signal), and re-binding to
+        # a one-hot is already the binding, so fracture is inert at K=1.
+        n_ref = len(ref_v)
+        p_rest0 = first_frame_particles[knn_idx]               # (n_ref, K, 3)
+        pair_d0, pair_valid = _pairwise_rest_dists(p_rest0)
+        pair_iu, pair_ju = np.triu_indices(knn_idx.shape[1], k=1)
+
         corr = Correspondence(
             reference_ply_path=reference_ply_path,
-            indices=tuple(int(i) for i in range(len(ref_v))),
+            indices=tuple(int(i) for i in range(n_ref)),
             extent=extent,
         )
         self._state[id(corr)] = _KNNCorrespondence(
@@ -452,6 +587,17 @@ class KNNKabschFuser:
             full_attrs=full_attrs,
             rest_quats_wxyz=rest_quats_wxyz,
             sim_R0_mats=sim_R0_mats,
+            pair_d0=pair_d0,
+            pair_valid=pair_valid,
+            pair_iu=pair_iu.astype(np.intp),
+            pair_ju=pair_ju.astype(np.intp),
+            over_count=np.zeros(n_ref, dtype=np.int32),
+            latched=np.zeros(n_ref, dtype=bool),
+            snap_col=np.full(n_ref, -1, dtype=np.intp),
+            # Effective binding starts as the original frozen binding; the latch
+            # rewrites individual rows to one-hot snaps as splats fracture.
+            eff_idx=knn_idx.copy(),
+            eff_weights=knn_weights.copy(),
         )
         return corr
 
@@ -488,10 +634,24 @@ class KNNKabschFuser:
                 f"expected {state.sim_xyz_t0_kept.shape[0]} (from frame 0)"
             )
 
-        # --- POSITION: inverse-distance K-NN displacement blend (unchanged). --
+        # --- FRACTURE-AWARE RE-BINDING (Phase 1) -----------------------------
+        # Detect, from positions alone, splats whose bound neighbours have flown
+        # apart (straddling a crack), latch them with hysteresis, and re-bind
+        # each to a single coherent side (hard 1-NN snap). This rewrites the
+        # EFFECTIVE binding (eff_idx/eff_weights) in place; the position blend
+        # AND the Kabsch R gather below both read that effective binding, so the
+        # whole per-splat update follows the sided binding -- no ghost web.
+        self._update_fracture_binding(state, particle_frame)
+        idx = state.eff_idx
+        wts = state.eff_weights
+
+        # --- POSITION: inverse-distance K-NN displacement blend. -------------
+        # Reads the effective (possibly re-bound) binding. With fracture off, or
+        # for any un-latched splat, idx/wts are the original frozen frame-0 map,
+        # so this is byte-identical to the prior position-only skinning.
         sim_disp = particle_frame - state.sim_xyz_t0_kept              # (n_kept, 3)
-        neighbors = sim_disp[state.knn_idx]                            # (n_ref, K, 3)
-        ref_disp = (state.knn_weights[..., None] * neighbors).sum(axis=1)
+        neighbors = sim_disp[idx]                                      # (n_ref, K, 3)
+        ref_disp = (wts[..., None] * neighbors).sum(axis=1)
         ref_xyz_displaced = state.ref_xyz_norm + ref_disp              # (n_ref, 3)
         out_xyz_world = self._transform_sim_xyz(
             ref_xyz_displaced, extent=state.extent, center=state.center,
@@ -518,15 +678,18 @@ class KNNKabschFuser:
         # K=1 carries no orientation signal in the Kabsch fallback -> identity
         # (frozen quat), the pre-existing behaviour. The sim-R path needs no
         # neighbour orientation signal (R is per-particle), so it works for K>=1.
+        # Both rotation paths read the EFFECTIVE binding (idx/wts): a latched
+        # splat's R is gathered/solved over its single sided neighbour, so its
+        # orientation follows that fragment rather than the cross-crack average.
         r_cube: np.ndarray | None = None
         use_sim_r = state.sim_R0_mats is not None and rot_quats is not None
         if state.rest_quats_wxyz is not None:
             if use_sim_r:
-                r_cube = self._sim_r_cube(state, rot_quats)
-            elif state.knn_idx.shape[1] >= 2:
-                p_rest = state.sim_xyz_t0_kept[state.knn_idx]          # (n_ref,K,3)
-                p_cur = particle_frame[state.knn_idx]                 # (n_ref,K,3)
-                r_cube = _weighted_kabsch(p_rest, p_cur, state.knn_weights)
+                r_cube = self._sim_r_cube(state, rot_quats, idx, wts)
+            elif idx.shape[1] >= 2:
+                p_rest = state.sim_xyz_t0_kept[idx]                   # (n_ref,K,3)
+                p_cur = particle_frame[idx]                          # (n_ref,K,3)
+                r_cube = _weighted_kabsch(p_rest, p_cur, wts)
 
         if r_cube is not None:
             # Cube-frame rotation -> Z-up world frame: R_world = R_zup R R_zupᵀ.
@@ -619,9 +782,11 @@ class KNNKabschFuser:
     def _sim_r_cube(
         state: "_KNNCorrespondence",
         rot_quats: np.ndarray,
+        eff_idx: np.ndarray,
+        eff_weights: np.ndarray,
     ) -> np.ndarray:
         """GPU sim-R path: per-splat cube-frame delta rotation from the sim's
-        per-particle polar R, gathered through the frame-0 KNN correspondence.
+        per-particle polar R, gathered through the (effective) KNN binding.
 
         For each splat and each of its K bound particles, the cube-frame delta
         rotation is R_delta = R_cur · R_0ᵀ (the material rotation of that
@@ -629,6 +794,10 @@ class KNNKabschFuser:
         splat rotation by weighted quaternion averaging (sign-aligned nlerp,
         the inverse-distance KNN weights), then returned as a (n_ref, 3, 3)
         matrix so it feeds the same cube->Z-up conjugation the Kabsch path uses.
+
+        eff_idx/eff_weights are the FRACTURE-AWARE binding: for an un-latched
+        splat they equal the frozen frame-0 map; for a latched splat the row is
+        a one-hot on its sided neighbour, so its R follows that single fragment.
 
         No SVD: the rotation was already computed on the GPU (compute_R_from_F);
         here we only gather, take a matrix delta, blend quaternions, rebuild.
@@ -651,9 +820,10 @@ class KNNKabschFuser:
         r_delta = np.matmul(r_cur, np.transpose(r0, (0, 2, 1)))  # (n_kept, 3, 3)
         q_delta = _matrices_to_quats_wxyz(r_delta)          # (n_kept, 4) wxyz
 
-        # Gather each splat's K bound particles' delta quaternions + weights.
-        knn_idx = state.knn_idx                             # (n_ref, K)
-        knn_w = state.knn_weights                           # (n_ref, K)
+        # Gather each splat's K bound particles' delta quaternions + weights,
+        # via the effective (possibly re-bound) binding.
+        knn_idx = eff_idx                                   # (n_ref, K)
+        knn_w = eff_weights                                 # (n_ref, K)
         q_neigh = q_delta[knn_idx]                          # (n_ref, K, 4)
 
         # Weighted quaternion blend (nlerp). Sign-align every neighbour to the
@@ -672,6 +842,95 @@ class KNNKabschFuser:
             norms = np.linalg.norm(q_blended, axis=1, keepdims=True)
         q_blended = q_blended / np.maximum(norms, 1e-300)
         return _quats_wxyz_to_matrices(q_blended)           # (n_ref, 3, 3)
+
+    def _update_fracture_binding(
+        self,
+        state: "_KNNCorrespondence",
+        particle_frame: np.ndarray,
+    ) -> None:
+        """Per-frame fracture detection + monotone-latched re-binding (Phase 1).
+
+        Mutates state's latch arrays + effective binding IN PLACE. The driver
+        calls fuse_frame in strict frame order, so the latch advances monotone:
+
+          1. DETECT: for each NOT-yet-latched splat, compute the max relative
+             pairwise stretch dt/d0 over its bound neighbours. stretch > tau
+             means two neighbours have flown apart -> the splat straddles a
+             crack (proposal §2.1). False positives from fast-but-intact bulk
+             motion are rejected by construction: a rigid translation leaves
+             every pairwise distance unchanged, so stretch stays ~1.
+          2. HYSTERESIS: increment a per-splat over-threshold counter; reset it
+             on any frame at/under tau. A splat LATCHES only once the counter
+             reaches fracture_patience consecutive frames, rejecting a single
+             noisy FLIP frame and preventing flip-flop (§2.4).
+          3. RE-BIND (R1 hard 1-NN snap): on the latch frame, snap the splat to
+             its CURRENT single nearest bound neighbour (one-hot weights). Cracks
+             don't heal in these recipes, so the decision is kept for the rest of
+             the sequence -> the binding is piecewise-constant in time.
+
+        Records self.last_frame_rebound (newly-latched this frame) and appends
+        the cumulative latched count to self.rebound_per_frame.
+
+        No-op (and byte-identical to the pre-fracture behaviour) when
+        enable_fracture is False or there are fewer than 2 neighbours (K<2 ->
+        no pairs -> no divergence signal; a one-hot snap is already the binding).
+        """
+        k = state.knn_idx.shape[1]
+        if not self.enable_fracture or k < 2:
+            self.last_frame_rebound = 0
+            self.rebound_per_frame.append(int(state.latched.sum()))
+            return
+
+        # Only test splats that haven't latched yet (monotone decision).
+        active = ~state.latched
+        newly = 0
+        if active.any():
+            act = np.flatnonzero(active)
+            p_cur = particle_frame[state.knn_idx[act]]           # (m, K, 3)
+            stretch = _max_pairwise_stretch(
+                p_cur,
+                state.pair_d0[act],
+                state.pair_valid[act],
+                state.pair_iu,
+                state.pair_ju,
+            )                                                    # (m,)
+
+            over = stretch > self.tau_stretch
+            # Hysteresis counter: bump where over, reset where not.
+            state.over_count[act[over]] += 1
+            state.over_count[act[~over]] = 0
+
+            # Latch any splat whose counter has reached patience.
+            latch_now = act[state.over_count[act] >= self.fracture_patience]
+            if latch_now.size:
+                state.latched[latch_now] = True
+                # R1 hard 1-NN snap: bind each newly-fractured splat to its
+                # CURRENT single nearest bound neighbour. Snap to the side the
+                # splat is closest to NOW so it follows a coherent fragment.
+                cur_neigh = particle_frame[state.knn_idx[latch_now]]  # (l, K, 3)
+                # The splat's own advected rest position would be ideal, but the
+                # cheapest robust proxy is the current nearest bound particle.
+                # Distance of each bound neighbour to the splat's frame-0 rest
+                # neighbour-centroid is ambiguous post-fracture; instead pick the
+                # neighbour nearest the splat's current blended position, which
+                # is the per-splat weighted centroid of its bound neighbours.
+                centroid = (
+                    state.knn_weights[latch_now][..., None] * cur_neigh
+                ).sum(axis=1, keepdims=True)                     # (l, 1, 3)
+                d = np.linalg.norm(cur_neigh - centroid, axis=2)  # (l, K)
+                snap = np.argmin(d, axis=1).astype(np.intp)       # (l,)
+                state.snap_col[latch_now] = snap
+
+                # Rewrite the effective binding rows to a one-hot on the snapped
+                # neighbour (idx repeated across K, weight 1 on col 0, 0 else).
+                snapped_part = state.knn_idx[latch_now, snap]     # (l,)
+                state.eff_idx[latch_now] = snapped_part[:, None]  # broadcast (l,K)
+                state.eff_weights[latch_now] = 0.0
+                state.eff_weights[latch_now, 0] = 1.0
+                newly = int(latch_now.size)
+
+        self.last_frame_rebound = newly
+        self.rebound_per_frame.append(int(state.latched.sum()))
 
     @staticmethod
     def _transform_sim_xyz(
