@@ -36,7 +36,7 @@
   "n_grid": 150,
   "grid_lim": 2,
   "frame_num": 150,
-  "substep_dt": 0.0001,
+  "substep_dt": 0.00008,
   "frame_dt": 0.03,
   "material": "jelly",
   "E": 5000.0,

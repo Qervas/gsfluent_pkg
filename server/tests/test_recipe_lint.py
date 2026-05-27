@@ -182,18 +182,20 @@ def _load_builtin(name: str) -> dict:
 
 
 # Expected findings per shipped recipe, derived from the actual JSON values:
-#   damping.disabled fires on the 1.1 recipes (jelly, earthquake);
-#   dt.above_cfl fires on the stiff/fast recipes whose substep_dt=1e-4
-#   exceeds their CFL bound (jelly, metal, plasticine, sand).
+#   damping.disabled fires on the 1.1 recipes (jelly, earthquake).
+#   dt.above_cfl is now clean across the library — the four recipes that
+#   shipped substep_dt=1e-4 above their CFL bound (jelly/metal/plasticine/
+#   sand) were lowered to CFL-safe values, so only the two damping warnings
+#   remain (both warn-severity, so the CI gate passes with zero errors).
 _EXPECTED = {
-    "demolition": set(),                          # 0.95 damping, dt=5e-5 (safe)
-    "earthquake": {"damping.disabled"},           # 1.1 damping, dt under CFL
+    "demolition": set(),                          # 0.95 damping, dt safe
+    "earthquake": {"damping.disabled"},           # 1.1 damping, dt safe
     "foam": set(),                                # 0.95 damping, soft, dt safe
-    "jelly": {"damping.disabled", "dt.above_cfl"},  # 1.1 + dt over CFL
-    "metal": {"dt.above_cfl"},                    # 0.95 but stiff, dt over CFL
-    "plasticine": {"dt.above_cfl"},               # 0.95 but stiff, dt over CFL
-    "sand": {"dt.above_cfl"},                      # 0.95 but stiff, dt over CFL
-    "wrecking": set(),                            # 0.95 damping, dt=5e-5 (safe)
+    "jelly": {"damping.disabled"},                # 1.1 damping; dt now CFL-safe
+    "metal": set(),                               # dt lowered to CFL-safe
+    "plasticine": set(),                          # dt lowered to CFL-safe
+    "sand": set(),                                # dt lowered to CFL-safe
+    "wrecking": set(),                            # 0.95 damping, dt safe
 }
 
 

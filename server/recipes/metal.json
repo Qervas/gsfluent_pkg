@@ -37,7 +37,7 @@
   "n_grid": 150,
   "grid_lim": 2,
   "frame_num": 150,
-  "substep_dt": 0.0001,
+  "substep_dt": 0.00005,
   "frame_dt": 0.03,
   "material": "metal",
   "E": 50000.0,
