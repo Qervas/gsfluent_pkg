@@ -6,6 +6,7 @@ import pytest
 from gsfluent.core.sim_engines.mpm import (
     MPMErrorPattern,
     MPMSimulationEngine,
+    check_sim_stability,
     classify_stderr,
     load_error_patterns,
 )
@@ -138,3 +139,30 @@ async def test_preflight_passes_with_valid_env(tmp_path: Path) -> None:
     )
     # Should not raise.
     await eng.preflight()
+
+
+# ---------- sim-stability guard (NaN frame-drop detection) ----------------
+
+
+def test_check_sim_stability_complete_run_is_ok() -> None:
+    # Every sim frame fused → no instability.
+    assert check_sim_stability(n_sim=31, n_fused=31, allowed_nonfinite=0) is None
+
+
+def test_check_sim_stability_flags_diverged_run() -> None:
+    # Sim wrote 11 frames, only 4 fused → 7 went NaN/Inf.
+    msg = check_sim_stability(n_sim=11, n_fused=4, allowed_nonfinite=0)
+    assert msg is not None
+    assert "11" in msg and "diverged" in msg.lower()
+
+
+def test_check_sim_stability_respects_tolerance() -> None:
+    # One dropped frame within an explicit tolerance is allowed.
+    assert check_sim_stability(n_sim=11, n_fused=10, allowed_nonfinite=1) is None
+    # Three dropped exceeds a tolerance of one → flagged.
+    assert check_sim_stability(n_sim=11, n_fused=8, allowed_nonfinite=1) is not None
+
+
+def test_check_sim_stability_no_sim_frames_is_noop() -> None:
+    # Empty sim output is a different failure path (handled elsewhere).
+    assert check_sim_stability(n_sim=0, n_fused=0, allowed_nonfinite=0) is None

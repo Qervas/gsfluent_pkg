@@ -113,6 +113,31 @@ def _kind_to_exception(kind: str, message: str) -> Exception:
     return SimCrashedError(message)
 
 
+def check_sim_stability(
+    *, n_sim: int, n_fused: int, allowed_nonfinite: int
+) -> str | None:
+    """Detect a diverged simulation from a frame-count shortfall.
+
+    The fuser silently skips sim frames whose particle positions are
+    non-finite (NaN/Inf), so fewer fused frames than sim frames means the
+    MPM solver went numerically unstable mid-run. Returns a human-readable
+    error message when the shortfall exceeds ``allowed_nonfinite`` (so the
+    run fails loudly instead of being marked done with a truncated
+    sequence), else ``None``. ``n_sim <= 0`` is a different failure path
+    (no sim output at all) handled elsewhere.
+    """
+    if n_sim <= 0:
+        return None
+    dropped = n_sim - n_fused
+    if dropped > allowed_nonfinite:
+        return (
+            f"simulation diverged: {dropped} of {n_sim} frames had non-finite "
+            f"(NaN/Inf) positions and were dropped ({n_fused} usable). The "
+            f"recipe is numerically unstable."
+        )
+    return None
+
+
 # ---------- the engine ---------------------------------------------------
 
 
@@ -317,6 +342,27 @@ class MPMSimulationEngine:
             )
 
         n_frames = sum(1 for _ in fused_dir.glob("frame_*.ply"))
+
+        # Fail loudly on a diverged sim. The fuser silently skips frames whose
+        # sim positions are NaN/Inf, so fewer fused frames than sim frames
+        # means the MPM solver blew up mid-run. Without this guard the run
+        # would be marked `done` with a truncated sequence — a silent
+        # corruption that misleads API consumers. Tolerance is configurable via
+        # GSFLUENT_ALLOWED_NONFINITE_FRAMES (default 0 = any drop is a failure).
+        n_sim_frames = sum(1 for _ in sim_ply_dir.glob("sim_*.ply"))
+        allowed = int(os.environ.get("GSFLUENT_ALLOWED_NONFINITE_FRAMES", "0"))
+        unstable = check_sim_stability(
+            n_sim=n_sim_frames, n_fused=n_frames, allowed_nonfinite=allowed
+        )
+        if unstable:
+            on_event.emit(
+                "error.sim.unstable_recipe",
+                n_sim=n_sim_frames,
+                n_fused=n_frames,
+                dropped=n_sim_frames - n_frames,
+            )
+            raise SimUnstableRecipeError(unstable)
+
         return SimResult(
             frames_dir=fused_dir,
             n_frames=n_frames,
