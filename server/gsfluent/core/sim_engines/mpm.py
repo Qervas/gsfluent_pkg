@@ -425,7 +425,17 @@ class MPMSimulationEngine:
     ) -> list[str]:
         extras: list[str] = []
         if self._sim_fast:
-            extras += ["--no_cfl_override", "--graph_capture"]
+            # NOTE: the fast path used to also pass --no_cfl_override, which
+            # tells the solver to skip its `substep_dt = min(recipe_dt, cfl_dt)`
+            # clamp and run the recipe's raw substep_dt verbatim. That removed
+            # the only time-step safety net: a recipe whose substep_dt exceeds
+            # the CFL limit would diverge silently. The clamp ONLY ever tightens
+            # (never relaxes) substep_dt, so always letting the solver clamp is
+            # safe — for a recipe already within CFL it is a no-op, and the only
+            # cost is a single CFL computation at sim setup. --graph_capture is
+            # an orthogonal perf win (fuses the substep loop into one CUDA graph)
+            # with no bearing on time-step stability, so it stays.
+            extras += ["--graph_capture"]
         return [
             self._sim_python,
             "gs_simulation/watermelon/gs_simulation_building.py",

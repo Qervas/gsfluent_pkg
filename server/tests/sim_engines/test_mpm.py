@@ -232,3 +232,61 @@ def test_expected_sim_frames_missing_or_invalid_is_none() -> None:
     assert _expected_sim_frames({}) is None
     assert _expected_sim_frames({"frame_num": "nope"}) is None
     assert _expected_sim_frames({"frame_num": 0}) is None
+
+
+# ---------- sim argv building (CFL clamp safety) -------------------------
+
+
+def _make_engine(*, sim_fast: bool) -> MPMSimulationEngine:
+    import sys
+    return MPMSimulationEngine(
+        sim_home=Path("/tmp/nonexistent_sim_home"),
+        sim_python=sys.executable,
+        sim_env=None,
+        require_gpu=False,
+        sim_fast=sim_fast,
+    )
+
+
+def _build_argv(eng: MPMSimulationEngine) -> list[str]:
+    return eng._build_sim_argv(
+        model_dir=Path("/tmp/model"),
+        sim_output_dir=Path("/tmp/out"),
+        config_path=Path("/tmp/recipe.json"),
+        particles=200_000,
+    )
+
+
+def test_slow_path_never_passes_no_cfl_override() -> None:
+    # Default (non-fast) path must always let the solver clamp dt.
+    argv = _build_argv(_make_engine(sim_fast=False))
+    assert "--no_cfl_override" not in argv
+    assert "--graph_capture" not in argv
+
+
+def test_fast_path_does_not_disable_cfl_clamp() -> None:
+    # The fast path must NOT pass --no_cfl_override: doing so disables the
+    # solver's `substep_dt = min(recipe_dt, cfl_dt)` safety net, letting a
+    # too-large recipe substep_dt diverge silently. The clamp only ever
+    # tightens dt, so it's always safe to leave on.
+    argv = _build_argv(_make_engine(sim_fast=True))
+    assert "--no_cfl_override" not in argv
+
+
+def test_fast_path_still_enables_graph_capture() -> None:
+    # --graph_capture is an orthogonal perf optimization (CUDA graph fusion)
+    # with no bearing on time-step stability — it stays on the fast path.
+    argv = _build_argv(_make_engine(sim_fast=True))
+    assert "--graph_capture" in argv
+
+
+def test_build_sim_argv_has_required_invariant_flags() -> None:
+    # Sanity: the core argv shape is unchanged regardless of fast/slow.
+    for fast in (False, True):
+        argv = _build_argv(_make_engine(sim_fast=fast))
+        assert "--model_path" in argv
+        assert "--output_path" in argv
+        assert "--config" in argv
+        assert "--target_particles" in argv
+        assert "--output_ply" in argv
+        assert "--async_io" in argv
