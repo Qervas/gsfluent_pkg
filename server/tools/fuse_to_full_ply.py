@@ -10,8 +10,13 @@ Legacy script flags (--no_zup, --knn_rotation, --watch, --subsample,
 --no-center_at_origin, --xyz_only_after_first, particle_F cov-field path)
 are NOT exposed in the Phase 2 wrapper. The Protocol contract enshrines the
 production defaults: K-NN with K>=1, source-scale output, Y-up to Z-up,
-centered at origin, no rotation update. Bring them back in a future sprint
-if the use cases reappear.
+centered at origin. Per-splat Kabsch rotation (the rotation the class name
+always promised) is now ON by default in KNNKabschFuser for K>=2 — each splat
+picks up the local rigid rotation of its K nearest sim particles and composes
+it onto the rest quaternion, with zero .gsq schema change (v1 already stores a
+per-frame quaternion). The dropped --knn_rotation toggle is therefore obsolete:
+rotation is the default, not an opt-in. Bring back the other legacy paths in a
+future sprint if the use cases reappear.
 
 Usage:
     python server/tools/fuse_to_full_ply.py \\
