@@ -6,6 +6,7 @@ import pytest
 from gsfluent.core.sim_engines.mpm import (
     MPMErrorPattern,
     MPMSimulationEngine,
+    _expected_sim_frames,
     check_sim_stability,
     classify_stderr,
     load_error_patterns,
@@ -166,3 +167,68 @@ def test_check_sim_stability_respects_tolerance() -> None:
 def test_check_sim_stability_no_sim_frames_is_noop() -> None:
     # Empty sim output is a different failure path (handled elsewhere).
     assert check_sim_stability(n_sim=0, n_fused=0, allowed_nonfinite=0) is None
+
+
+def test_check_sim_stability_flags_truncated_sim() -> None:
+    # The headline production bug: a diverged solver stops EARLY, so it
+    # writes fewer sim frames than the recipe requested. The fuser keeps
+    # every frame the sim emitted (n_sim == n_fused), so the NaN-drop
+    # signature alone misses it — but expected_frames catches the shortfall.
+    msg = check_sim_stability(
+        n_sim=8, n_fused=8, allowed_nonfinite=0, expected_frames=13
+    )
+    assert msg is not None
+    assert "diverged" in msg.lower()
+    assert "8" in msg and "13" in msg
+
+
+def test_check_sim_stability_complete_run_with_expected_is_ok() -> None:
+    # A complete run: sim wrote all requested frames, all fused. No flag.
+    assert (
+        check_sim_stability(
+            n_sim=13, n_fused=13, allowed_nonfinite=0, expected_frames=13
+        )
+        is None
+    )
+
+
+def test_check_sim_stability_truncation_respects_tolerance() -> None:
+    # One missing frame within tolerance is allowed; two exceeds it.
+    assert (
+        check_sim_stability(
+            n_sim=12, n_fused=12, allowed_nonfinite=1, expected_frames=13
+        )
+        is None
+    )
+    assert (
+        check_sim_stability(
+            n_sim=11, n_fused=11, allowed_nonfinite=1, expected_frames=13
+        )
+        is not None
+    )
+
+
+def test_check_sim_stability_expected_none_is_backward_compatible() -> None:
+    # Legacy callers pass no expected_frames: behaviour is exactly the old
+    # NaN-drop-only check.
+    assert (
+        check_sim_stability(n_sim=13, n_fused=13, allowed_nonfinite=0) is None
+    )
+    assert (
+        check_sim_stability(n_sim=13, n_fused=5, allowed_nonfinite=0) is not None
+    )
+
+
+def test_expected_sim_frames_is_frame_num_plus_one() -> None:
+    # A complete sim writes frame_num + 1 plys (frame 0 = initial state).
+    # Empirically confirmed: frame_num=30 -> 31, 150 -> 151, 12 -> 13.
+    assert _expected_sim_frames({"frame_num": 12}) == 13
+    assert _expected_sim_frames({"frame_num": 30}) == 31
+
+
+def test_expected_sim_frames_missing_or_invalid_is_none() -> None:
+    # No usable frame_num -> None so the guard falls back to NaN-drop only
+    # (never a false positive from a missing field).
+    assert _expected_sim_frames({}) is None
+    assert _expected_sim_frames({"frame_num": "nope"}) is None
+    assert _expected_sim_frames({"frame_num": 0}) is None

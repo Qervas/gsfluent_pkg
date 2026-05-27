@@ -114,20 +114,55 @@ def _kind_to_exception(kind: str, message: str) -> Exception:
 
 
 def check_sim_stability(
-    *, n_sim: int, n_fused: int, allowed_nonfinite: int
+    *,
+    n_sim: int,
+    n_fused: int,
+    allowed_nonfinite: int,
+    expected_frames: int | None = None,
 ) -> str | None:
     """Detect a diverged simulation from a frame-count shortfall.
 
-    The fuser silently skips sim frames whose particle positions are
-    non-finite (NaN/Inf), so fewer fused frames than sim frames means the
-    MPM solver went numerically unstable mid-run. Returns a human-readable
-    error message when the shortfall exceeds ``allowed_nonfinite`` (so the
-    run fails loudly instead of being marked done with a truncated
+    Two divergence signatures are caught:
+
+    1. **Fuser drop** (``n_fused < n_sim``): the fuser silently skips sim
+       frames whose particle positions are non-finite (NaN/Inf), so fewer
+       fused frames than sim frames means the MPM solver produced unusable
+       (NaN) particles mid-run.
+
+    2. **Sim truncation** (``n_sim < expected_frames``): the MPM solver can
+       also blow up and terminate *early*, writing fewer sim frames than the
+       recipe requested. In that case ``n_sim == n_fused`` (the fuser keeps
+       every frame the sim emitted), so signature 1 misses it — yet the
+       sequence is still a silently-truncated, diverged run. ``expected_frames``
+       is the count the recipe asked for; when provided and the sim wrote
+       fewer than that, the run is flagged.
+
+    Returns a human-readable error message when either signature trips (so
+    the run fails loudly instead of being marked done with a truncated
     sequence), else ``None``. ``n_sim <= 0`` is a different failure path
     (no sim output at all) handled elsewhere.
+
+    ``allowed_nonfinite`` tolerates up to that many dropped/missing frames
+    (applies to both signatures) before flagging.
     """
     if n_sim <= 0:
         return None
+
+    # Signature 2: the sim itself stopped early (n_sim == n_fused but short
+    # of what the recipe requested). Checked first because a truncated sim
+    # is the more common production divergence and the more misleading
+    # "done" result. expected_frames is None for legacy callers / tests that
+    # only exercise signature 1.
+    if expected_frames is not None and expected_frames > 0:
+        missing = expected_frames - n_sim
+        if missing > allowed_nonfinite:
+            return (
+                f"simulation diverged: only {n_sim} of {expected_frames} "
+                f"requested frames were produced before the solver stopped "
+                f"({missing} missing). The recipe is numerically unstable."
+            )
+
+    # Signature 1: the fuser dropped NaN/Inf frames the sim did emit.
     dropped = n_sim - n_fused
     if dropped > allowed_nonfinite:
         return (
@@ -351,8 +386,17 @@ class MPMSimulationEngine:
         # GSFLUENT_ALLOWED_NONFINITE_FRAMES (default 0 = any drop is a failure).
         n_sim_frames = sum(1 for _ in sim_ply_dir.glob("sim_*.ply"))
         allowed = int(os.environ.get("GSFLUENT_ALLOWED_NONFINITE_FRAMES", "0"))
+        # A complete sim writes `frame_num + 1` plys (frame 0 is the initial
+        # state). A diverged solver can stop early and emit fewer — in which
+        # case n_sim == n_fused (the fuser keeps every frame the sim emitted)
+        # and the NaN-drop signature alone would miss it. Pass the expected
+        # count so the guard also catches a truncated sim.
+        expected_frames = _expected_sim_frames(recipe)
         unstable = check_sim_stability(
-            n_sim=n_sim_frames, n_fused=n_frames, allowed_nonfinite=allowed
+            n_sim=n_sim_frames,
+            n_fused=n_frames,
+            allowed_nonfinite=allowed,
+            expected_frames=expected_frames,
         )
         if unstable:
             on_event.emit(
@@ -457,6 +501,27 @@ def _gpu_reachable() -> bool:
         return False
     # `nvidia-smi -L` prints one "GPU N: ..." line per device.
     return any(line.startswith("GPU ") for line in result.stdout.splitlines())
+
+
+def _expected_sim_frames(recipe: ValidatedRecipe) -> int | None:
+    """How many sim_*.ply a complete run should write for this recipe.
+
+    The MPM sim emits ``frame_num + 1`` plys: one initial-state frame
+    (sim_0000000000.ply) plus one per simulated step. Empirically confirmed
+    against stable production runs (frame_num=30 -> 31 plys, 150 -> 151).
+
+    Returns None when the recipe carries no usable ``frame_num`` so the
+    guard falls back to the NaN-drop signature only (never a false positive
+    from a missing field).
+    """
+    raw = recipe.get("frame_num")
+    try:
+        frame_num = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if frame_num <= 0:
+        return None
+    return frame_num + 1
 
 
 def _find_reference_ply(model_dir: Path) -> Path | None:

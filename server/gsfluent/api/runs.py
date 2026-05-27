@@ -46,7 +46,7 @@ from ..core import library as lib
 from ..core import recipe_validation
 from ..core.library import Sequence
 from ..core.limits import CapConfig, check_recipe_caps
-from ..protocols.runs import CapExceededError, RunId, RunManager
+from ..protocols.runs import CapExceededError, RunId, RunManager, RunState
 from ..protocols.sim import ModelRef
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -601,17 +601,80 @@ def _history_entry_from_legacy_dir(d: Path) -> dict | None:
     }
 
 
+def _failed_run_overlay(request: Request) -> dict[str, dict]:
+    """Map sequence_name -> {status, error_kind, error_message} for every
+    non-successful terminal run recorded in the RunStateStore.
+
+    The library walk derives `status` from on-disk frames alone, so a run
+    that FAILED loudly (e.g. sim.unstable_recipe) but left a truncated
+    `frames/` dir behind would otherwise be reported as `status:"done"`
+    with a low frame_count — silently masking the failure the run manager
+    deliberately recorded. This overlay restores the authoritative run
+    outcome from the state store so /api/runs/history reflects FAILED /
+    CANCELLED / INTERRUPTED instead of a misleading "done".
+
+    Returns an empty map when no state store is wired (defensive — keeps
+    the endpoint working under stripped-down test apps).
+    """
+    state_store = getattr(request.app.state, "state_store", None)
+    if state_store is None:
+        return {}
+
+    # State -> the status string the HistoryEntry contract uses for it.
+    failed_states = {
+        RunState.FAILED: "failed",
+        RunState.CANCELLED: "cancelled",
+        RunState.INTERRUPTED: "interrupted",
+    }
+    overlay: dict[str, dict] = {}
+    try:
+        records = list(state_store.scan())
+    except OSError:
+        return {}
+    # Newest record wins per sequence_name (a re-run reuses the name): sort
+    # by finished_at/submitted_at ascending so the last write overwrites.
+    def _ts(rec) -> float:
+        return (
+            getattr(rec, "finished_at", None)
+            or getattr(rec, "submitted_at", None)
+            or 0.0
+        )
+    for rec in sorted(records, key=_ts):
+        name = rec.sequence_name
+        if not name:
+            continue
+        status = failed_states.get(rec.state)
+        if status is None:
+            # COMPLETED / in-flight states: don't override the library walk
+            # (a COMPLETED run is correctly "done"; in-flight runs aren't in
+            # history yet).
+            continue
+        info: dict = {"status": status}
+        err = getattr(rec, "error", None)
+        if isinstance(err, dict):
+            if err.get("kind"):
+                info["error_kind"] = err["kind"]
+            if err.get("message"):
+                info["error_message"] = err["message"]
+        overlay[name] = info
+    return overlay
+
+
 @router.get("/history")
-def history():
+def history(request: Request):
     """List all past runs in the library, newest-first.
 
     Walks `library.SEQUENCES_DIR` and merges each sequence's `_meta.json`
-    + (where present) `manifest.json` into a HistoryEntry-shaped dict.
-    Falls back to the legacy `_LEGACY_RUNS_DIR` walk for any pre-migration
-    data; tests patch `_LEGACY_RUNS_DIR` to a tmp dir.
+    + (where present) `manifest.json` into a HistoryEntry-shaped dict, then
+    overlays the authoritative run outcome from the RunStateStore so FAILED
+    runs (e.g. sim.unstable_recipe) aren't reported as "done" just because a
+    truncated frames/ dir exists on disk. Falls back to the legacy
+    `_LEGACY_RUNS_DIR` walk for any pre-migration data; tests patch
+    `_LEGACY_RUNS_DIR` to a tmp dir.
     """
     out: list[dict] = []
     seen_names: set[str] = set()
+    overlay = _failed_run_overlay(request)
 
     if lib.SEQUENCES_DIR.is_dir():
         for name in Sequence.list():
@@ -641,6 +704,21 @@ def history():
                     seen_names.add(d.name)
         except OSError:
             pass
+
+    # Overlay authoritative run outcomes from the state store. A run the
+    # run manager recorded as FAILED/CANCELLED/INTERRUPTED must NOT report
+    # as "done" just because the library walk found a (truncated) frames
+    # dir — that was the silent-corruption bug (sim.unstable_recipe runs
+    # showed status:"done" with a low frame_count).
+    if overlay:
+        for entry in out:
+            info = overlay.get(entry.get("run_name"))
+            if info is not None:
+                entry["status"] = info["status"]
+                if "error_kind" in info:
+                    entry["error_kind"] = info["error_kind"]
+                if "error_message" in info:
+                    entry["error_message"] = info["error_message"]
 
     # Sort newest-first by `started_at` (manifest field) so the UI
     # ordering matches the previous behavior.

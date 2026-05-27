@@ -190,3 +190,80 @@ def test_history_reads_library_sequences(client, tmp_path, monkeypatch):
     assert entry["recipe_source"] == "jelly"
     assert entry["model_ref"] == "my_model"
     assert entry["sequence_source"] == "sim"
+
+
+def test_history_reflects_failed_run_not_done(client, tmp_path, monkeypatch):
+    """REGRESSION: a run the run manager recorded as FAILED
+    (sim.unstable_recipe) must report status:"failed" in history — NOT
+    "done" — even though a truncated frames/ dir exists on disk.
+
+    This is the deployed-feature bug: a diverged sim was marked FAILED in
+    the RunStateStore, but /api/runs/history derived status from frame
+    presence alone and reported the truncated sequence as a successful
+    "done" with a low frame_count, silently masking the failure.
+    """
+    from gsfluent.core.state import RunState, RunStateRecord
+
+    _isolate(monkeypatch, tmp_path)
+    _clear_run_state(client)
+
+    # A truncated sequence on disk: 3 frames where 13 were requested.
+    seq_dir = tmp_path / "library" / "sequences" / "diverged_run"
+    (seq_dir / "frames").mkdir(parents=True)
+    for i in range(3):
+        (seq_dir / "frames" / f"frame_{i:04d}.ply").write_text("ply")
+
+    # The run manager recorded this run as FAILED with the unstable kind.
+    state = client.app.state.state_store
+    state.write(RunStateRecord(
+        id="deadbeef0001",
+        state=RunState.FAILED,
+        sequence_name="diverged_run",
+        error={
+            "kind": "sim.unstable_recipe",
+            "message": "simulation diverged: only 3 of 13 requested frames",
+        },
+    ))
+    try:
+        rr = client.get("/api/runs/history")
+        assert rr.status_code == 200
+        entry = next(
+            (x for x in rr.json() if x["run_name"] == "diverged_run"), None
+        )
+        assert entry is not None
+        # The headline assertion: NOT "done".
+        assert entry["status"] == "failed"
+        assert entry["error_kind"] == "sim.unstable_recipe"
+    finally:
+        _clear_run_state(client)
+
+
+def test_history_keeps_completed_run_done(client, tmp_path, monkeypatch):
+    """A run recorded COMPLETED in the state store stays "done" in history
+    — the overlay must only override non-successful terminal states."""
+    from gsfluent.core.state import RunState, RunStateRecord
+
+    _isolate(monkeypatch, tmp_path)
+    _clear_run_state(client)
+
+    seq_dir = tmp_path / "library" / "sequences" / "good_run"
+    (seq_dir / "frames").mkdir(parents=True)
+    (seq_dir / "frames" / "frame_0000.ply").write_text("ply")
+
+    state = client.app.state.state_store
+    state.write(RunStateRecord(
+        id="deadbeef0002",
+        state=RunState.COMPLETED,
+        sequence_name="good_run",
+    ))
+    try:
+        rr = client.get("/api/runs/history")
+        assert rr.status_code == 200
+        entry = next(
+            (x for x in rr.json() if x["run_name"] == "good_run"), None
+        )
+        assert entry is not None
+        assert entry["status"] == "done"
+        assert "error_kind" not in entry
+    finally:
+        _clear_run_state(client)
