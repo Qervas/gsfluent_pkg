@@ -56,7 +56,7 @@
   "flip_pic_ratio": 0.99,
   "plastic_viscosity": 0.0,
   "rpic_damping": 0.0,
-  "grid_v_damping_scale": 1.1,
+  "grid_v_damping_scale": 0.95,
   "boundary_conditions": [
     {
       "type": "bounding_box"
