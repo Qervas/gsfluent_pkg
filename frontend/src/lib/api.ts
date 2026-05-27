@@ -243,5 +243,24 @@ export const api = {
       f(`/api/sequences/${encodeURIComponent(name)}`, { method: "DELETE" }).then(
         j<{ deleted: string }>,
       ),
+    // On-demand .gsq cache build. The client POSTs build to kick off
+    // pack_splats.py server-side (idempotent — fast "done" if the .gsq
+    // already exists), then polls buildStatus until done/error. See
+    // server/gsfluent/api/sequences.py.
+    buildCache: (name: string) =>
+      f(`/api/sequences/${encodeURIComponent(name)}/cache/build`, {
+        method: "POST",
+      }).then(j<CacheBuildStatus>),
+    buildStatus: (name: string) =>
+      f(`/api/sequences/${encodeURIComponent(name)}/cache/build-status`).then(
+        j<CacheBuildStatus>,
+      ),
   },
+};
+
+/** Server-side .gsq cache build job state. */
+export type CacheBuildStatus = {
+  name: string;
+  state: "idle" | "building" | "done" | "error";
+  error?: string | null;
 };

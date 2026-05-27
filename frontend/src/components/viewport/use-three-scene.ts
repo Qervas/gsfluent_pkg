@@ -12,6 +12,10 @@ export interface ThreeScene {
   /** Frame the camera + drop a ground grid for a scene of this bbox. */
   frame: (bboxMin: ArrayLike<number>, bboxMax: ArrayLike<number>) => void;
   clearGround: () => void;
+  /** Register a callback run once per rAF frame, BEFORE render, with the ms
+   *  since the previous frame. Pass null to clear. Drives sequence playback
+   *  in lockstep with rendering. */
+  setFrameCallback: (cb: ((dtMs: number) => void) | null) => void;
 }
 
 /** Owns the raw three.js + Spark render context for the viewport: one canvas,
@@ -25,6 +29,7 @@ export function useThreeScene(): ThreeScene {
     camera: THREE.PerspectiveCamera; controls: OrbitControls;
     grid: THREE.GridHelper | null;
   } | null>(null);
+  const frameCb = useRef<((dtMs: number) => void) | null>(null);
 
   useEffect(() => {
     const mount = mountRef.current!;
@@ -41,8 +46,13 @@ export function useThreeScene(): ThreeScene {
     ctx.current = { renderer, scene, camera, controls, grid: null };
 
     let raf = 0;
+    let prev = performance.now();
     const loop = () => {
       raf = requestAnimationFrame(loop);
+      const now = performance.now();
+      const dt = now - prev;
+      prev = now;
+      frameCb.current?.(dt);
       controls.update();
       renderer.render(scene, camera);
     };
@@ -73,6 +83,7 @@ export function useThreeScene(): ThreeScene {
       const c = ctx.current;
       if (c?.grid) { c.scene.remove(c.grid); c.grid = null; }
     },
+    setFrameCallback: (cb) => { frameCb.current = cb; },
     frame: (bmin, bmax) => {
       const c = ctx.current;
       if (!c) return;

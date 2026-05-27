@@ -4,23 +4,10 @@ import { CellRef } from "./cell";
 
 type SimState = "idle" | "running" | "done" | "error" | "cancelled";
 
-// Phase 3 playback speed: 1× = sequence's fps_hint (24 by default).
-// Multiplier scales the inter-frame DELAY, not the index step — so 4× still
-// hits every frame, just faster. Stays a finite enum so the dropdown is
-// 5 fixed cells and `,` / `.` keys can cycle deterministically.
-export type SpeedX = 0.25 | 0.5 | 1 | 2 | 4;
-export const SPEED_X_VALUES: SpeedX[] = [0.25, 0.5, 1, 2, 4];
-
 type State = {
-  /** Playback cursor published by SplatScene. Source of truth for
-   *  cell + frame + n_frames for the in-browser renderer.
-   *
-   *  `frame` is the SPA's *desired* playback cursor (driven by
-   *  PlaybackDriver's wall-clock advance). `pushed_frame` is what the
-   *  render loop has actually pushed to the GPU — never leads `frame`
-   *  during continuous playback (no-skip invariant). When decode is
-   *  fast, `pushed_frame == frame`; when slow, `pushed_frame < frame`
-   *  and the UI shows the held-frame index. */
+  /** Sequence metadata published by SplatScene (n_frames). The frame cursor
+   *  lives in SplatScene's rAF loop, not here — playback no longer round-trips
+   *  through React state. */
   playbackState: PlaybackState;
   setPlaybackState: (s: PlaybackState) => void;
 
@@ -70,21 +57,13 @@ type State = {
   // also produce no output for minutes at a stretch.
   simLastLogAt: number | null;
 
-  // Playback cursor — SplatScene owns the actual frame buffer; this is
-  // just the canonical scrubber index. SplatScene reads each change
-  // and decodes the corresponding .gsq frame in-browser.
-  currentFrameIdx: number;
+  // Coarse playback intent consumed by SplatScene's rAF loop (read via
+  // getState each tick — no per-frame React state). `playing`/`loop` toggle
+  // the loop; bumping `resetNonce` jumps the playhead back to frame 0.
   playing: boolean;
-
-  // Phase 3 playback slice. `playing` and `currentFrameIdx` above are kept
-  // (deliberately not renamed) so existing consumers don't break; the new
-  // fields below extend the slice with speed/loop/fpsHint plus a
-  // `scrubbing` flag the PlaybackDriver checks before advancing — when the
-  // user is mid-drag, we suspend autoplay so their drag wins.
-  speedX: SpeedX;
   loop: boolean;
   fpsHint: number;
-  scrubbing: boolean;
+  resetNonce: number;
 
   // Scene scale — diag of the active model's bbox. Phase 1 used this to
   // size the three.js grid + camera fade. These fields are vestigial
@@ -136,18 +115,13 @@ type State = {
   markRecipeClean: () => void;
   setSimState: (s: SimState) => void;
   appendLog: (line: string) => void;
-  setCurrentFrame: (i: number) => void;
   setPlaying: (p: boolean) => void;
   setSceneScale: (diag: number, center: [number, number, number]) => void;
   setSceneFloor: (z: number) => void;
-  // Phase 3 setters.
-  setSpeedX: (s: SpeedX) => void;
   setLoop: (loop: boolean) => void;
   setFpsHint: (fps: number) => void;
-  setScrubbing: (b: boolean) => void;
-  // Step the current frame by `delta` (positive or negative). Clamped to
-  // [0, playbackState.n_frames - 1] so we don't run off either end.
-  stepFrame: (delta: number) => void;
+  // Jump the playhead back to frame 0 (SplatScene's loop watches resetNonce).
+  requestReset: () => void;
   resetForNewRun: (name: string) => void;
   // Frame-progress setter driven by the run-log parser (tqdm `n/total`
   // lines). Bumps simFirstFrameAt on the 0→positive transition so the
@@ -173,7 +147,7 @@ function loadPanels(): State["panels"] {
 }
 
 export const useStore = create<State>((set) => ({
-  playbackState: { cell: null, frame: 0, n_frames: 0, pushed_frame: -1 },
+  playbackState: { n_frames: 0 },
   setPlaybackState: (s) => set({ playbackState: s }),
   activeWorkspace: "sim",
   setActiveWorkspace: (w) => set({ activeWorkspace: w }),
@@ -214,18 +188,13 @@ export const useStore = create<State>((set) => ({
   simStartedAt: null,
   simFirstFrameAt: null,
   simLastLogAt: null,
-  currentFrameIdx: 0,
   playing: true,
-  speedX: 1,
   loop: true,
-  // Default playback at 12 fps, not 24. Each frame pushes the full
-  // splat-centers array over the WS (~8 MB for cluster_6_15-class
-  // scenes); 24 fps × 8 MB = ~200 MB/s, which neither the WAN link
-  // nor the in-browser WASM sorter can sustain, so playback stalls
-  // for seconds at a time. 12 fps is roughly the steady-state ceiling
-  // here and stays smooth.
+  // App-level default/cap for fps. The actual playback rate is each .gsq's
+  // own header fps_hint, read in-loop by SplatScene (no network per frame
+  // anymore, so no artificial throttle needed).
   fpsHint: 12,
-  scrubbing: false,
+  resetNonce: 0,
   sceneScale: 10,
   sceneCenter: [0, 0, 0],
   sceneFloor: 0,
@@ -275,35 +244,25 @@ export const useStore = create<State>((set) => ({
       simLog: [...st.simLog.slice(-1999), line],
       simLastLogAt: Date.now(),
     })),
-  setCurrentFrame: (i) => set({ currentFrameIdx: i }),
   setPlaying: (p) => set({ playing: p }),
   setSceneScale: (diag, center) => set({ sceneScale: diag, sceneCenter: center }),
   setSceneFloor: (z) => set({ sceneFloor: z }),
-  setSpeedX: (s) => set({ speedX: s }),
   setLoop: (loop) => set({ loop }),
   setFpsHint: (fps) => set({ fpsHint: fps > 0 ? fps : 24 }),
-  setScrubbing: (b) => set({ scrubbing: b }),
-  stepFrame: (delta) =>
-    set((st) => {
-      const upper = Math.max(0, st.playbackState.n_frames - 1);
-      const next = Math.min(upper, Math.max(0, st.currentFrameIdx + delta));
-      return { currentFrameIdx: next };
-    }),
+  requestReset: () => set((st) => ({ resetNonce: st.resetNonce + 1 })),
   resetForNewRun: (_name) =>
     set({
       simState: "running",
       simNFrames: 0,
       simLog: [],
-      currentFrameIdx: 0,
       simStage: "starting",
       simStartedAt: Date.now(),
       simFirstFrameAt: null,
       simLastLogAt: null,
       sceneFloor: 0,
-      // Don't reset speedX / loop / fpsHint here — those are user-tweaked
-      // playback prefs that should persist across runs. fpsHint is owned
-      // by the SequenceTree onPick handler / live-sim pump and overwritten
-      // when a new sequence is loaded.
+      // Don't reset loop / fpsHint here — those are user-tweaked playback
+      // prefs that persist across runs. fpsHint is owned by App's sequence
+      // watcher / live-sim pump and overwritten when a new sequence loads.
     }),
   setSimProgress: (nFrames, totalFrames) =>
     set((st) => ({

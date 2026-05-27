@@ -1,175 +1,50 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  Pause,
-  Play,
-  Repeat,
-  SkipBack,
-  SkipForward,
-} from "lucide-react";
-import { useStore, SPEED_X_VALUES, type SpeedX } from "@/lib/store";
+import { useEffect } from "react";
+import { Pause, Play, Repeat, RotateCcw } from "lucide-react";
+import { useStore } from "@/lib/store";
 import { useActiveCell } from "@/lib/use-active-cell";
 
 /**
- * Persistent transport bar at the bottom of the viewport. Visible only
- * when a playable sequence is active (activeCell.kind === "sequence" +
- * at least 2 frames landed) — single-frame model previews skip the bar
- * entirely.
+ * Minimal transport bar: play/pause, reset-to-start, loop. No scrubber —
+ * playback runs entirely in SplatScene's rAF loop, so the bar only carries
+ * coarse intent (no per-frame React state, which was the old stutter source).
+ * Visible only for sequences with at least 2 frames.
  *
- * Spec layout:
- *   [◀◀] [▶/⏸] [▶▶]   ▰▰▰▰▰▱▱▱▱▱   12 / 30   1×▾   ↻
+ *   [↻reset] [▶/⏸]  [↻loop]
  *
- * All state lives in the zustand `Playback` slice; this component only
- * dispatches actions. Frame-advance ticks are owned by PlaybackDriver,
- * not here.
+ * Keyboard: Space = play/pause, L = loop, 0 = reset (skips when focus is in
+ * an editable element so we don't fight text entry).
  */
 export function PlaybackBar() {
   const { isSequence } = useActiveCell();
-  const simState = useStore((s) => s.simState);
   const simTotalFrames = useStore((s) => s.simTotalFrames);
   const nFrames = useStore((s) => s.playbackState.n_frames);
-  // The scrubber shows where the renderer is actually painting, not where
-  // React intends to be — otherwise the bar leads the splat whenever
-  // a frame takes more than 1/fpsHint to decode, and the user perceives
-  // the bar and the splat as on different clocks.
-  //
-  // Two related quantities live in playbackState:
-  //   - `frame` = SPA's desired playback cursor (wall-clock-driven advance
-  //     target; echoed back from the render loop after the GPU write).
-  //   - `pushed_frame` = the frame the render loop has ACTUALLY pushed to
-  //     the GPU. During continuous playback the no-skip loop only ever
-  //     advances pushed by 1 per tick; if decode lags, pushed trails frame.
-  //
-  // We display pushed_frame as the primary cursor (so the bar never
-  // leads the splats during a stutter), falling back to `frame` when
-  // pushed_frame is -1 (no frame pushed yet, initial paint pending).
-  const playbackFrame = useStore((s) => s.playbackState.frame);
-  const pushedFrame = useStore((s) => s.playbackState.pushed_frame);
-  const currentFrameIdx = useStore((s) => s.currentFrameIdx);
   const playing = useStore((s) => s.playing);
-  const speedX = useStore((s) => s.speedX);
   const loop = useStore((s) => s.loop);
-  const setCurrentFrame = useStore((s) => s.setCurrentFrame);
   const setPlaying = useStore((s) => s.setPlaying);
-  const setSpeedX = useStore((s) => s.setSpeedX);
   const setLoop = useStore((s) => s.setLoop);
-  const setScrubbing = useStore((s) => s.setScrubbing);
-  const stepFrame = useStore((s) => s.stepFrame);
-  const scrubbing = useStore((s) => s.scrubbing);
+  const requestReset = useStore((s) => s.requestReset);
 
-  const [speedOpen, setSpeedOpen] = useState(false);
-  const speedRef = useRef<HTMLDivElement | null>(null);
+  const totalFrames = simTotalFrames > 0 ? simTotalFrames : nFrames;
+  const visible = isSequence && (totalFrames >= 2 || nFrames >= 2);
 
-  // Click-outside dismiss for the speed dropdown.
   useEffect(() => {
-    if (!speedOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (
-        speedRef.current &&
-        !speedRef.current.contains(e.target as Node)
-      ) {
-        setSpeedOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [speedOpen]);
-
-  // Scoped keyboard layer — only active when the playback bar is on
-  // screen. The button `title`s advertise these shortcuts; this is the
-  // wiring. Skips when the user is in any editable element (palette
-  // input, recipe name prompt, etc.) so we don't fight text entry.
-  useEffect(() => {
-    const totalKnown = simTotalFrames > 0 ? simTotalFrames : nFrames;
-    if (!isSequence || (totalKnown < 2 && nFrames < 2)) return;
+    if (!visible) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       const tag = t?.tagName?.toUpperCase();
-      const editable =
-        tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
-        t?.isContentEditable === true;
-      if (editable) return;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-
       switch (e.key) {
-        case " ":
-          e.preventDefault();
-          setPlaying(!playing);
-          break;
-        case "ArrowLeft":
-          e.preventDefault();
-          stepFrame(-1);
-          break;
-        case "ArrowRight":
-          e.preventDefault();
-          stepFrame(1);
-          break;
-        case "l":
-        case "L":
-          e.preventDefault();
-          setLoop(!loop);
-          break;
-        case ",": {
-          e.preventDefault();
-          const i = SPEED_X_VALUES.indexOf(speedX);
-          if (i > 0) setSpeedX(SPEED_X_VALUES[i - 1]);
-          break;
-        }
-        case ".": {
-          e.preventDefault();
-          const i = SPEED_X_VALUES.indexOf(speedX);
-          if (i < SPEED_X_VALUES.length - 1) setSpeedX(SPEED_X_VALUES[i + 1]);
-          break;
-        }
+        case " ": e.preventDefault(); setPlaying(!playing); break;
+        case "l": case "L": e.preventDefault(); setLoop(!loop); break;
+        case "0": e.preventDefault(); requestReset(); break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [
-    isSequence,
-    simTotalFrames,
-    nFrames,
-    playing,
-    loop,
-    speedX,
-    setPlaying,
-    setLoop,
-    setSpeedX,
-    stepFrame,
-  ]);
+  }, [visible, playing, loop, setPlaying, setLoop, requestReset]);
 
-  // Prefer the server-authoritative total so the scrubber spans the
-  // full range from the start of playback. Fall back to the in-browser
-  // decoder's n_frames for orphan sequences with no metadata.
-  const totalFrames = simTotalFrames > 0 ? simTotalFrames : nFrames;
-  const loadedFrames = nFrames;             // how many frames SplatScene has decoded
-  const lastIdx = Math.max(totalFrames - 1, 0);
-
-  // Visibility gate: bar shows once we know the run has more than one
-  // frame — either from the server total or from n_frames. Hides the
-  // single-frame static-model preview entirely (kind !== sequence).
-  if (!isSequence || (totalFrames < 2 && nFrames < 2)) return null;
-
-  const isLive = simState === "running";
-  // During a manual scrub the user owns the slider, so show their
-  // intent (currentFrameIdx). During autoplay show what SplatScene has
-  // actually pushed to the GPU (pushed_frame) so the bar matches the
-  // splat one-for-one even when decode lags. pushed_frame=-1 means no
-  // frame pushed yet (initial paint or no cell); fall back to playbackFrame
-  // for the SPA-side state cursor.
-  const renderedFrame = pushedFrame >= 0 ? pushedFrame : playbackFrame;
-  const displayFrame = scrubbing ? currentFrameIdx : renderedFrame;
-
-  const onScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseInt(e.target.value, 10);
-    if (Number.isFinite(v)) setCurrentFrame(v);
-  };
-
-  // Mouse-down arms `scrubbing` so PlaybackDriver suspends advance while
-  // the drag is in progress; mouse-up clears it. Touch end and blur
-  // round out the cases where the drag implicitly terminates without a
-  // mouse-up event.
-  const armScrub = () => setScrubbing(true);
-  const releaseScrub = () => setScrubbing(false);
+  if (!visible) return null;
 
   return (
     <div
@@ -177,14 +52,14 @@ export function PlaybackBar() {
       role="toolbar"
       aria-label="Playback controls"
     >
-      {/* Step back */}
+      {/* Reset to start */}
       <button
         className="p-1 text-text-secondary hover:text-text-primary hover:bg-elevated rounded transition-colors"
-        onClick={() => stepFrame(-1)}
-        title="Previous frame (←)"
-        aria-label="Previous frame"
+        onClick={() => requestReset()}
+        title="Reset to start (0)"
+        aria-label="Reset to start"
       >
-        <SkipBack size={14} />
+        <RotateCcw size={14} />
       </button>
 
       {/* Play / pause */}
@@ -197,103 +72,11 @@ export function PlaybackBar() {
         {playing ? <Pause size={16} /> : <Play size={16} />}
       </button>
 
-      {/* Step forward */}
-      <button
-        className="p-1 text-text-secondary hover:text-text-primary hover:bg-elevated rounded transition-colors"
-        onClick={() => stepFrame(1)}
-        title="Next frame (→)"
-        aria-label="Next frame"
-      >
-        <SkipForward size={14} />
-      </button>
-
-      {/* Scrubber with buffer overlay showing loaded fraction */}
-      <div className="relative w-56 flex items-center">
-        <div
-          className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-1 bg-elevated/60 rounded pointer-events-none overflow-hidden"
-          aria-hidden
-        >
-          {/* Loaded buffer — accent at low opacity, ends at the most-recent loaded frame */}
-          <div
-            className="h-full bg-accent/30"
-            style={{
-              width: `${totalFrames > 0 ? (loadedFrames / totalFrames) * 100 : 100}%`,
-            }}
-          />
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={lastIdx}
-          step={1}
-          value={displayFrame}
-          onChange={onScrubChange}
-          onMouseDown={armScrub}
-          onMouseUp={releaseScrub}
-          onTouchStart={armScrub}
-          onTouchEnd={releaseScrub}
-          onBlur={releaseScrub}
-          className="playback-scrubber relative w-full accent-accent"
-          aria-label="Frame scrubber"
-        />
-      </div>
-
-      {/* Frame counter */}
-      <div className="font-mono text-[11px] tabular-nums text-text-secondary whitespace-nowrap">
-        <span className="text-text-primary">{displayFrame}</span>
-        <span className="text-text-muted"> / </span>
-        <span>{lastIdx}</span>
-        {isLive && (
-          <span className="ml-1 text-accent">(sim running)</span>
-        )}
-      </div>
-
-      {/* Speed dropdown */}
-      <div className="relative" ref={speedRef}>
-        <button
-          className="px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider text-text-secondary hover:text-text-primary hover:bg-elevated border border-border rounded transition-colors"
-          onClick={() => setSpeedOpen((o) => !o)}
-          title="Playback speed (, / .)"
-          aria-haspopup="menu"
-          aria-expanded={speedOpen}
-        >
-          {formatSpeed(speedX)}
-        </button>
-        {speedOpen && (
-          <div
-            className="absolute bottom-full mb-1 right-0 bg-canvas border border-border rounded shadow-lg overflow-hidden z-20"
-            role="menu"
-          >
-            {SPEED_X_VALUES.map((s) => (
-              <button
-                key={s}
-                onClick={() => {
-                  setSpeedX(s);
-                  setSpeedOpen(false);
-                }}
-                className={
-                  "block w-full px-3 py-1 text-left text-[11px] font-mono tabular-nums transition-colors " +
-                  (s === speedX
-                    ? "text-accent bg-elevated"
-                    : "text-text-secondary hover:text-text-primary hover:bg-elevated")
-                }
-                role="menuitem"
-              >
-                {formatSpeed(s)}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
       {/* Loop toggle */}
       <button
-        className={
-          "p-1 rounded transition-colors hover:bg-elevated " +
-          (loop ? "text-accent" : "text-text-muted")
-        }
+        className={"p-1 rounded transition-colors hover:bg-elevated " + (loop ? "text-accent" : "text-text-muted")}
         onClick={() => setLoop(!loop)}
-        title={loop ? "Loop on (L) — click to stop at end" : "Loop off (L) — click to cycle"}
+        title={loop ? "Loop on (L)" : "Loop off (L)"}
         aria-label={loop ? "Disable loop" : "Enable loop"}
         aria-pressed={loop}
       >
@@ -301,12 +84,4 @@ export function PlaybackBar() {
       </button>
     </div>
   );
-}
-
-/** Render the speed multiplier — quarter and half show as decimals,
- * integers as plain numbers, all suffixed with `×`. */
-function formatSpeed(s: SpeedX): string {
-  if (s === 0.25) return "0.25×";
-  if (s === 0.5) return "0.5×";
-  return `${s}×`;
 }

@@ -72,12 +72,11 @@ export type BCFieldSpec = {
 export type BCSchemas = Record<string, BCFieldSpec[]>;
 export type MaterialDefaults = Record<string, Record<string, number>>;
 
-// Playback cursor published into the store by SplatScene.
+// Sequence metadata published into the store by SplatScene. The frame cursor
+// itself lives in SplatScene's rAF loop (not React) — only the total count is
+// surfaced, to drive PlaybackBar visibility + StatusPanel. Set once on load.
 export type PlaybackState = {
-  cell: string | null;
-  frame: number;
   n_frames: number;
-  pushed_frame: number;
 };
 
 // Diagnostics — one row per moving part of the split-topology dev stack.

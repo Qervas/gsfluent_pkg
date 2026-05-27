@@ -1,10 +1,10 @@
 /**
- * Pure playback helpers for the Phase 3 transport bar / driver.
+ * Pure playback helpers for the rAF playback loop.
  *
- * No React, no zustand, no DOM — these are deterministic functions over
- * primitives so the driver and the bar stay testable and the advance
- * logic lives in exactly one place. Both the PlaybackDriver and the
- * keyboard shortcut handlers go through them.
+ * No React, no zustand, no DOM — deterministic functions over primitives so
+ * the advance logic lives in exactly one place and stays unit-testable.
+ * SplatScene's per-frame rAF callback drives `tickPlayback`; nothing else
+ * advances frames.
  */
 
 /**
@@ -35,14 +35,42 @@ export function nextFrame(
   return idx + 1;
 }
 
+export interface TickResult {
+  /** Frame index after this tick. */
+  frame: number;
+  /** Accumulator carry-over (ms) into the next tick. */
+  acc: number;
+  /** True when this tick advanced to a new frame (caller must re-render it). */
+  advanced: boolean;
+  /** True when playback hit the end with loop off (caller should pause). */
+  stopped: boolean;
+}
+
 /**
- * Inter-frame delay in milliseconds for the given fps_hint and speed
- * multiplier. 1× = `1000 / fpsHint` (default 24 fps → ~41.7 ms). Higher
- * speedX shrinks the delay; lower speedX stretches it. The frame index
- * step is always 1 — speedX never skips frames, only changes pacing.
+ * One wall-clock-accumulator playback step — the pure core of the rAF loop
+ * (mirrors spike-spark/src/main.ts). Advances AT MOST one frame per call and
+ * resets the accumulator to 0 on advance, so a long stall plays slow rather
+ * than skipping frames (strict-sequential / stutter-over-skip invariant).
  */
-export function frameDelayMs(fpsHint: number, speedX: number): number {
-  const fps = fpsHint > 0 ? fpsHint : 24;
-  const sx = speedX > 0 ? speedX : 1;
-  return 1000 / (fps * sx);
+export function tickPlayback(
+  frame: number,
+  acc: number,
+  dtMs: number,
+  intervalMs: number,
+  frameCount: number,
+  playing: boolean,
+  loop: boolean,
+): TickResult {
+  if (!playing || frameCount < 2) {
+    return { frame, acc: 0, advanced: false, stopped: false };
+  }
+  const next = acc + dtMs;
+  if (next < intervalMs) {
+    return { frame, acc: next, advanced: false, stopped: false };
+  }
+  const nf = nextFrame(frame, frameCount, loop);
+  if (nf === "stop") {
+    return { frame, acc: 0, advanced: false, stopped: true };
+  }
+  return { frame: nf, acc: 0, advanced: true, stopped: false };
 }
