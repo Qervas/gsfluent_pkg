@@ -4,6 +4,43 @@ All notable user-visible changes to gsfluent. Follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Frontend: in-browser playback + run→play
+
+Sequence playback now runs entirely client-side in one
+`requestAnimationFrame` loop (no React-state frame clock), and a
+freshly-run sequence builds its `.gsq` cache on demand so it plays
+without manual steps.
+
+### Added
+
+- **Single-rAF playback.** Frame advance lives in `SplatScene`'s
+  `requestAnimationFrame` loop (wall-clock accumulator, ≤1 frame/tick —
+  never skips), decoding `.gsq` frames synchronously and writing them to
+  Spark's `setSplat`. Pure step logic in `frontend/src/lib/playback.ts`
+  (`tickPlayback`, unit-tested).
+- **Run → play orchestration.** When a sequence's `.gsq` isn't packed
+  yet, `SplatScene` waits for frames, POSTs `…/cache/build`, polls
+  `…/cache/build-status` to done, then downloads + plays — surfacing
+  waiting/building/loading states instead of a raw 404. `api.sequences`
+  gains `buildCache` / `buildStatus`.
+- **Model `.ply` recentering** (`frontend/src/lib/ply-recenter.ts`):
+  recenters vertices to the bbox centroid before Spark packs them,
+  fixing the "2 layers" collapse of float16 splat centers at large world
+  coordinates (our INRIA scans sit at ~29000).
+
+### Changed
+
+- Playback transport simplified to **play/pause · reset · loop**
+  (keyboard Space / 0 / L). The frame cursor no longer round-trips
+  through React state — that two-clock pipeline was the playback stutter.
+
+### Removed
+
+- The frame **scrubber** and the **speed** control.
+- `PlaybackDriver` (the `setTimeout` frame clock), `useGsqPlayer` + the
+  decode **Web Worker** (decode is now synchronous in the rAF loop), and
+  the store's `currentFrameIdx` / `speedX` / `scrubbing` fields.
+
 ## [Unreleased] — Backend bulletproofing slice
 
 Customer-facing hardening sprint. Pipeline shape (recipe → sim → fuse →

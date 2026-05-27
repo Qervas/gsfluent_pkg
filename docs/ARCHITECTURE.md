@@ -1,6 +1,6 @@
 # gsfluent_pkg — Architecture
 
-Status: 2026-05-26 (post in-browser renderer). Describes the
+Status: 2026-05-27 (post in-browser renderer + rAF playback rewrite). Describes the
 system as deployed today: a single v1 backend on your server (split
 into six Protocols + composition root, supervised by systemd), a
 client-local SPA that renders splats in-browser (Spark + three.js,
@@ -11,7 +11,7 @@ download-then-play), and a public NAT port linking the two.
 ## What the system is
 
 A pipeline from a trained 3DGS scene + a physics recipe to an animated
-3DGS sequence that scrubs interactively in the browser. The MPM solver
+3DGS sequence that plays back in the browser. The MPM solver
 is server-side (GPU); the viewer (React SPA with in-browser splat
 rendering via `@sparkjsdev/spark` + three.js) is client-side.
 
@@ -189,7 +189,7 @@ Splat rendering is now done entirely in-browser by `SplatScene`
 directly from `GET /api/sequences/{name}/cache/splats.gsq` and decodes
 them via `frontend/src/lib/gsq`.
 
-### `frontend/` — React + Vite + R3F workbench (client-local)
+### `frontend/` — React + Vite workbench (client-local)
 
 - Built once via `vite build` and served by `vite preview` on the
   client. Read-only against the backend over `/api/*`.
@@ -197,15 +197,23 @@ them via `frontend/src/lib/gsq`.
   - `VITE_BACKEND_URL=` — left empty so `/api/*` flows through the
     vite preview proxy; set to a full URL only when shipping the
     bundle to a static host without a preview server.
-- **Points mode** (`PointsScene.tsx`): R3F renders `THREE.Points` driven
-  by per-frame xyz over `/api/stream`. Static attrs (cov, rgb, opacity)
-  ship in frame 0; subsequent frames are int16-quantized xyz only.
-- **Splats mode** (`SplatScene.tsx`): renders `.gsq` v2 sequences and
-  static `.ply` models in-browser using `@sparkjsdev/spark` + raw
-  three.js. The SPA downloads `splats.gsq` from
-  `GET /api/sequences/{name}/cache/splats.gsq`, decodes it frame-by-frame
-  via `frontend/src/lib/gsq`, and feeds decoded splat data to Spark's
-  `setSplat` API. No external process or iframe is involved.
+- **Rendering** (`SplatScene.tsx`): a single in-browser path using
+  `@sparkjsdev/spark` + raw three.js — **no R3F, no points/`/api/stream`
+  mode** (both removed; `PointsScene` is gone). For a sequence the SPA
+  downloads `splats.gsq` from `GET /api/sequences/{name}/cache/splats.gsq`,
+  decodes it frame-by-frame via `frontend/src/lib/gsq`, and animates by
+  writing decoded splats to Spark's `setSplat` inside **one
+  `requestAnimationFrame` loop** (wall-clock accumulator, advances ≤1
+  frame/tick — never skips). Static `.ply` models render directly, but are
+  **recentered to the origin first** (`frontend/src/lib/ply-recenter.ts`)
+  to avoid Spark's float16 splat-center collapse at large world coords
+  (our INRIA scans sit at ~29000). No external process or iframe involved.
+- **Run → play orchestration:** when a freshly-run sequence's `.gsq` isn't
+  packed yet, `SplatScene` waits for frames (`frame_count ≥ 1` from the
+  sequences poll), POSTs `…/cache/build`, polls `…/cache/build-status`
+  until done, then downloads + plays. Transport is **play/pause + reset +
+  loop** (no scrubber, no speed control) — frame advance lives in the rAF
+  loop, not in React state.
 
 ### `vk_gaussian_splatting/` (sibling repo)
 
@@ -412,5 +420,5 @@ land additively in `server/recipes/*.json`.
 - A monorepo refactor.
 - A new framework / DI / plugin system.
 - A web-vs-vkgs unification. The two viewers have different goals:
-  - Web = scrub + inspect + share (workbench-grade).
+  - Web = play + inspect + share (workbench-grade).
   - vkgs = 236 fps native playback (demo-grade, currently shelved).
