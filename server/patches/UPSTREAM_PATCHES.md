@@ -2,9 +2,14 @@
 
 This directory captures hand-applied patches to the upstream
 [GaussianFluent](https://github.com/whc1992/GaussianFluent) repo. They live
-at `<GaussianFluent>/gs_simulation/watermelon/gs_simulation_building.py`
 on the sim host — **not** inside this repo's tree, because GaussianFluent
-is a separate codebase we don't fork.
+is a separate codebase we don't fork. The patched files are:
+
+| Sim-host file | Repo snapshot | Patches |
+|---|---|---|
+| `gs_simulation/watermelon/gs_simulation_building.py` | `gs_simulation_building.patched.py` | 1–6 (driver/IO) |
+| `mpm_solver_warp/mpm_solver_warp.py` | `mpm_solver_warp.patched.py` | 7 (surface-collider slip/separate) |
+| `mpm_solver_warp/mpm_utils.py` | `mpm_utils.patched.py` | 8 (snow — documented TODO, **no physics change**) |
 
 If you redeploy GaussianFluent (fresh clone, update, etc.), the patches
 disappear unless reapplied. This document is the canonical record of
@@ -24,6 +29,11 @@ SIM_BUILD="$GSFLUENT_SIM_HOME"/gs_simulation/watermelon/gs_simulation_building.p
 grep -c "particle_F\|substep_dt clamp\|output_rot" $SIM_BUILD
 # Expected: 6 or more. If 0, none of the patches are applied.
 # (output_rot present => Patch 6 / Track-1 GPU rotation export is deployed.)
+
+# Patch 7 (surface-collider slip fix) — in the solver, not the driver:
+SOLVER="$GSFLUENT_SIM_HOME"/mpm_solver_warp/mpm_solver_warp.py
+grep -c "fix:collider" $SOLVER
+# Expected: 1 if Patch 7 is applied; 0 means slip/separate are still full-stick.
 ```
 
 ---
@@ -248,6 +258,116 @@ now passes `--output_rot`.
 frame 0, 6-12° median per-particle on deforming frames, all unit + finite.
 Fuser GPU sim-R 1.05 s/frame vs CPU Kabsch 2.17 s/frame (~2×); per-splat
 output quaternions agree with CPU Kabsch to |dot| 0.98-0.99.
+
+---
+
+## Patch 7 — surface-collider `slip`/`separate` must keep the projected velocity
+
+**File:** `mpm_solver_warp/mpm_solver_warp.py` — the `collide` kernel inside
+`add_surface_collider` (~L1007, the `dotproduct < 0.0` else-branch that handles
+`surface_type` 1=slip and 2=separate).
+
+**Symptom (when missing):** *every* surface collider behaves as full-stick
+regardless of its `surface` setting. A `slip` plane silently freezes particles
+on contact instead of letting them slide tangentially; `separate` likewise
+cancels all motion instead of only the inward normal component. This affects
+production: `server/recipes/demolition.json` declares a `surface_collider` with
+`"surface": "slip"` (normal `[0,0,1]`, friction 0) — its slip plane was secretly
+sticky.
+
+**Cause:** the branch correctly computes the friction-projected velocity into a
+local `v` (slip: `v - (v·n)n`; separate: `v - min(v·n,0)n`; then Coulomb
+friction), but the **final line overwrites the grid node with `vec3(0,0,0)`**
+unconditionally — discarding the very `v` it just computed. Only `sticky`
+(`surface_type == 0`, handled in its own earlier branch) should zero the node.
+
+**Original (the offending tail of the else-branch):**
+```python
+                        if normal_component < 0.0 and wp.length(v) > 1e-20:
+                            v = wp.max(
+                                0.0, wp.length(v) + normal_component * param.friction
+                            ) * wp.normalize(
+                                v
+                            )  # apply friction here
+                        state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
+                            0.0, 0.0, 0.0
+                        )
+```
+
+**Patched (write the projected velocity instead of zeroing):**
+```python
+                        if normal_component < 0.0 and wp.length(v) > 1e-20:
+                            v = wp.max(
+                                0.0, wp.length(v) + normal_component * param.friction
+                            ) * wp.normalize(
+                                v
+                            )  # apply friction here
+                        # [fix:collider] write the friction-projected velocity.
+                        state.grid_v_out[grid_x, grid_y, grid_z] = v
+```
+
+(`sticky` is untouched — it already does `grid_v_out = vec3(0,0,0)` in the
+`param.surface_type == 0` branch above. `cut`, type 11, is also untouched.)
+
+**Validated** (2026-05-27, GPU 0): a jelly block with +x tangential velocity and
+−z gravity settling onto a `slip` plane (normal +z at z=0.5), 20×50 substeps.
+Mean tangential velocity of particles in the contact band:
+
+| Solver | mean vx (near plane) | mean x-displacement |
+|---|---|---|
+| original (buggy, full-stick) | **0.68** | 0.122 |
+| patched (slip preserved) | **1.81** | 0.200 |
+
+The patched plane lets particles keep ~2.7× more tangential velocity and slide
+~1.6× farther in x — the expected slip behavior. Normal-direction velocity
+(vz ≈ −0.31 vs −0.34) is essentially unchanged, confirming only the tangential
+component was being wrongly killed.
+
+**Deploying it requires:** drop `mpm_solver_warp.patched.py` over
+`<GaussianFluent>/mpm_solver_warp/mpm_solver_warp.py` on the sim host (back up the
+original first), then restart the backend / clear any cached CUDA-graph capture
+(the collider is a `grid_postprocess` closure baked into the captured graph, so a
+fresh sim process is needed — no source change to this repo's engine wrapper).
+No recipe, fuser, or codec change. Solver-physics change → human review before deploy.
+
+---
+
+## Patch 8 — snow (`material == 4`): documented TODO, NOT yet implemented
+
+**File:** `mpm_solver_warp/mpm_utils.py` — `compute_stress_from_F_trial`, the
+return-map dispatch (`if model.material[p] == 1 ... elif ... == 7`) and the
+stress dispatch below it.
+
+**Finding (confirmed):** there is **no `material == 4` branch** in either
+dispatch. `material_2_num` maps `"snow"` → int 4, but with no branch snow falls
+through to the elastic `else` (`particle_F = particle_F_trial`) and is rendered
+with the FCR jelly stress — i.e. **snow currently behaves exactly like jelly**,
+despite distinct `MATERIAL_DEFAULTS` (`xi=10, hardening=5, alpha_0=-0.01`).
+
+**Decision: NOT implemented — left as a precise TODO** (per the "don't guess a
+physics model" instruction). The faithful Stomakhin-2013 snow model is
+*underdetermined* in this fork:
+
+1. **No `theta_c` / `theta_s`.** Snow's return map is defined by clamping the SVD
+   singular values to `[1−theta_c, 1+theta_s]` (critical compression / stretch).
+   Neither parameter exists on `MPMModelStruct`, in any recipe, or in
+   `material_defaults.py`. Without them the model has no meaning.
+2. **`particle_Jp` is taken.** It already stores the Cam-Clay `logJp` hardening
+   state (init `alpha_0`); snow needs `Jp` as the accumulated plastic volumetric
+   determinant — conflicting semantics.
+3. **No base `mu0/lam0`.** `mu[p]/lam[p]` are derived once from `E/nu`; snow
+   hardening rescales them every substep by `exp(xi·(1−Jp))`, which needs a stored
+   base to rescale *from* (rescaling in place compounds across substeps).
+4. **`hardening` is a boolean flag** elsewhere (`if model.hardening == 1`); the
+   snow default `hardening=5` has no defined meaning under that convention.
+
+The `mpm_utils.patched.py` snapshot carries a `TODO[snow / material==4]` comment
+block at the dispatch site spelling out exactly what to add (theta_c/theta_s
+plumbing, base moduli, a dedicated snow Jp, the `elif ==4` return map + matching
+FCR stress branch). **This patch is documentation only — it changes no physics**
+(the patched file is byte-equivalent to upstream except for the comment). It can
+be deployed harmlessly or skipped; it exists so the gap and its requirements are
+version-controlled.
 
 ---
 
