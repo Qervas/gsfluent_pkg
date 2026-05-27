@@ -290,3 +290,6 @@ def test_build_sim_argv_has_required_invariant_flags() -> None:
         assert "--target_particles" in argv
         assert "--output_ply" in argv
         assert "--async_io" in argv
+        # GPU sim-R rotation output (Track-1): each particle's polar R emitted
+        # per frame for the fuser to consume instead of CPU Kabsch SVD.
+        assert "--output_rot" in argv

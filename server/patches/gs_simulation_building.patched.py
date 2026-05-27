@@ -138,6 +138,52 @@ def _phasea_print_summary(frame_times, sim_times):
         mean = sum(st)/len(st)
         print(f'[PhaseA-SUMMARY] sim-only median={med:.4f}s mean={mean:.4f}s fps={1.0/med:.3f}')
 
+def _rotmats_to_quats_wxyz(rmats):
+    """[particle_R / Track-1] Convert (N, 3, 3) rotation matrices to (N, 4)
+    unit quaternions in (w, x, y, z) order — the convention the 3DGS .ply
+    rot_0..rot_3 fields use and the fuser composes onto. Numerically stable
+    (Shepperd / branch-by-largest-diagonal); assumes proper rotations (det≈+1,
+    which compute_R_from_F guarantees via its det-correction). Pure numpy,
+    runs on the host snapshot after the GPU kernel produced R."""
+    r = np.asarray(rmats, dtype=np.float64)
+    n = r.shape[0]
+    m00, m11, m22 = r[:, 0, 0], r[:, 1, 1], r[:, 2, 2]
+    trace = m00 + m11 + m22
+    qw = np.empty(n); qx = np.empty(n); qy = np.empty(n); qz = np.empty(n)
+    c0 = trace > 0.0
+    c1 = (~c0) & (m00 >= m11) & (m00 >= m22)
+    c2 = (~c0) & (~c1) & (m11 >= m22)
+    c3 = ~c0 & ~c1 & ~c2
+    if c0.any():
+        s = np.sqrt(trace[c0] + 1.0) * 2.0
+        qw[c0] = 0.25 * s
+        qx[c0] = (r[c0, 2, 1] - r[c0, 1, 2]) / s
+        qy[c0] = (r[c0, 0, 2] - r[c0, 2, 0]) / s
+        qz[c0] = (r[c0, 1, 0] - r[c0, 0, 1]) / s
+    if c1.any():
+        s = np.sqrt(1.0 + m00[c1] - m11[c1] - m22[c1]) * 2.0
+        qw[c1] = (r[c1, 2, 1] - r[c1, 1, 2]) / s
+        qx[c1] = 0.25 * s
+        qy[c1] = (r[c1, 0, 1] + r[c1, 1, 0]) / s
+        qz[c1] = (r[c1, 0, 2] + r[c1, 2, 0]) / s
+    if c2.any():
+        s = np.sqrt(1.0 + m11[c2] - m00[c2] - m22[c2]) * 2.0
+        qw[c2] = (r[c2, 0, 2] - r[c2, 2, 0]) / s
+        qx[c2] = (r[c2, 0, 1] + r[c2, 1, 0]) / s
+        qy[c2] = 0.25 * s
+        qz[c2] = (r[c2, 1, 2] + r[c2, 2, 1]) / s
+    if c3.any():
+        s = np.sqrt(1.0 + m22[c3] - m00[c3] - m11[c3]) * 2.0
+        qw[c3] = (r[c3, 1, 0] - r[c3, 0, 1]) / s
+        qx[c3] = (r[c3, 0, 2] + r[c3, 2, 0]) / s
+        qy[c3] = (r[c3, 1, 2] + r[c3, 2, 1]) / s
+        qz[c3] = 0.25 * s
+    q = np.stack([qw, qx, qy, qz], axis=1)
+    norms = np.linalg.norm(q, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+    return q / norms
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
@@ -168,6 +214,19 @@ if __name__ == "__main__":
                              "K-NN 'ghost' artifact for cracked regions. Adds "
                              "~24 bytes/particle to each frame's ply (~4.8 MB "
                              "extra for 200k particles).")
+    parser.add_argument("--output_rot", action="store_true",
+                        help="[particle_R / Track-1] Also write each particle's "
+                             "polar rotation as a unit quaternion (rot_w, rot_x, "
+                             "rot_y, rot_z) into each sim_NNNN.ply. R = U·Vᵀ is "
+                             "the rotation factor of the deformation gradient F, "
+                             "computed ON THE GPU (compute_R_from_F kernel via "
+                             "export_particle_R_to_torch) — the EXACT per-particle "
+                             "rotation the solver already tracks. The downstream "
+                             "fuse step gathers each ref splat's bound particles' "
+                             "R through the frame-0 KNN map and composes it onto "
+                             "the rest quaternion, superseding the CPU Kabsch SVD "
+                             "re-derivation. Adds 16 bytes/particle per frame "
+                             "(~3.2 MB extra for 200k particles).")
     args = parser.parse_args()
 
     if not os.path.exists(args.model_path):
@@ -555,34 +614,45 @@ if __name__ == "__main__":
             save_to_ply=args.output_ply,
             save_to_h5=args.output_h5,
         )
-        # [particle_F] Frame 0 was written by save_data_at_frame (the lib
-        # helper) which doesn't know about --output_cov. The fuse step
-        # detects cov-fields from sim_plys[0] — if it can't find them
-        # there, it falls back to the K-NN path for the whole run, which
-        # is exactly the ghost-prone behavior --output_cov is meant to
-        # replace. Rewrite frame 0 in-place with cov so all frames have
-        # a consistent schema.
-        if args.output_ply and args.output_cov:
+        # [particle_F/R] Frame 0 was written by save_data_at_frame (the lib
+        # helper) which doesn't know about --output_cov / --output_rot. The
+        # fuse step detects these fields from sim_plys[0] — if it can't find
+        # them there, it falls back to the K-NN/CPU-Kabsch path for the WHOLE
+        # run. So rewrite frame 0 in-place with the same extra columns (in the
+        # FIXED xyz, cov(6), rot(4) order _b3_write_ply uses) so every frame
+        # shares one schema. At frame 0 F = I -> R = I -> quaternion (1,0,0,0),
+        # the rest reference the fuser composes deltas against.
+        if args.output_ply and (args.output_cov or args.output_rot):
             _f0_path = os.path.join(directory_to_save, "sim_" + "0".zfill(10) + ".ply")
             _f0_pos = mpm_solver.mpm_state.particle_x.numpy().astype(np.float32, copy=True)
-            _f0_cov = mpm_solver.export_particle_cov_to_torch().view(-1, 6).detach().cpu().numpy().astype(np.float32, copy=True)
-            n_pf = min(_f0_cov.shape[0], _f0_pos.shape[0])
-            if _f0_cov.shape[0] != _f0_pos.shape[0]:
-                _f0_cov = _f0_cov[:n_pf]; _f0_pos = _f0_pos[:n_pf]
+            _f0_props = ["x", "y", "z"]
+            _f0_cols = [_f0_pos]
+            if args.output_cov:
+                _f0_cov = mpm_solver.export_particle_cov_to_torch().view(-1, 6).detach().cpu().numpy().astype(np.float32, copy=True)
+                _f0_props += ["cov_00", "cov_01", "cov_02", "cov_11", "cov_12", "cov_22"]
+                _f0_cols.append(_f0_cov)
+            if args.output_rot:
+                _f0_rmats = mpm_solver.export_particle_R_to_torch(device=device).view(-1, 3, 3).detach().cpu().numpy().astype(np.float64, copy=False)
+                _f0_rot = _rotmats_to_quats_wxyz(_f0_rmats).astype(np.float32, copy=False)
+                _f0_props += ["rot_w", "rot_x", "rot_y", "rot_z"]
+                _f0_cols.append(_f0_rot)
+            # Align row counts (clip to shortest — should always match).
+            _f0_n = min(c.shape[0] for c in _f0_cols)
+            _f0_cols = [c[:_f0_n] for c in _f0_cols]
             try:
                 if os.path.exists(_f0_path):
                     os.remove(_f0_path)
+                _f0_hdr = (
+                    "ply\nformat binary_little_endian 1.0\n"
+                    f"element vertex {_f0_n}\n"
+                    + "".join(f"property float {p}\n" for p in _f0_props)
+                    + "end_header\n"
+                )
                 with open(_f0_path, "wb") as _f0_fp:
-                    _f0_fp.write(
-                        f"ply\nformat binary_little_endian 1.0\nelement vertex {len(_f0_pos)}\n"
-                        f"property float x\nproperty float y\nproperty float z\n"
-                        f"property float cov_00\nproperty float cov_01\nproperty float cov_02\n"
-                        f"property float cov_11\nproperty float cov_12\nproperty float cov_22\n"
-                        f"end_header\n".encode()
-                    )
-                    _f0_fp.write(np.concatenate([_f0_pos, _f0_cov], axis=1).astype(np.float32, copy=False).tobytes())
+                    _f0_fp.write(_f0_hdr.encode())
+                    _f0_fp.write(np.concatenate(_f0_cols, axis=1).astype(np.float32, copy=False).tobytes())
             except Exception as _e:
-                print(f"[particle_F] frame-0 cov rewrite failed: {_e}")
+                print(f"[particle_F/R] frame-0 rewrite failed: {_e}")
 
     dx = material_params["grid_lim"] / material_params['n_grid']
     substep_dt = time_params["substep_dt"]
@@ -671,47 +741,48 @@ if __name__ == "__main__":
         _io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="b3-io")
         print("[PhaseB.3] async_io ENABLED: ply/png writes deferred to background thread pool (max_workers=2)")
 
-    def _b3_write_ply(filename, position_np, cov_np=None):
+    def _b3_write_ply(filename, position_np, cov_np=None, rot_np=None):
         # Background-safe: writes the supplied host numpy array to disk in PLY format.
         # cov_np (optional): (N, 6) float32 — upper-triangular covariance per
         # particle (order: c00, c01, c02, c11, c12, c22). When provided, the
-        # ply gains six extra `property float cov_*` rows after xyz, and
-        # particle records become 9 floats wide. The downstream fuse step
-        # auto-detects these fields and switches to 1-NN binding with
-        # particle-correct deformation.
+        # ply gains six extra `property float cov_*` rows after xyz. The
+        # downstream fuse step auto-detects these fields for Track-2 cov.
+        # rot_np (optional): (N, 4) float32 — per-particle polar rotation as a
+        # unit quaternion (rot_w, rot_x, rot_y, rot_z). When provided, the ply
+        # gains four extra `property float rot_*` rows. R = U·Vᵀ is computed on
+        # the GPU (compute_R_from_F); the fuse step composes it onto the rest
+        # quaternion (Track-1 rotation), superseding CPU Kabsch SVD.
+        # Columns are appended in a FIXED order: xyz, then cov (6), then rot (4),
+        # so the downstream parser can key on property names alone.
         try:
             if os.path.exists(filename):
                 os.remove(filename)
             num_particles = position_np.shape[0]
+            _props = ["x", "y", "z"]
+            _cols = [position_np]
             if cov_np is not None:
                 assert cov_np.shape == (num_particles, 6), \
                     f"cov_np shape {cov_np.shape} doesn't match position ({num_particles}, 3)"
-                _hdr = (
-                    f"ply\n"
-                    f"format binary_little_endian 1.0\n"
-                    f"element vertex {num_particles}\n"
-                    f"property float x\n"
-                    f"property float y\n"
-                    f"property float z\n"
-                    f"property float cov_00\n"
-                    f"property float cov_01\n"
-                    f"property float cov_02\n"
-                    f"property float cov_11\n"
-                    f"property float cov_12\n"
-                    f"property float cov_22\n"
-                    f"end_header\n"
-                )
-                # Interleave xyz + cov into a single (N, 9) array so the file
-                # layout matches the property order in the header.
-                packed = np.concatenate([position_np, cov_np], axis=1).astype(np.float32, copy=False)
-                with open(filename, "wb") as _fp:
-                    _fp.write(str.encode(_hdr))
-                    _fp.write(packed.tobytes())
+                _props += ["cov_00", "cov_01", "cov_02", "cov_11", "cov_12", "cov_22"]
+                _cols.append(cov_np)
+            if rot_np is not None:
+                assert rot_np.shape == (num_particles, 4), \
+                    f"rot_np shape {rot_np.shape} doesn't match position ({num_particles}, 3)"
+                _props += ["rot_w", "rot_x", "rot_y", "rot_z"]
+                _cols.append(rot_np)
+            _hdr = (
+                "ply\nformat binary_little_endian 1.0\n"
+                f"element vertex {num_particles}\n"
+                + "".join(f"property float {p}\n" for p in _props)
+                + "end_header\n"
+            )
+            if len(_cols) == 1:
+                packed = position_np
             else:
-                _hdr = f"""ply\nformat binary_little_endian 1.0\nelement vertex {num_particles}\nproperty float x\nproperty float y\nproperty float z\nend_header\n"""
-                with open(filename, "wb") as _fp:
-                    _fp.write(str.encode(_hdr))
-                    _fp.write(position_np.tobytes())
+                packed = np.concatenate(_cols, axis=1).astype(np.float32, copy=False)
+            with open(filename, "wb") as _fp:
+                _fp.write(str.encode(_hdr))
+                _fp.write(packed.tobytes())
         except Exception as _e:
             print(f"[PhaseB.3] async ply write failed for {filename}: {_e}")
 
@@ -835,23 +906,44 @@ if __name__ == "__main__":
                     _cov_host = _cov_flat.view(-1, 6).detach().cpu().numpy().astype(
                         np.float32, copy=True
                     )
-                    # The solver tensor covers ALL post-fill particles. Match
-                    # the position snapshot's row count — particle_x already
-                    # holds (gs + filler) entries; cov should match 1:1.
-                    if _cov_host.shape[0] != _pos_host.shape[0]:
-                        # Defensive: clip to the shorter to avoid downstream
-                        # shape mismatches. Logged so we notice if it ever
-                        # diverges materially.
-                        n = min(_cov_host.shape[0], _pos_host.shape[0])
-                        if _cov_host.shape[0] != _pos_host.shape[0]:
-                            print(
-                                f"[particle_F] cov rows {_cov_host.shape[0]} != "
-                                f"pos rows {_pos_host.shape[0]} at frame {frame+1}; "
-                                f"clipping to {n}"
-                            )
-                        _cov_host = _cov_host[:n]
-                        _pos_host = _pos_host[:n]
-                _io_futures.append(_io_executor.submit(_b3_write_ply, _ply_filename, _pos_host, _cov_host))
+                # [particle_R / Track-1] Also snapshot the per-particle polar
+                # rotation when requested. export_particle_R_to_torch launches
+                # the compute_R_from_F kernel ON THE GPU (R = U·Vᵀ, the exact
+                # polar rotation factor of F) and returns (N, 9) row-major. We
+                # convert each matrix to a unit quaternion (rot_w..rot_z) on the
+                # host — the .ply layer stores quaternions, matching what the
+                # downstream fuse step composes onto the rest pose.
+                _rot_host = None
+                if args.output_rot:
+                    _rot_flat = mpm_solver.export_particle_R_to_torch(device=device)
+                    _rot_mats = _rot_flat.view(-1, 3, 3).detach().cpu().numpy().astype(
+                        np.float64, copy=False
+                    )
+                    _rot_host = _rotmats_to_quats_wxyz(_rot_mats).astype(
+                        np.float32, copy=False
+                    )
+                # The solver tensors cover ALL post-fill particles. Match the
+                # position snapshot's row count — particle_x already holds
+                # (gs + filler) entries; cov/rot should match 1:1. Defensive
+                # clip-to-shortest guards against any future divergence.
+                _row_counts = [_pos_host.shape[0]]
+                if _cov_host is not None:
+                    _row_counts.append(_cov_host.shape[0])
+                if _rot_host is not None:
+                    _row_counts.append(_rot_host.shape[0])
+                _n = min(_row_counts)
+                if any(c != _n for c in _row_counts):
+                    print(
+                        f"[particle_F/R] row-count mismatch at frame {frame+1}: "
+                        f"{_row_counts}; clipping all to {_n}"
+                    )
+                    _pos_host = _pos_host[:_n]
+                    if _cov_host is not None:
+                        _cov_host = _cov_host[:_n]
+                    if _rot_host is not None:
+                        _rot_host = _rot_host[:_n]
+                _io_futures.append(_io_executor.submit(
+                    _b3_write_ply, _ply_filename, _pos_host, _cov_host, _rot_host))
             else:
                 save_data_at_frame(
                     mpm_solver,

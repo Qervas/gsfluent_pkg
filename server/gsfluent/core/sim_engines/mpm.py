@@ -443,7 +443,12 @@ class MPMSimulationEngine:
             "--output_path", str(sim_output_dir),
             "--config", str(config_path),
             "--target_particles", str(particles),
-            "--output_ply", "--async_io",
+            # --output_rot emits each particle's GPU-computed polar rotation
+            # (compute_R_from_F) as a quaternion per frame. The fuser consumes
+            # it (Track-1 rotation) — exact per-particle R, no CPU Kabsch SVD.
+            # ~16 bytes/particle/frame extra; falls back to CPU Kabsch if a sim
+            # build predates the --output_rot patch (no rot_* cols emitted).
+            "--output_ply", "--output_rot", "--async_io",
             *extras,
         ]
 

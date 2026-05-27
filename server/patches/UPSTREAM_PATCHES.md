@@ -21,8 +21,9 @@ behavior immediately. Or apply the five edits below by hand.
 ```bash
 # On the sim host:
 SIM_BUILD="$GSFLUENT_SIM_HOME"/gs_simulation/watermelon/gs_simulation_building.py
-grep -c "particle_F\|substep_dt clamp" $SIM_BUILD
-# Expected: 5 or more. If 0, none of the patches are applied.
+grep -c "particle_F\|substep_dt clamp\|output_rot" $SIM_BUILD
+# Expected: 6 or more. If 0, none of the patches are applied.
+# (output_rot present => Patch 6 / Track-1 GPU rotation export is deployed.)
 ```
 
 ---
@@ -193,6 +194,60 @@ if args.output_ply and args.output_cov:
     except Exception as _e:
         print(f"[particle_F] frame-0 cov rewrite failed: {_e}")
 ```
+
+---
+
+## Patch 6 — `--output_rot` flag + per-frame GPU polar-rotation export (Track-1)
+
+**Why:** The fuser's Track-1 per-splat rotation should come from the sim's
+**already-GPU-computed** per-particle polar rotation `R = polar(F)`
+(`compute_R_from_F` / `export_particle_R_to_torch`), NOT a CPU Kabsch SVD
+re-derivation in the fuser. This patch wires the OUTPUT of that rotation; the
+fuser composes it onto the rest quaternion (no SVD, ~2× faster fuse, exact R).
+
+**Add a new CLI flag** near the other Phase B/C flags:
+```python
+parser.add_argument("--output_rot", action="store_true",
+                    help="[particle_R / Track-1] write each particle's polar "
+                         "rotation as a unit quaternion (rot_w..rot_z) per frame.")
+```
+
+**Add a module-level `_rotmats_to_quats_wxyz(rmats)` helper** (host-side numpy,
+Shepperd matrix->quaternion; see the patched file).
+
+**Extend `_b3_write_ply`** to take an optional `rot_np=(N,4)` and append four
+`property float rot_w/rot_x/rot_y/rot_z` rows AFTER xyz (and after cov if both
+are on — fixed column order: xyz, cov(6), rot(4)).
+
+**At the per-frame async write site**, snapshot R alongside positions:
+```python
+_rot_host = None
+if args.output_rot:
+    _rot_flat = mpm_solver.export_particle_R_to_torch(device=device)
+    _rot_mats = _rot_flat.view(-1, 3, 3).detach().cpu().numpy().astype(np.float64, copy=False)
+    _rot_host = _rotmats_to_quats_wxyz(_rot_mats).astype(np.float32, copy=False)
+# clip pos/cov/rot to the shortest row count, then:
+_io_futures.append(_io_executor.submit(_b3_write_ply, _ply_filename, _pos_host, _cov_host, _rot_host))
+```
+
+**Extend the frame-0 rewrite** (Patch 5) to also emit rot when `--output_rot`
+(frame 0: F=I -> R=I -> quaternion (1,0,0,0), the rest reference the fuser
+deltas against). See the patched file's `[particle_F/R]` markers.
+
+**Server-side compute is already present** (no GaussianFluent solver change
+needed): `mpm_solver_warp/mpm_utils.py::compute_R_from_F` and
+`mpm_solver_warp/mpm_solver_warp.py::export_particle_R_to_torch` already exist.
+
+**Consumed by:** `gsfluent/core/fusers/knn_kabsch.py` — when sim plys carry
+`rot_*`, the fuser uses the GPU sim-R path (gather bound particles' R via the
+frame-0 KNN map, delta vs frame-0 R, weighted-quaternion blend, compose onto
+rest quat). Absent `rot_*` -> CPU-Kabsch fallback. `mpm.py::_build_sim_argv`
+now passes `--output_rot`.
+
+**Validated** (2026-05-27, GPU 6, jelly/cluster_6_15, frame_num=30): R=0° at
+frame 0, 6-12° median per-particle on deforming frames, all unit + finite.
+Fuser GPU sim-R 1.05 s/frame vs CPU Kabsch 2.17 s/frame (~2×); per-splat
+output quaternions agree with CPU Kabsch to |dot| 0.98-0.99.
 
 ---
 

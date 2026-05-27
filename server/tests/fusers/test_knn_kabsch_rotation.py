@@ -23,7 +23,9 @@ from gsfluent.core.fusers.knn_kabsch import (
     KNNKabschFuser,
     _matrices_to_quats_wxyz,
     _quat_mul_wxyz,
+    _quats_wxyz_to_matrices,
     _R_ZUP,
+    _read_sim_rot_quats,
     _weighted_kabsch,
 )
 
@@ -384,6 +386,173 @@ def test_fuse_sequence_rotation_varies_across_frames(tmp_path: Path) -> None:
     quats = np.stack(quats)  # (frames, n_ref, 4)
     assert np.isfinite(quats).all()
     # frame 0 (no rotation) vs the others: quats must differ, and grow with angle
+    drift = [np.abs(quats[i] - quats[0]).mean() for i in range(len(angles))]
+    assert drift[0] == pytest.approx(0.0, abs=1e-6)
+    assert drift[1] < drift[2] < drift[3]
+
+
+# --- 4. GPU sim-R path (per-particle polar rotation from the solver) ---------
+#
+# These pin the new hot path: the sim emits each particle's exact polar
+# rotation R = polar(F) per frame (--output_rot); the fuser gathers each
+# splat's bound particles' R through the KNN map and composes it onto the rest
+# quaternion — no CPU Kabsch SVD. We synthesize the sim's per-particle R the
+# way the GPU would: for a rigid cloud rotation, every particle's polar R IS
+# that rotation, so the sim-R path and the CPU-Kabsch fallback must agree.
+
+
+def _quats_wxyz_from_mats(mats: np.ndarray) -> np.ndarray:
+    return _matrices_to_quats_wxyz(mats)
+
+
+def test_sim_rot_field_roundtrip() -> None:
+    """_read_sim_rot_quats pulls rot_w..rot_z; absent -> None."""
+    dt_with = [("x", "f4"), ("y", "f4"), ("z", "f4"),
+               ("rot_w", "f4"), ("rot_x", "f4"), ("rot_y", "f4"), ("rot_z", "f4")]
+    v = np.zeros(5, dtype=dt_with)
+    v["rot_w"] = 1.0
+    q = _read_sim_rot_quats(v)
+    assert q is not None and q.shape == (5, 4)
+    np.testing.assert_allclose(q[:, 0], 1.0)
+
+    v_no = np.zeros(5, dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+    assert _read_sim_rot_quats(v_no) is None
+
+
+def test_quats_to_matrices_roundtrip() -> None:
+    rng = np.random.default_rng(31)
+    mats = Rot.random(20, random_state=rng).as_matrix()
+    q = _matrices_to_quats_wxyz(mats)
+    back = _quats_wxyz_to_matrices(q)
+    np.testing.assert_allclose(back, mats, atol=1e-9)
+
+
+def test_sim_r_path_engages_and_quaternion_varies(tmp_path: Path) -> None:
+    """When frame-0 + per-frame R are supplied, fuse_frame uses the GPU sim-R
+    path (sim_R0_mats set) and the output quaternions follow the cloud."""
+    rng = np.random.default_rng(40)
+    ref_pts = rng.uniform(0.5, 1.5, (40, 3)).astype(np.float32)
+    ref = tmp_path / "ref.ply"
+    _write_full_3dgs_ply(ref, ref_pts)
+
+    sim0 = rng.uniform(0.4, 1.6, (80, 3)).astype(np.float32)
+    rot0 = np.tile([1.0, 0.0, 0.0, 0.0], (80, 1))  # frame 0: identity R
+
+    fuser = KNNKabschFuser(k=8)
+    corr = fuser.build_correspondence(ref, sim0, first_frame_rot_quats=rot0)
+    assert fuser._state[id(corr)].sim_R0_mats is not None
+
+    r_true = Rot.from_euler("z", 50.0, degrees=True)
+    sim_t = _rotate_about_centroid(sim0, r_true.as_matrix().astype(np.float32))
+    # every particle's polar R is the rigid rotation
+    rot_t = np.tile(
+        np.concatenate([r_true.as_quat()[3:], r_true.as_quat()[:3]]), (80, 1)
+    )
+
+    out0 = _quats_from_attrs(fuser.fuse_frame(corr, sim0, rot_quats=rot0)["full_attrs"])
+    out_t = _quats_from_attrs(fuser.fuse_frame(corr, sim_t, rot_quats=rot_t)["full_attrs"])
+    assert np.isfinite(out_t).all()
+    np.testing.assert_allclose(np.linalg.norm(out_t, axis=1), 1.0, atol=1e-5)
+    assert not np.allclose(out0, out_t, atol=1e-3)
+
+
+def test_sim_r_matches_cpu_kabsch_on_rigid_rotation(tmp_path: Path) -> None:
+    """Cross-validation (the task's sanity check): on a rigidly-rotating cloud
+    the GPU sim-R path and the CPU-Kabsch fallback must produce the SAME splat
+    quaternions (up to sign) — both recover the same rigid rotation, one from
+    per-particle polar R, the other from neighbour displacements."""
+    rng = np.random.default_rng(41)
+    ref_pts = rng.uniform(0.6, 1.4, (50, 3)).astype(np.float32)
+    ref = tmp_path / "ref.ply"
+    _write_full_3dgs_ply(ref, ref_pts)
+
+    sim0 = rng.uniform(0.5, 1.5, (100, 3)).astype(np.float32)
+    rot0 = np.tile([1.0, 0.0, 0.0, 0.0], (100, 1))
+
+    for axis, deg in [("z", 40.0), ("x", 65.0), ("y", -30.0)]:
+        r_true = Rot.from_euler(axis, deg, degrees=True)
+        sim_t = _rotate_about_centroid(sim0, r_true.as_matrix().astype(np.float32))
+        rot_t = np.tile(
+            np.concatenate([r_true.as_quat()[3:], r_true.as_quat()[:3]]), (100, 1)
+        )
+
+        # CPU-Kabsch fallback (no rot supplied)
+        f_cpu = KNNKabschFuser(k=8)
+        c_cpu = f_cpu.build_correspondence(ref, sim0)
+        q_cpu = _quats_from_attrs(f_cpu.fuse_frame(c_cpu, sim_t)["full_attrs"])
+
+        # GPU sim-R path (rot supplied)
+        f_gpu = KNNKabschFuser(k=8)
+        c_gpu = f_gpu.build_correspondence(ref, sim0, first_frame_rot_quats=rot0)
+        q_gpu = _quats_from_attrs(
+            f_gpu.fuse_frame(c_gpu, sim_t, rot_quats=rot_t)["full_attrs"]
+        )
+
+        dots = np.abs((q_cpu * q_gpu).sum(axis=1))  # 1.0 iff equal up to sign
+        np.testing.assert_allclose(dots, 1.0, atol=1e-3)
+
+
+def test_sim_r_no_motion_preserves_rest_quaternion(tmp_path: Path) -> None:
+    """Frame-0 R == per-frame R -> delta identity -> rest quats preserved."""
+    rng = np.random.default_rng(42)
+    ref_pts = rng.uniform(0.5, 1.5, (25, 3)).astype(np.float32)
+    rest_q = rng.normal(size=(25, 4))
+    rest_q /= np.linalg.norm(rest_q, axis=1, keepdims=True)
+    ref = tmp_path / "ref.ply"
+    _write_full_3dgs_ply(ref, ref_pts, rest_quats_wxyz=rest_q)
+
+    sim0 = rng.uniform(0.4, 1.6, (60, 3)).astype(np.float32)
+    # non-identity but constant per-particle R (frame 0 == frame t)
+    base = Rot.random(60, random_state=rng)
+    rot0 = np.concatenate([base.as_quat()[:, 3:], base.as_quat()[:, :3]], axis=1)
+
+    fuser = KNNKabschFuser(k=8)
+    corr = fuser.build_correspondence(ref, sim0, first_frame_rot_quats=rot0)
+    rest_stored = fuser._state[id(corr)].rest_quats_wxyz
+
+    out0 = _quats_from_attrs(
+        fuser.fuse_frame(corr, sim0, rot_quats=rot0)["full_attrs"]
+    )
+    dots = np.abs((out0 * rest_stored).sum(axis=1))
+    np.testing.assert_allclose(dots, 1.0, atol=1e-5)
+
+
+def test_sim_r_sequence_dir_autodetects_rot_fields(tmp_path: Path) -> None:
+    """End-to-end through fuse_sequence_dir: sim plys carrying rot_* columns
+    drive the GPU sim-R path; quaternions vary and grow with rotation angle."""
+    rng = np.random.default_rng(43)
+    ref_pts = rng.uniform(0.5, 1.5, (30, 3)).astype(np.float32)
+    ref = tmp_path / "ref.ply"
+    _write_full_3dgs_ply(ref, ref_pts)
+
+    sim0 = rng.uniform(0.4, 1.6, (60, 3)).astype(np.float32)
+    sim_dir = tmp_path / "sim"
+    sim_dir.mkdir()
+    angles = [0.0, 20.0, 45.0, 70.0]
+    rot_dt = [("x", "f4"), ("y", "f4"), ("z", "f4"),
+              ("rot_w", "f4"), ("rot_x", "f4"), ("rot_y", "f4"), ("rot_z", "f4")]
+    for i, deg in enumerate(angles):
+        r = Rot.from_euler("z", deg, degrees=True)
+        pts = _rotate_about_centroid(sim0, r.as_matrix().astype(np.float32)) if deg else sim0
+        q = np.concatenate([r.as_quat()[3:], r.as_quat()[:3]])  # wxyz
+        verts = np.zeros(len(pts), dtype=rot_dt)
+        verts["x"], verts["y"], verts["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+        verts["rot_w"], verts["rot_x"], verts["rot_y"], verts["rot_z"] = q
+        PlyData([PlyElement.describe(verts, "vertex")], text=False).write(
+            sim_dir / f"sim_{i:04d}.ply"
+        )
+
+    out_dir = tmp_path / "out"
+    fuser = KNNKabschFuser(k=8)
+    n = fuser.fuse_sequence_dir(ref, sim_dir, out_dir)
+    assert n == len(angles)
+
+    quats = []
+    for i in range(len(angles)):
+        v = PlyData.read(str(out_dir / f"frame_{i:04d}.ply"))["vertex"].data
+        quats.append(_quats_from_attrs(v))
+    quats = np.stack(quats)
+    assert np.isfinite(quats).all()
     drift = [np.abs(quats[i] - quats[0]).mean() for i in range(len(angles))]
     assert drift[0] == pytest.approx(0.0, abs=1e-6)
     assert drift[1] < drift[2] < drift[3]

@@ -239,6 +239,49 @@ def _quat_mul_wxyz(qa: np.ndarray, qb: np.ndarray) -> np.ndarray:
     ], axis=1)
 
 
+# ---- sim-R (GPU polar rotation) helpers ------------------------------------
+
+
+def _quats_wxyz_to_matrices(q: np.ndarray) -> np.ndarray:
+    """Convert (n, 4) unit quaternions in (w,x,y,z) order to (n, 3, 3) rotation
+    matrices. Inverse of _matrices_to_quats_wxyz; used to turn the sim's
+    per-particle polar-rotation quaternions back into matrices so they compose
+    in the same cube-frame -> Z-up conjugation path the CPU Kabsch uses."""
+    q = np.asarray(q, dtype=np.float64)
+    q = q / np.maximum(np.linalg.norm(q, axis=1, keepdims=True), 1e-300)
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    n = q.shape[0]
+    m = np.empty((n, 3, 3), dtype=np.float64)
+    m[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
+    m[:, 0, 1] = 2.0 * (x * y - z * w)
+    m[:, 0, 2] = 2.0 * (x * z + y * w)
+    m[:, 1, 0] = 2.0 * (x * y + z * w)
+    m[:, 1, 1] = 1.0 - 2.0 * (x * x + z * z)
+    m[:, 1, 2] = 2.0 * (y * z - x * w)
+    m[:, 2, 0] = 2.0 * (x * z - y * w)
+    m[:, 2, 1] = 2.0 * (y * z + x * w)
+    m[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
+    return m
+
+
+# Per-particle rotation columns the patched sim writes when --output_rot is on
+# (compute_R_from_F polar rotation as a (w,x,y,z) quaternion). Their PRESENCE in
+# the sim ply is what switches the fuser from the CPU-Kabsch fallback to the
+# GPU sim-R hot path.
+_SIM_ROT_FIELDS = ("rot_w", "rot_x", "rot_y", "rot_z")
+
+
+def _read_sim_rot_quats(vertex_data: np.ndarray) -> np.ndarray | None:
+    """Extract (N, 4) per-particle polar-rotation quaternions (w,x,y,z) from a
+    sim ply's vertex record, or None if the --output_rot columns are absent."""
+    names = vertex_data.dtype.names or ()
+    if not all(f in names for f in _SIM_ROT_FIELDS):
+        return None
+    return np.stack(
+        [vertex_data[f] for f in _SIM_ROT_FIELDS], axis=1,
+    ).astype(np.float64)
+
+
 # ---- KNNKabschFuser class --------------------------------------------------
 
 
@@ -259,6 +302,10 @@ class _KNNCorrespondence:
     full_attrs: np.ndarray   # FULL reference attr array, post-zup/coord transforms
     rest_quats_wxyz: np.ndarray | None  # (n_ref, 4) rest quats (Z-up world frame),
     #                                     None when the ref ply has no rot fields
+    sim_R0_mats: np.ndarray | None  # (n_kept, 3, 3) frame-0 per-particle polar R
+    #   (cube frame) from the GPU sim's --output_rot. Present iff frame 0 carried
+    #   rot_* fields; its presence makes fuse_frame use the GPU sim-R path
+    #   instead of the CPU-Kabsch fallback.
 
 
 class KNNKabschFuser:
@@ -287,8 +334,16 @@ class KNNKabschFuser:
         self,
         reference_ply_path: Path,
         first_frame_particles: ParticleFrame,
+        first_frame_rot_quats: np.ndarray | None = None,
     ) -> Correspondence:
-        """Build the K-NN reference->particle mapping. One-shot per sequence."""
+        """Build the K-NN reference->particle mapping. One-shot per sequence.
+
+        first_frame_rot_quats (optional): (N, 4) per-particle polar-rotation
+        quaternions (w,x,y,z) for frame 0, from the GPU sim's --output_rot.
+        When supplied, the frame-0 rotation matrices are stashed as the rest
+        reference, and fuse_frame uses the GPU sim-R path (no CPU Kabsch SVD).
+        When None, the fuser falls back to CPU weighted-Kabsch (unchanged).
+        """
         first_frame_particles = np.asarray(first_frame_particles, dtype=np.float32)
         if first_frame_particles.ndim != 2 or first_frame_particles.shape[1] != 3:
             raise FuseError(
@@ -297,6 +352,26 @@ class KNNKabschFuser:
             )
         if not np.isfinite(first_frame_particles).all():
             raise FuseNonFiniteInputError("first_frame_particles contains NaN/Inf")
+
+        # GPU sim-R rest reference: convert frame-0 per-particle quaternions to
+        # matrices once. fuse_frame composes each later frame's R against these.
+        sim_R0_mats: np.ndarray | None = None
+        if first_frame_rot_quats is not None:
+            r0 = np.asarray(first_frame_rot_quats, dtype=np.float64)
+            if r0.ndim != 2 or r0.shape[1] != 4:
+                raise FuseError(
+                    f"first_frame_rot_quats must be (N, 4); got {r0.shape}"
+                )
+            if r0.shape[0] != first_frame_particles.shape[0]:
+                raise FuseError(
+                    f"first_frame_rot_quats has {r0.shape[0]} rows; expected "
+                    f"{first_frame_particles.shape[0]} (matching particles)"
+                )
+            if not np.isfinite(r0).all():
+                raise FuseNonFiniteInputError(
+                    "first_frame_rot_quats contains NaN/Inf"
+                )
+            sim_R0_mats = _quats_wxyz_to_matrices(r0)
 
         ref_ply = PlyData.read(str(reference_ply_path))
         ref_v = ref_ply["vertex"].data
@@ -376,6 +451,7 @@ class KNNKabschFuser:
             sim_xyz_t0_kept=first_frame_particles,
             full_attrs=full_attrs,
             rest_quats_wxyz=rest_quats_wxyz,
+            sim_R0_mats=sim_R0_mats,
         )
         return corr
 
@@ -383,8 +459,16 @@ class KNNKabschFuser:
         self,
         correspondence: Correspondence,
         particle_frame: ParticleFrame,
+        rot_quats: np.ndarray | None = None,
     ) -> SplatFrame:
-        """K-NN-skin per-frame sim displacement onto every reference splat."""
+        """K-NN-skin per-frame sim displacement onto every reference splat.
+
+        rot_quats (optional): (N, 4) per-particle polar-rotation quaternions
+        (w,x,y,z) for THIS frame, from the GPU sim's --output_rot. When supplied
+        (and frame-0 R was given to build_correspondence), each splat's rotation
+        comes from its bound particles' GPU-computed polar R — no CPU Kabsch SVD.
+        When None, the CPU weighted-Kabsch fallback runs (unchanged behaviour).
+        """
         state = self._state.get(id(correspondence))
         if state is None:
             raise FuseError(
@@ -418,15 +502,33 @@ class KNNKabschFuser:
         out["y"] = out_xyz_world[:, 1]
         out["z"] = out_xyz_world[:, 2]
 
-        # --- ROTATION: per-splat local rigid rotation via weighted Kabsch. ----
-        # Solve R in the cube frame (rest neighbours -> current neighbours),
-        # conjugate into the Z-up world frame, and compose onto the rest quat.
-        # The K=1 case carries no orientation signal -> identity (frozen quat),
-        # which is the pre-existing behaviour.
-        if state.rest_quats_wxyz is not None and state.knn_idx.shape[1] >= 2:
-            p_rest = state.sim_xyz_t0_kept[state.knn_idx]              # (n_ref, K, 3)
-            p_cur = particle_frame[state.knn_idx]                     # (n_ref, K, 3)
-            r_cube = _weighted_kabsch(p_rest, p_cur, state.knn_weights)  # (n_ref,3,3)
+        # --- ROTATION: per-splat local rigid rotation. -----------------------
+        # Two sources of the per-splat cube-frame delta rotation `r_cube`:
+        #   (1) GPU sim-R (HOT PATH): the sim emitted each particle's exact
+        #       polar rotation R = polar(F) per frame (--output_rot). For each
+        #       splat we gather its bound particles' R, take the delta vs the
+        #       frame-0 R, and blend the K via weighted quaternion nlerp. No SVD
+        #       runs in the fuser — the rotation was computed on the GPU.
+        #   (2) CPU weighted-Kabsch (FALLBACK): when the sim carried no per-
+        #       particle R, recover the local rigid rotation from the K
+        #       neighbours' (rest -> current) displacements via batched SVD.
+        # Both produce `r_cube` (n_ref, 3, 3); the rest of the path — conjugate
+        # cube -> Z-up world and compose onto the rest quat — is IDENTICAL, so
+        # sim-R is a drop-in replacement for the Kabsch-derived rotation.
+        # K=1 carries no orientation signal in the Kabsch fallback -> identity
+        # (frozen quat), the pre-existing behaviour. The sim-R path needs no
+        # neighbour orientation signal (R is per-particle), so it works for K>=1.
+        r_cube: np.ndarray | None = None
+        use_sim_r = state.sim_R0_mats is not None and rot_quats is not None
+        if state.rest_quats_wxyz is not None:
+            if use_sim_r:
+                r_cube = self._sim_r_cube(state, rot_quats)
+            elif state.knn_idx.shape[1] >= 2:
+                p_rest = state.sim_xyz_t0_kept[state.knn_idx]          # (n_ref,K,3)
+                p_cur = particle_frame[state.knn_idx]                 # (n_ref,K,3)
+                r_cube = _weighted_kabsch(p_rest, p_cur, state.knn_weights)
+
+        if r_cube is not None:
             # Cube-frame rotation -> Z-up world frame: R_world = R_zup R R_zupᵀ.
             r_world = _R_ZUP @ r_cube @ _R_ZUP.T                      # (n_ref, 3, 3)
             q_delta = _matrices_to_quats_wxyz(r_world)               # (n_ref, 4)
@@ -466,8 +568,19 @@ class KNNKabschFuser:
         sim_xyz_t0 = np.stack(
             [first_data["x"], first_data["y"], first_data["z"]], axis=1,
         ).astype(np.float32)
+        # GPU sim-R: if frame 0 carries the sim's per-particle polar-rotation
+        # quaternions (--output_rot), bind them as the rest reference so the
+        # whole sequence uses the GPU sim-R hot path. Absent -> CPU Kabsch.
+        sim_rot_t0 = _read_sim_rot_quats(first_data)
+        if sim_rot_t0 is not None:
+            print(
+                "[fuse] sim per-particle rotation detected (--output_rot) — "
+                "using GPU sim-R rotation path (no CPU Kabsch SVD)"
+            )
 
-        corr = self.build_correspondence(reference_ply_path, sim_xyz_t0)
+        corr = self.build_correspondence(
+            reference_ply_path, sim_xyz_t0, first_frame_rot_quats=sim_rot_t0,
+        )
 
         out_dir.mkdir(parents=True, exist_ok=True)
         n_written = 0
@@ -480,8 +593,9 @@ class KNNKabschFuser:
             sim_xyz = np.stack(
                 [v["x"], v["y"], v["z"]], axis=1,
             ).astype(np.float32)
+            sim_rot = _read_sim_rot_quats(v) if sim_rot_t0 is not None else None
             try:
-                result = self.fuse_frame(corr, sim_xyz)
+                result = self.fuse_frame(corr, sim_xyz, rot_quats=sim_rot)
             except FuseNonFiniteInputError:
                 # Skip frames with non-finite sim positions; codec sanitize
                 # would forward-fill anyway, but the .ply layer can't carry
@@ -500,6 +614,64 @@ class KNNKabschFuser:
         return n_written
 
     # ---- private helpers ---------------------------------------------------
+
+    @staticmethod
+    def _sim_r_cube(
+        state: "_KNNCorrespondence",
+        rot_quats: np.ndarray,
+    ) -> np.ndarray:
+        """GPU sim-R path: per-splat cube-frame delta rotation from the sim's
+        per-particle polar R, gathered through the frame-0 KNN correspondence.
+
+        For each splat and each of its K bound particles, the cube-frame delta
+        rotation is R_delta = R_cur · R_0ᵀ (the material rotation of that
+        particle since frame 0). The K deltas are blended into a single per-
+        splat rotation by weighted quaternion averaging (sign-aligned nlerp,
+        the inverse-distance KNN weights), then returned as a (n_ref, 3, 3)
+        matrix so it feeds the same cube->Z-up conjugation the Kabsch path uses.
+
+        No SVD: the rotation was already computed on the GPU (compute_R_from_F);
+        here we only gather, take a matrix delta, blend quaternions, rebuild.
+        """
+        rq = np.asarray(rot_quats, dtype=np.float64)
+        if rq.ndim != 2 or rq.shape[1] != 4:
+            raise FuseError(f"rot_quats must be (N, 4); got {rq.shape}")
+        if rq.shape[0] != state.sim_xyz_t0_kept.shape[0]:
+            raise FuseError(
+                f"rot_quats has {rq.shape[0]} rows; expected "
+                f"{state.sim_xyz_t0_kept.shape[0]} (matching particles)"
+            )
+        if not np.isfinite(rq).all():
+            raise FuseNonFiniteInputError("rot_quats contains NaN/Inf")
+
+        assert state.sim_R0_mats is not None  # guarded by caller
+        r_cur = _quats_wxyz_to_matrices(rq)                 # (n_kept, 3, 3)
+        r0 = state.sim_R0_mats                              # (n_kept, 3, 3)
+        # Per-particle cube-frame delta since frame 0: R_cur · R_0ᵀ.
+        r_delta = np.matmul(r_cur, np.transpose(r0, (0, 2, 1)))  # (n_kept, 3, 3)
+        q_delta = _matrices_to_quats_wxyz(r_delta)          # (n_kept, 4) wxyz
+
+        # Gather each splat's K bound particles' delta quaternions + weights.
+        knn_idx = state.knn_idx                             # (n_ref, K)
+        knn_w = state.knn_weights                           # (n_ref, K)
+        q_neigh = q_delta[knn_idx]                          # (n_ref, K, 4)
+
+        # Weighted quaternion blend (nlerp). Sign-align every neighbour to the
+        # splat's nearest (column 0) so antipodal quaternions don't cancel; the
+        # KNN columns are distance-sorted, so column 0 is the closest particle.
+        ref_q = q_neigh[:, :1, :]                           # (n_ref, 1, 4)
+        signs = np.sign((q_neigh * ref_q).sum(axis=2, keepdims=True))  # (n_ref,K,1)
+        signs[signs == 0.0] = 1.0
+        q_aligned = q_neigh * signs                         # (n_ref, K, 4)
+        q_blended = (knn_w[..., None] * q_aligned).sum(axis=1)  # (n_ref, 4)
+        norms = np.linalg.norm(q_blended, axis=1, keepdims=True)
+        # A blend that cancels to ~0 (pathological) falls back to the nearest.
+        bad = norms[:, 0] < 1e-8
+        if bad.any():
+            q_blended[bad] = q_neigh[bad, 0, :]
+            norms = np.linalg.norm(q_blended, axis=1, keepdims=True)
+        q_blended = q_blended / np.maximum(norms, 1e-300)
+        return _quats_wxyz_to_matrices(q_blended)           # (n_ref, 3, 3)
 
     @staticmethod
     def _transform_sim_xyz(
