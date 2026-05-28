@@ -196,6 +196,11 @@ _EXPECTED = {
     "plasticine": set(),                          # dt lowered to CFL-safe
     "sand": set(),                                # dt lowered to CFL-safe
     "wrecking": set(),                            # 0.95 damping, dt safe
+    # SPICY 🌶️ — designed for visual impact (see docs/slides/2026-05-28-
+    # gsfluent-recipes.md Part IV). All ship CFL-safe + damping enabled.
+    "wrecking_xl":   set(),                       # 0.97 damping, 5e-5 dt (E=50k)
+    "collapse_fast": set(),                       # 0.98 damping, 5e-5 dt
+    "shatter":       set(),                       # 0.97 damping, 3e-5 dt (E=80k CFL ~3.78e-5)
 }
 
 

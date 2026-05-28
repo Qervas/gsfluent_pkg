@@ -1,0 +1,112 @@
+{
+  "sim_area": [
+    -30,
+    30,
+    -10,
+    10,
+    -2,
+    45
+  ],
+  "mpm_space_vertical_upward_axis": [
+    0,
+    0,
+    1
+  ],
+  "mpm_space_viewpoint_center": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "default_camera_index": -1,
+  "show_hint": false,
+  "init_azimuthm": 95,
+  "init_elevation": 8,
+  "init_radius": 12,
+  "move_camera": true,
+  "delta_a": 1.2,
+  "delta_e": 0.0,
+  "delta_r": 0.0,
+  "opacity_threshold": 0.0,
+  "rotation_degree": [
+    0.0
+  ],
+  "rotation_axis": [
+    0
+  ],
+  "n_grid": 150,
+  "grid_lim": 2,
+  "frame_num": 120,
+  "substep_dt": 5e-05,
+  "frame_dt": 0.025,
+  "material": "plasticine",
+  "E": 50000.0,
+  "nu": 0.2,
+  "density": 3,
+  "g": [
+    0.0,
+    0.0,
+    -25.0
+  ],
+  "flip_pic_ratio": 0.7,
+  "plastic_viscosity": 0.0,
+  "rpic_damping": 0.0,
+  "grid_v_damping_scale": 0.98,
+  "yield_stress": 30.0,
+  "softening": 20.0,
+  "boundary_conditions": [
+    {
+      "type": "bounding_box"
+    },
+    {
+      "type": "surface_collider",
+      "point": [
+        0,
+        0,
+        0.5
+      ],
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "surface": "slip",
+      "friction": 0.0,
+      "start_time": 0,
+      "end_time": 1000.0
+    },
+    {
+      "type": "release_particles_sequentially",
+      "normal": [
+        0,
+        0,
+        1
+      ],
+      "start_position": 1.5,
+      "end_position": 0.55,
+      "num_layers": 80,
+      "start_time": 0.5,
+      "end_time": 1.5
+    }
+  ],
+  "sim_area_frame": "model",
+  "particle_filling": {
+    "n_grid": 200,
+    "max_particles_num": 500000,
+    "density_threshold": 3.0,
+    "search_threshold": 1.0,
+    "max_partciels_per_cell": 1,
+    "search_exclude_direction": 5,
+    "ray_cast_direction": 4,
+    "boundary": [
+      0.35,
+      1.65,
+      0.35,
+      1.65,
+      0.6,
+      1.52
+    ],
+    "smooth": true,
+    "visualize": false
+  },
+  "_note": "SPICY 🌶️ — collapse_fast: top-down cinematic demolition. 2.5× gravity, 17× softer yield, release window 2.3× shorter, 2× finer layering. ½ s tension → 1 s cascade → fragments out. Recommended: target_particles=400000 for dust cloud. Plays in 3 s (120 frames @ 40 fps native, frame_dt=0.025)."
+}
