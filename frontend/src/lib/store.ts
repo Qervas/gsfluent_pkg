@@ -122,7 +122,12 @@ type State = {
   setFpsHint: (fps: number) => void;
   // Jump the playhead back to frame 0 (SplatScene's loop watches resetNonce).
   requestReset: () => void;
-  resetForNewRun: (name: string) => void;
+  // `totalFrames`: the recipe's `frame_num` for the run being launched, so the
+  // progress UI shows a real denominator immediately ("0 / 240") instead of
+  // starting at the legacy hardcoded 150. Omit for recovery/replay paths that
+  // don't know the count yet — `simTotalFrames` stays 0 and the tqdm parser
+  // populates it from the first sim log line.
+  resetForNewRun: (name: string, totalFrames?: number) => void;
   // Frame-progress setter driven by the run-log parser (tqdm `n/total`
   // lines). Bumps simFirstFrameAt on the 0→positive transition so the
   // ETA computation has a wall-clock anchor.
@@ -181,7 +186,11 @@ export const useStore = create<State>((set) => ({
       return { activeCell: cell };
     }),
   simNFrames: 0,
-  simTotalFrames: 150,
+  // 0 = unknown. Either the tqdm parser overwrites it once the sim logs its
+  // first "n/total" line, OR the run trigger passes the recipe's frame_num
+  // through resetForNewRun(name, frame_num). The old 150 default leaked into
+  // the progress UI as a misleading denominator on any non-150 run.
+  simTotalFrames: 0,
   simStage: "idle",
   simEtaSec: null,
   simLog: [],
@@ -250,10 +259,15 @@ export const useStore = create<State>((set) => ({
   setLoop: (loop) => set({ loop }),
   setFpsHint: (fps) => set({ fpsHint: fps > 0 ? fps : 24 }),
   requestReset: () => set((st) => ({ resetNonce: st.resetNonce + 1 })),
-  resetForNewRun: (_name) =>
+  resetForNewRun: (_name, totalFrames) =>
     set({
       simState: "running",
       simNFrames: 0,
+      // Pre-populate the denominator from the recipe's frame_num so the
+      // status pill shows "0 / 240" the instant the run starts, before the
+      // first tqdm line lands. Recovery/replay paths that don't know the
+      // count pass nothing → 0 (the parser fills it in).
+      simTotalFrames: totalFrames && totalFrames > 0 ? totalFrames : 0,
       simLog: [],
       simStage: "starting",
       simStartedAt: Date.now(),

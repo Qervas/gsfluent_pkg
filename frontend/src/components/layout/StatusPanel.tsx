@@ -28,10 +28,11 @@ function LiveTicker(): JSX.Element {
     ageMs < 1000 ? "now" :
     ageMs < 60_000 ? `${Math.round(ageMs / 1000)}s ago` :
     `${Math.round(ageMs / 60_000)}m ago`;
-  // simNFrames/simTotalFrames track the MPM-sim tqdm; once that
-  // finishes they sit at 150/150 through fuse + npz. Show them only
-  // while we're still in the simulating stage so the fuse/npz stages
-  // don't appear "frozen at 100%."
+  // simNFrames/simTotalFrames track the MPM-sim tqdm; once sim finishes
+  // they sit at N/N (where N is the recipe's frame_num — could be 8 for a
+  // quick test or 1500 for a long run, not hardcoded) through fuse + pack.
+  // Show only while still in the simulating stage so fuse/pack don't
+  // appear "frozen at 100%."
   const tail = simLog.slice(-80).join("\n");
   const stage = deriveStage(simState, tail);
   const isSimStage = stage === "simulating" || stage === "fuse drain";

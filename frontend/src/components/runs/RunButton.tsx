@@ -91,7 +91,11 @@ export function RunButton() {
       const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
       const baseName = activeRecipeName!.replace(/^★ /, "");
       const run_name = `${activeModel!.name}_${baseName}_${ts}`;
-      resetForNewRun(run_name);
+      // Forward the recipe's frame_num so the progress denominator is
+      // correct from the first render, not a stale 150. Non-numeric or
+      // missing → undefined → store falls back to 0 until tqdm reports.
+      const frameNum = Number(baseToSend.frame_num);
+      resetForNewRun(run_name, Number.isFinite(frameNum) ? frameNum : undefined);
       useStore.getState().setActiveCell(new CellRef("sequence", run_name));
       await api.runs.start({
         run_name,

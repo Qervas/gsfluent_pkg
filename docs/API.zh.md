@@ -136,6 +136,25 @@ curl ${BACKEND_URL}/api/recipes
 | `source` | string | `"builtin"` 或 `"user"`。 |
 | `data` | object | 完整 recipe 体,字段随 recipe 而定;字段并集见内置 JSON。 |
 
+**常用字段**(`data` 形状随 recipe 而定,以下是大多数客户端会调的:):
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `frame_num` | int (≥1) | 仿真总帧数。**任意正整数 —— 后端不设上限。** 150 ≈ 30 fps 下 5 秒;8 帧够 smoke test,1500+ 用于长动画。仿真会写 `frame_num + 1` 个 ply(frame 0 = 初始态)。 |
+| `frame_dt` | float | 每帧对应的真实时间(秒)。`frame_num × frame_dt` = 仿真总时长。 |
+| `substep_dt` | float | 子步积分步长。运行时按 CFL 上限自动 clamp。 |
+| `n_grid` | int | MPM 网格每边格子数。立方级内存开销。 |
+| `grid_lim` | float | sim 立方体半宽(MPM 归一化坐标)。 |
+| `material` | string | `jelly` / `sand` / `metal` / `plasticine` / `foam` / `snow`。 |
+| `E`、`nu`、`density` | float | 材料参数:杨氏模量、泊松比、密度。 |
+| `g` | float[3] | 重力向量。 |
+| `grid_v_damping_scale` | float | grid 速度阻尼。**`< 1.0` 是阻尼开启;`≥ 1.0` 是关闭**(反直觉——`1.1` 等于禁用)。Phase 0 linter 会在 `≥ 1.0` 时告警。 |
+| `sim_area` | float[6] | 世界坐标 AABB `[xmin, xmax, ymin, ymax, zmin, zmax]`。仅 box 内的 splat 会变成 MPM 粒子。 |
+| `mpm_space_vertical_upward_axis` | int[3] | 相机帧的垂直方向。默认 `[0, 0, 1]`(Z-up)。 |
+| `boundary_conditions` | object[] | surface collider、bounding box 等等。 |
+
+完整 recipe 体见 `server/recipes/*.json`。
+
 **状态码**
 
 | 状态码 | 触发原因 |
@@ -542,7 +561,7 @@ curl ${BACKEND_URL}/api/runs
 | --- | --- | --- |
 | `run_name` | string | **必填。** 输出 sequence 名,要唯一。 |
 | `model_path` | string | **必填。** model 目录绝对路径(已注册或 library 内)。 |
-| `recipe_data` | object | **必填。** 完整 recipe 体(和 `GET /api/recipes/{name}` 里的 `data` 同构)。 |
+| `recipe_data` | object | **必填。** 完整 recipe 体(和 `GET /api/recipes/{name}` 里的 `data` 同构)。控制全部仿真参数 —— `frame_num`、`substep_dt`、material、gravity、sim_area 等。详见上面 **GET /api/recipes/{name}** 的常用字段表。**`frame_num` 后端不设上限**,传任意正整数都行。 |
 | `recipe_source` | string | **必填。** 来源 recipe 名,写到 run manifest。 |
 | `particles` | int | 可选,默认 `200000`。 |
 | `dry_run` | bool | 可选,为 `true` 时只跑校验器(model_path 存在、sim_area 和 model bbox 相交等等),不真起仿真。默认 `false`。 |

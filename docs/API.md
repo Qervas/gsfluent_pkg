@@ -167,6 +167,25 @@ Fetch a single recipe by name. If a name exists in both `builtin` and
 | `source` | string | `"builtin"` or `"user"`. |
 | `data` | object | The full recipe body. Shape is recipe-specific; see the built-in JSONs for the union of fields. |
 
+**Common recipe fields** (`data` shape varies per recipe; these are the knobs most clients tune):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `frame_num` | int (≥1) | Total frames to simulate. **Any positive integer — no API-imposed upper bound.** 150 ≈ 5 s at 30 fps; 8 is fine for a smoke test, 1500+ for long animations. Sim writes `frame_num + 1` plys (frame 0 = initial state). |
+| `frame_dt` | float | Wall-clock seconds each frame represents. `frame_num × frame_dt` = total simulated time. |
+| `substep_dt` | float | Sub-step integration timestep. Auto-clamped to the CFL bound at runtime. |
+| `n_grid` | int | MPM grid cells per side. Cubic memory cost. |
+| `grid_lim` | float | Half-width of the sim cube in MPM-normalized units. |
+| `material` | string | `jelly` / `sand` / `metal` / `plasticine` / `foam` / `snow`. |
+| `E`, `nu`, `density` | float | Material params: Young's modulus, Poisson, ρ. |
+| `g` | float[3] | Gravity vector. |
+| `grid_v_damping_scale` | float | Grid-velocity damping. **`< 1.0` damps; `≥ 1.0` is OFF** (counter-intuitive — `1.1` means damping disabled). The Phase 0 linter warns on `≥ 1.0`. |
+| `sim_area` | float[6] | World-coord AABB `[xmin, xmax, ymin, ymax, zmin, zmax]`. Only splats inside become MPM particles. |
+| `mpm_space_vertical_upward_axis` | int[3] | Camera-frame vertical hint. Recipes ship with `[0, 0, 1]` (Z-up). |
+| `boundary_conditions` | object[] | Surface colliders, bounding boxes, etc. |
+
+See `server/recipes/*.json` for full recipe bodies.
+
 **Status codes**
 
 | Code | Cause |
@@ -600,7 +619,7 @@ Start a new sim run, or dry-run-validate one without spawning the wrapper.
 | --- | --- | --- |
 | `run_name` | string | **Required.** Output sequence name. Must be unique. |
 | `model_path` | string | **Required.** Absolute path to a model directory (registered or library-local). |
-| `recipe_data` | object | **Required.** The full recipe body (same shape as `GET /api/recipes/{name}` `data`). |
+| `recipe_data` | object | **Required.** The full recipe body (same shape as `GET /api/recipes/{name}` `data`). Drives every sim parameter — `frame_num`, `substep_dt`, material, gravity, sim_area, etc. See **GET /api/recipes/{name}** for the common-fields table. **`frame_num` accepts any positive integer**, no API-side cap. |
 | `recipe_source` | string | **Required.** Origin recipe name; recorded in the run manifest. |
 | `particles` | int | Optional. Default `200000`. |
 | `dry_run` | bool | Optional. If `true`, run pure validators (model_path exists, sim_area overlaps the model bbox, ...) but do not spawn the sim. Default `false`. |
