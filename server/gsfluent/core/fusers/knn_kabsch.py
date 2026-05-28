@@ -427,6 +427,7 @@ class KNNKabschFuser:
         enable_fracture: bool = True,
         tau_stretch: float = TAU_STRETCH,
         fracture_patience: int = FRACTURE_PATIENCE,
+        source_y_up: bool = False,
     ) -> None:
         if k < 1:
             raise ValueError(f"k must be >= 1; got {k}")
@@ -437,6 +438,17 @@ class KNNKabschFuser:
                 f"fracture_patience must be >= 1; got {fracture_patience}"
             )
         self.k = k
+        # Source-frame convention. When True (legacy/PhysGaussian path), the
+        # fuser applies an Rx(+pi/2) Y-up -> Z-up rotation to source quats,
+        # source normals, sim positions, and conjugates the per-frame R into
+        # the Z-up world basis. When False (DEFAULT — matches the library
+        # `coord_convention="z-up"` invariant + the mpm sim engine's long-
+        # standing `--no_zup` intent), all those rotations are skipped: the
+        # fuser is a pure pass-through in basis, and the .gsq output stays
+        # in the source's native frame. The old default was True, baked in
+        # unconditionally; that tipped every Z-up sequence onto its side at
+        # render. See server/gsfluent/core/coord_convert.py for the math.
+        self.source_y_up = source_y_up
         # Fracture-aware re-binding (Phase 1). enable_fracture=False reproduces
         # the pre-fracture behaviour byte-for-byte (the frozen frame-0 binding),
         # which is exactly what a coherent / non-fracturing neighbourhood gets
@@ -530,22 +542,27 @@ class KNNKabschFuser:
         for field in out_dtype.names:
             full_attrs[field] = ref_v[field]
 
-        # Zup rotation on rotation quats + normals.
+        # Optional Y-up -> Z-up basis rotation on rotation quats + normals.
+        # See __init__ docstring: skipped by default; only applied when the
+        # source ply is genuinely Y-up. Either way `rest_quats_wxyz` carries
+        # the quats in whatever frame they end up in (source frame when
+        # source_y_up=False, Z-up world frame when True) so fuse_frame's
+        # delta composition stays in the same basis as the stored splats.
         rest_quats_wxyz: np.ndarray | None = None
         if all(k in full_attrs.dtype.names for k in ("rot_0", "rot_1", "rot_2", "rot_3")):
             q = np.stack([
                 full_attrs["rot_0"], full_attrs["rot_1"],
                 full_attrs["rot_2"], full_attrs["rot_3"],
             ], axis=1).astype(np.float32)
-            new_q = _rotate_quat(q)
+            new_q = _rotate_quat(q) if self.source_y_up else q
             full_attrs["rot_0"] = new_q[:, 0]
             full_attrs["rot_1"] = new_q[:, 1]
             full_attrs["rot_2"] = new_q[:, 2]
             full_attrs["rot_3"] = new_q[:, 3]
-            # Keep the rest quats (Z-up world frame) to compose per-frame
-            # Kabsch rotation onto in fuse_frame.
             rest_quats_wxyz = new_q.astype(np.float64)
-        if all(k in full_attrs.dtype.names for k in ("nx", "ny", "nz")):
+        if self.source_y_up and all(
+            k in full_attrs.dtype.names for k in ("nx", "ny", "nz")
+        ):
             n = np.stack([
                 full_attrs["nx"], full_attrs["ny"], full_attrs["nz"],
             ], axis=1).astype(np.float32)
@@ -692,9 +709,15 @@ class KNNKabschFuser:
                 r_cube = _weighted_kabsch(p_rest, p_cur, wts)
 
         if r_cube is not None:
-            # Cube-frame rotation -> Z-up world frame: R_world = R_zup R R_zupᵀ.
-            r_world = _R_ZUP @ r_cube @ _R_ZUP.T                      # (n_ref, 3, 3)
-            q_delta = _matrices_to_quats_wxyz(r_world)               # (n_ref, 4)
+            # Cube-frame rotation -> stored basis. When source_y_up=True the
+            # stored basis is the Z-up world frame and we conjugate:
+            # R_world = R_zup R R_zupᵀ. When False (default) the stored basis
+            # IS the cube/source frame, so the conjugation is identity and we
+            # use r_cube directly. Mis-applying the conjugation would compose
+            # a basis-change onto every per-frame rotation -- splats would
+            # spin into the wrong plane every frame.
+            r_stored = _R_ZUP @ r_cube @ _R_ZUP.T if self.source_y_up else r_cube
+            q_delta = _matrices_to_quats_wxyz(r_stored)              # (n_ref, 4)
             q_new = _quat_mul_wxyz(q_delta, state.rest_quats_wxyz)   # (n_ref, 4)
             q_new /= np.linalg.norm(q_new, axis=1, keepdims=True)
             out["rot_0"] = q_new[:, 0].astype(np.float32)
@@ -932,15 +955,16 @@ class KNNKabschFuser:
         self.last_frame_rebound = newly
         self.rebound_per_frame.append(int(state.latched.sum()))
 
-    @staticmethod
     def _transform_sim_xyz(
+        self,
         sim_xyz: np.ndarray,
         *,
         extent: float,
         center: np.ndarray,
     ) -> np.ndarray:
-        """Production defaults: un-normalize back to source-world scale,
-        center at origin, then Y-up -> Z-up rotation."""
+        """Un-normalize back to source-world scale, center at origin, then
+        optionally apply the Y-up -> Z-up basis rotation (gated on
+        `self.source_y_up`; see __init__)."""
         sx = sim_xyz[:, 0].astype(np.float32, copy=True)
         sy = sim_xyz[:, 1].astype(np.float32, copy=True)
         sz = sim_xyz[:, 2].astype(np.float32, copy=True)
@@ -953,5 +977,4 @@ class KNNKabschFuser:
         sy -= center[1]
         sz -= center[2]
         stacked = np.stack([sx, sy, sz], axis=1)
-        # Y-up -> Z-up.
-        return _rotate_pos(stacked)
+        return _rotate_pos(stacked) if self.source_y_up else stacked

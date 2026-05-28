@@ -556,3 +556,98 @@ def test_sim_r_sequence_dir_autodetects_rot_fields(tmp_path: Path) -> None:
     drift = [np.abs(quats[i] - quats[0]).mean() for i in range(len(angles))]
     assert drift[0] == pytest.approx(0.0, abs=1e-6)
     assert drift[1] < drift[2] < drift[3]
+
+
+# --- 5. source_y_up gating (the "fix the zup/yup issue" bug) -----------------
+#
+# Pins the basis-rotation gating added when the unconditional Rx(+pi/2) at fuse
+# output was found to be tipping every Z-up sequence onto its side. The library
+# ships `coord_convention="z-up"` on all imports + the mpm sim engine has long
+# passed `--no_zup` to the CLI; the rotation must only fire when callers opt in
+# (`source_y_up=True`) for genuinely Y-up sources.
+
+
+def _tallest_axis(pts: np.ndarray) -> int:
+    return int(np.argmax(np.ptp(pts, axis=0)))
+
+
+def test_source_y_up_default_is_false() -> None:
+    """The fix flips the default: no rotation unless explicitly requested.
+    A regression that re-enables the unconditional rotation would re-tip
+    every sequence."""
+    assert KNNKabschFuser(k=8).source_y_up is False
+
+
+def test_source_y_up_false_preserves_source_quats(tmp_path: Path) -> None:
+    """With source_y_up=False, source rest quats land in the .gsq frame
+    BYTE-EQUAL to what's on disk — no Rx(+pi/2) composition."""
+    rng = np.random.default_rng(101)
+    ref_pts = rng.uniform(0.5, 1.5, (20, 3)).astype(np.float32)
+    rest_q = rng.normal(size=(20, 4))
+    rest_q /= np.linalg.norm(rest_q, axis=1, keepdims=True)
+    ref = tmp_path / "ref.ply"
+    _write_full_3dgs_ply(ref, ref_pts, rest_quats_wxyz=rest_q)
+
+    sim0 = rng.uniform(0.4, 1.6, (60, 3)).astype(np.float32)
+    fuser = KNNKabschFuser(k=8, source_y_up=False)
+    corr = fuser.build_correspondence(ref, sim0)
+    stored = fuser._state[id(corr)].rest_quats_wxyz
+    np.testing.assert_allclose(stored, rest_q.astype(np.float64), atol=1e-6)
+
+
+def test_source_y_up_true_rotates_source_quats(tmp_path: Path) -> None:
+    """With source_y_up=True, source rest quats get the Rx(+pi/2) composed
+    in (the legacy PhysGaussian path); they must NOT equal the on-disk
+    values, but must equal _rotate_quat applied to them."""
+    from gsfluent.core.coord_convert import rotate_quaternions_y_up_to_z_up
+    rng = np.random.default_rng(102)
+    ref_pts = rng.uniform(0.5, 1.5, (20, 3)).astype(np.float32)
+    rest_q = rng.normal(size=(20, 4)).astype(np.float32)
+    rest_q /= np.linalg.norm(rest_q, axis=1, keepdims=True)
+    ref = tmp_path / "ref.ply"
+    _write_full_3dgs_ply(ref, ref_pts, rest_quats_wxyz=rest_q)
+
+    sim0 = rng.uniform(0.4, 1.6, (60, 3)).astype(np.float32)
+    fuser = KNNKabschFuser(k=8, source_y_up=True)
+    corr = fuser.build_correspondence(ref, sim0)
+    stored = fuser._state[id(corr)].rest_quats_wxyz
+
+    expected = rotate_quaternions_y_up_to_z_up(rest_q).astype(np.float64)
+    np.testing.assert_allclose(stored, expected, atol=1e-6)
+    # And the headline guard: stored quats != source quats. If the gating
+    # silently flipped back to no-op, this would falsely pass.
+    assert not np.allclose(stored, rest_q.astype(np.float64), atol=1e-3)
+
+
+def test_source_y_up_false_preserves_sim_xyz_axis(tmp_path: Path) -> None:
+    """The headline visual bug: with source_y_up=False, a Z-up ply -> Z-up sim
+    must come out Z-tallest. With source_y_up=True the output gets tipped so
+    Y becomes the tallest axis (the legacy behaviour that lay the building down)."""
+    rng = np.random.default_rng(103)
+    # Tall-in-Z source (mimics a Z-up building: small X/Y span, large Z span).
+    ref_pts = rng.uniform(0.95, 1.05, (50, 3)).astype(np.float32)
+    ref_pts[:, 2] = rng.uniform(0.0, 1.0, 50).astype(np.float32)  # Z is tall
+    ref = tmp_path / "ref.ply"
+    _write_full_3dgs_ply(ref, ref_pts)
+
+    sim0 = rng.uniform(0.95, 1.05, (120, 3)).astype(np.float32)
+    sim0[:, 2] = rng.uniform(0.0, 1.0, 120).astype(np.float32)
+
+    # source_y_up=False: tallest axis stays Z.
+    f_no = KNNKabschFuser(k=8, source_y_up=False)
+    corr_no = f_no.build_correspondence(ref, sim0)
+    out_no = f_no.fuse_frame(corr_no, sim0)["xyz"]
+    assert _tallest_axis(out_no) == 2, (
+        f"source_y_up=False should leave the Z-tall source Z-tall; got axis "
+        f"{_tallest_axis(out_no)} (extents {np.ptp(out_no, axis=0)})"
+    )
+
+    # source_y_up=True: Rx(+pi/2) -> (x, -z, y); a Z-tall input becomes Y-tall
+    # (the lying-down bug).
+    f_yes = KNNKabschFuser(k=8, source_y_up=True)
+    corr_yes = f_yes.build_correspondence(ref, sim0)
+    out_yes = f_yes.fuse_frame(corr_yes, sim0)["xyz"]
+    assert _tallest_axis(out_yes) == 1, (
+        f"source_y_up=True should tip Z-tall source to Y-tall (the legacy "
+        f"behaviour); got axis {_tallest_axis(out_yes)}"
+    )

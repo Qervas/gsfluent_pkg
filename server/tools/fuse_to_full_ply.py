@@ -46,14 +46,21 @@ def main() -> int:
     p.add_argument("--out_dir", required=True)
     p.add_argument("--knn", type=int, default=8,
                    help="K for K-NN skinning. Default 8 (production setting).")
-    # Legacy flag aliases — accept without warning so existing run_sim.sh
-    # invocations don't break. They no-op in the Phase 2 wrapper because the
-    # Protocol-conforming KNNKabschFuser only supports the production defaults.
-    p.add_argument("--zup", action="store_true", default=True,
-                   help="(legacy, always on)")
-    p.add_argument("--no_zup", action="store_true", default=False,
-                   help="(legacy; Phase 2 always applies the production "
-                        "default zup transform — flag is accepted but no-ops)")
+    # --zup / --no_zup control the fuser's Y-up -> Z-up basis rotation.
+    # Default: --no_zup (source is treated as already Z-up — the library
+    # invariant, and what `coord_convention="z-up"` claims). Pass --zup
+    # for genuinely Y-up sources (PhysGaussian ficus etc.) to recover the
+    # historical behaviour. Note the long-standing mpm sim engine call
+    # has always passed --no_zup; until this change that flag silently
+    # no-op'd and every sequence shipped tipped onto its side.
+    p.add_argument("--zup", dest="zup", action="store_true",
+                   help="Apply Y-up -> Z-up basis rotation to the source "
+                        "ply quats/normals + sim positions (use for Y-up "
+                        "sources only).")
+    p.add_argument("--no_zup", dest="zup", action="store_false",
+                   help="Skip the Y-up -> Z-up rotation (default; matches "
+                        "the library `coord_convention=z-up` invariant).")
+    p.set_defaults(zup=False)
     p.add_argument("--output_source_scale", action="store_true", default=True,
                    help="(legacy, always on)")
     p.add_argument("--center_at_origin", action="store_true", default=True,
@@ -66,7 +73,7 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    fuser = KNNKabschFuser(k=args.knn)
+    fuser = KNNKabschFuser(k=args.knn, source_y_up=args.zup)
     n = fuser.fuse_sequence_dir(
         reference_ply_path=Path(args.reference_ply),
         sim_dir=Path(args.sim_dir),
