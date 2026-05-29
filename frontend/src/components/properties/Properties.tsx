@@ -1,13 +1,12 @@
 import { PropertyFolder } from "./PropertyFolder";
 import { useStore } from "@/lib/store";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ComposerPanel } from "./ComposerPanel";
 import { MaterialPanel } from "./MaterialPanel";
 import { SolverPanel } from "./SolverPanel";
 import { ForcesPanel } from "./ForcesPanel";
 import { SimSetupPanel } from "./SimSetupPanel";
-import { CameraPanel } from "./CameraPanel";
 import { ParticleFillingPanel } from "./ParticleFillingPanel";
-import { OtherPanel } from "./OtherPanel";
 import { BoundaryEditor } from "./BoundaryEditor";
 import { ProvenanceFooter } from "./ProvenanceFooter";
 import { useOverrides } from "@/lib/use-overrides";
@@ -28,13 +27,7 @@ export function Properties() {
     ? (recipes as RecipeListItem[]).some((r) => r.name === activeRecipeName)
     : true;
 
-  if (!activeRecipeName || !activeRecipeData) {
-    return (
-      <div className="p-3 text-xs text-text-muted">
-        Select a recipe in the Outliner to edit parameters.
-      </div>
-    );
-  }
+  const hasRecipe = !!activeRecipeName && !!activeRecipeData;
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -47,17 +40,29 @@ export function Properties() {
           </div>
         )}
 
-        <PropertyFolder title="Material"><MaterialPanel /></PropertyFolder>
-        <PropertyFolder title="Solver" defaultOpen={false}><SolverPanel /></PropertyFolder>
-        <PropertyFolder title="Forces" defaultOpen={false}><ForcesPanel /></PropertyFolder>
-        <PropertyFolder title="Sim setup" defaultOpen={false}><SimSetupPanel /></PropertyFolder>
-        <PropertyFolder title="Camera" defaultOpen={false}><CameraPanel /></PropertyFolder>
-        <PropertyFolder title="Particle filling" defaultOpen={false}><ParticleFillingPanel /></PropertyFolder>
-        <PropertyFolder title="Other" defaultOpen={false}><OtherPanel /></PropertyFolder>
-        <PropertyFolder title="Boundary conditions" defaultOpen={false}><BoundaryEditor /></PropertyFolder>
-        <PropertyFolder title="Provenance" defaultOpen={false}>
-          <ProvenanceFooter />
-        </PropertyFolder>
+        {/* PRIMARY authoring surface: compose material x scenario x building.
+            Always shown — it's also the entry point when no recipe is active
+            yet (it composes a verified default into the active recipe). */}
+        <PropertyFolder title="Composer"><ComposerPanel /></PropertyFolder>
+
+        {/* Everything below is ADVANCED override tooling on top of the
+            composed recipe — collapsed by default, and only meaningful once a
+            recipe is active. Camera + Other panels were removed: they edited
+            preview/viser-only fields the in-browser playback never reads (the
+            recipe still carries them, set by the composer's camera block). */}
+        {hasRecipe && (
+          <>
+            <PropertyFolder title="Material fine-tune" defaultOpen={false}><MaterialPanel /></PropertyFolder>
+            <PropertyFolder title="Solver" defaultOpen={false}><SolverPanel /></PropertyFolder>
+            <PropertyFolder title="Forces" defaultOpen={false}><ForcesPanel /></PropertyFolder>
+            <PropertyFolder title="Sim setup" defaultOpen={false}><SimSetupPanel /></PropertyFolder>
+            <PropertyFolder title="Particle filling" defaultOpen={false}><ParticleFillingPanel /></PropertyFolder>
+            <PropertyFolder title="Boundary conditions" defaultOpen={false}><BoundaryEditor /></PropertyFolder>
+            <PropertyFolder title="Provenance" defaultOpen={false}>
+              <ProvenanceFooter />
+            </PropertyFolder>
+          </>
+        )}
       </div>
     </TooltipProvider>
   );

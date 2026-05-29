@@ -263,6 +263,9 @@ def build_app(cfg: AppConfig) -> FastAPI:
     # Mount existing routers (unchanged in Phase 1; Phase 3+ will rewire
     # them through Depends() against the new Protocols).
     from gsfluent.api import (
+        compose as compose_api,
+    )
+    from gsfluent.api import (
         models as models_api,
     )
     from gsfluent.api import (
@@ -281,6 +284,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
         stream as stream_api,
     )
     app.include_router(recipes_api.router)
+    app.include_router(compose_api.router)
     app.include_router(models_api.router)
     app.include_router(runs_api.router)
     app.include_router(sequences_api.router)

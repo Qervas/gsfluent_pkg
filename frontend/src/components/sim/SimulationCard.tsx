@@ -256,8 +256,15 @@ export function SimulationCard(_: Props) {
       )}
 
       {!activeRecipeName ? (
-        <div className="px-3 py-4 text-xs text-text-muted text-center">
-          Pick a recipe above to configure simulation.
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          {/* No recipe yet: the Composer is the primary entry point — it
+              self-seeds a verified default (scenario + recommended material)
+              into the active recipe on first render. The RecipePicker above
+              remains for browsing flat fallbacks / user presets. */}
+          <div className="px-3 py-2 text-[11px] text-text-muted">
+            Compose a recipe, or pick a saved one above.
+          </div>
+          <Properties />
         </div>
       ) : (
         <div

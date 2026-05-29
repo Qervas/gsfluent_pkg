@@ -1,23 +1,19 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { useOverrides } from "@/lib/use-overrides";
 import { ScientificInput, type Marker } from "./widgets/ScientificInput";
-import { SelectInput } from "./widgets/SelectInput";
 
-/** Material model + the parameters each one actually consumes.
+/** Material FINE-TUNE (advanced override) panel.
  *
- * Why gating: jelly is pure neo-Hookean elasticity — friction_angle is
- * literally ignored by the solver. Showing it anyway invites users to
- * "tune" a value that has zero effect, which is the opposite of
- * scientific. Sand is the inverse: Drucker-Prager driven entirely by
- * `friction_angle`; its `E` is set high enough to keep cohesion stable
- * but the user shouldn't be sweeping it.
+ * Material CHOICE now lives in the Composer (the orthogonal axis); this panel
+ * only fine-tunes the scalar params of whatever material the composed recipe
+ * already carries. The material dropdown + snap-to-defaults was removed — it
+ * duplicated the composer's material library and had drifted (it listed
+ * 'snow', which the composer's material set doesn't include).
  *
- * The boolean per field decides visibility in this panel only — every
- * material still carries every field in the recipe JSON (the solver
- * reads what it needs and silently ignores the rest). Gating is purely
- * a UX layer.
+ * Field gating: each material model only consumes some params (jelly ignores
+ * friction_angle; sand is driven by it). The boolean per field decides
+ * visibility here only — the recipe JSON always carries every field; the
+ * solver reads what it needs.
  */
 type FieldKey = "E" | "nu" | "density" | "yield_stress" | "friction_angle";
 
@@ -30,8 +26,6 @@ const MATERIAL_FIELDS: Record<string, Record<FieldKey, boolean>> = {
   sand:        { E: true, nu: true, density: true, yield_stress: false, friction_angle: true  },
   watermelon:  { E: true, nu: true, density: true, yield_stress: true,  friction_angle: false },
 };
-
-const MATERIALS = Object.keys(MATERIAL_FIELDS);
 
 /** Per-parameter spec. Reference markers are calibrated against the
  *  values used by the bundled recipes — so the user can see "where
@@ -142,40 +136,20 @@ const FIELD_ORDER: FieldKey[] = ["E", "nu", "density", "yield_stress", "friction
 export function MaterialPanel() {
   const { effective, baselineValue, setOverride, clearOverride } = useOverrides();
   const activeRecipeName = useStore((s) => s.activeRecipeName);
-  const { data: defaults } = useQuery({
-    queryKey: ["material_defaults"],
-    queryFn: api.schemas.materials,
-  });
 
   if (!activeRecipeName || !effective) return null;
 
   const setField = (key: string, v: unknown) => setOverride(key, v);
-
-  const onMaterialChange = (newMat: string) => {
-    if (!defaults) return;
-    const mDefaults = defaults[newMat] ?? {};
-    // Material switch is a baseline edit, not an override. Update both
-    // activeRecipeData (so other panels read the new defaults) and the
-    // store's baseline, then clear overrides — none of the previous
-    // overrides necessarily apply to the new material.
-    const next = { ...effective, material: newMat, ...mDefaults };
-    useStore.getState().setActiveRecipe(activeRecipeName, next);
-    useStore.getState().setSimRecipeBaseline(next);
-    useStore.getState().clearAllOverrides();
-  };
 
   const currentMat = (effective.material as string | undefined) ?? "jelly";
   const visibility = MATERIAL_FIELDS[currentMat] ?? MATERIAL_FIELDS.jelly;
 
   return (
     <div className="space-y-0.5">
-      <SelectInput
-        label="Material"
-        value={currentMat}
-        options={MATERIALS}
-        onChange={onMaterialChange}
-        hint="Picking a material snaps related params (E, ν, density, …) to validated defaults and hides parameters the model ignores."
-      />
+      <div className="px-1 pb-1 text-[10px] text-text-muted italic leading-tight">
+        Material: <span className="font-mono">{currentMat}</span> (set in
+        Composer). Fine-tune its params below.
+      </div>
       {FIELD_ORDER.filter((k) => visibility[k]).map((key) => {
         const spec = FIELD_SPECS[key];
         const v = Number(effective[key] ?? 0);

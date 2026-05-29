@@ -8,6 +8,8 @@ import type {
   BCSchemas,
   MaterialDefaults,
   BackendHealth,
+  ComposeLibrary,
+  ComposeResult,
 } from "./types";
 
 /** Optional build-time override of the API host.
@@ -224,6 +226,19 @@ export const api = {
   schemas: {
     boundaries: () => f("/api/schemas/boundaries").then(j<BCSchemas>),
     materials:  () => f("/api/schemas/materials").then(j<MaterialDefaults>),
+  },
+  // Structured recipe composition. `library` populates the picker dropdowns;
+  // `run` turns a (material, scenario, building) pick into a flat recipe the
+  // sim eats. An over-ceiling / unknown pick comes back as a 422 whose
+  // detail.error.message says why — surface it; don't swallow it.
+  compose: {
+    library: () => f("/api/compose/library").then(j<ComposeLibrary>),
+    run: (material: string, scenario: string, building: string) =>
+      f("/api/compose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ material, scenario, building }),
+      }).then(j<ComposeResult>),
   },
   diag: {
     // Backend reachability probe. The vite proxy decides which actual

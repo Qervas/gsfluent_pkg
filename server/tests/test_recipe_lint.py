@@ -187,20 +187,17 @@ def _load_builtin(name: str) -> dict:
 #   shipped substep_dt=1e-4 above their CFL bound (jelly/metal/plasticine/
 #   sand) were lowered to CFL-safe values, so only the two damping warnings
 #   remain (both warn-severity, so the CI gate passes with zero errors).
+# The flat builtins are now just the material-only starter demos + the
+# demolition fallback. earthquake/wrecking moved to the composer (authoring/
+# scenarios.py) and the unverified spicy ones (wrecking_xl/collapse_fast/
+# shatter) were dropped — see the structured-authoring integration.
 _EXPECTED = {
     "demolition": set(),                          # 0.95 damping, dt safe
-    "earthquake": {"damping.disabled"},           # 1.1 damping, dt safe
     "foam": set(),                                # 0.95 damping, soft, dt safe
     "jelly": {"damping.disabled"},                # 1.1 damping; dt now CFL-safe
     "metal": set(),                               # dt lowered to CFL-safe
     "plasticine": set(),                          # dt lowered to CFL-safe
     "sand": set(),                                # dt lowered to CFL-safe
-    "wrecking": set(),                            # 0.95 damping, dt safe
-    # SPICY 🌶️ — designed for visual impact (see docs/slides/2026-05-28-
-    # gsfluent-recipes.md Part IV). All ship CFL-safe + damping enabled.
-    "wrecking_xl":   set(),                       # 0.97 damping, 5e-5 dt (E=50k)
-    "collapse_fast": set(),                       # 0.98 damping, 5e-5 dt
-    "shatter":       set(),                       # 0.97 damping, 3e-5 dt (E=80k CFL ~3.78e-5)
 }
 
 
@@ -212,7 +209,7 @@ def test_builtin_recipe_expected_findings(name, expected):
     )
 
 
-def test_builtin_library_is_present_and_eight_files():
+def test_builtin_library_matches_expected_set():
     # Guards against the sweep silently passing if recipes move/disappear.
     files = sorted(p.stem for p in RECIPES_DIR.glob("*.json"))
     assert set(files) == set(_EXPECTED), (
@@ -220,16 +217,15 @@ def test_builtin_library_is_present_and_eight_files():
     )
 
 
-def test_jelly_and_earthquake_flagged_damping_at_1_1():
-    # The headline case the linter exists to catch.
-    for name in ("jelly", "earthquake"):
-        r = _load_builtin(name)
-        assert r["grid_v_damping_scale"] == 1.1
-        assert "damping.disabled" in _ids(lint_recipe(r))
+def test_jelly_flagged_damping_at_1_1():
+    # The headline case the linter exists to catch (jelly still ships 1.1).
+    r = _load_builtin("jelly")
+    assert r["grid_v_damping_scale"] == 1.1
+    assert "damping.disabled" in _ids(lint_recipe(r))
 
 
 def test_the_0_95_recipes_are_clean_on_damping():
-    for name in ("demolition", "foam", "metal", "plasticine", "sand", "wrecking"):
+    for name in ("demolition", "foam", "metal", "plasticine", "sand"):
         r = _load_builtin(name)
         assert r["grid_v_damping_scale"] == 0.95
         assert "damping.disabled" not in _ids(lint_recipe(r))

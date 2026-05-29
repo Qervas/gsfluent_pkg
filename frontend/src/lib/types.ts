@@ -72,6 +72,48 @@ export type BCFieldSpec = {
 export type BCSchemas = Record<string, BCFieldSpec[]>;
 export type MaterialDefaults = Record<string, Record<string, number>>;
 
+// --- Structured composer (material x scenario x building -> recipe) ---------
+// Summaries returned by GET /api/compose/library to populate the picker
+// dropdowns. They carry only what the UI needs, not the recipe internals.
+export type MaterialSummary = {
+  name: string;
+  material: string;
+  E: number;
+  nu: number;
+  density: number;
+  yield_stress: number;
+  friction_angle: number;
+  desc: string;
+};
+export type ScenarioSummary = {
+  name: string;
+  base: string;                       // "pinned" | "driven" | "free"
+  frame_num: number;
+  gravity: number;
+  recommended_material: string | null;
+  damping: number | null;
+  num_events: number;
+  desc: string;
+};
+export type BuildingSummary = {
+  name: string;
+  model_path: string;
+  bbox: number[];
+  sim_area: number[];
+  desc: string;
+};
+export type ComposeLibrary = {
+  materials: MaterialSummary[];
+  scenarios: ScenarioSummary[];
+  buildings: BuildingSummary[];
+};
+export type ComposeResult = {
+  material: string;
+  scenario: string;
+  building: string;
+  recipe_data: Record<string, unknown>;
+};
+
 // Sequence metadata published into the store by SplatScene. The frame cursor
 // itself lives in SplatScene's rAF loop (not React) — only the total count is
 // surfaced, to drive PlaybackBar visibility + StatusPanel. Set once on load.

@@ -1,37 +1,53 @@
 # Sim Recipes
 
-Curated config JSONs consumed by the server-side simulation
-(`gs_simulation_building.py` on the GPU server). Drop a new `<name>.json`
-here and the workbench's recipe dropdown picks it up at next launch.
+> **Destruction scenarios are now COMPOSED, not hand-authored.** The curated
+> scenarios (earthquake, wrecking — verified-on-video) live in
+> `gsfluent/authoring/scenarios.py` and are generated on demand via
+> `POST /api/compose` (material × scenario × building → flat recipe). The flat
+> JSONs in *this* directory are the **starter material demos** and verified
+> flat fallbacks only. See `gsfluent/authoring/` for the structured system.
 
-Recipes are pure configuration — they describe materials, boundary
-conditions, gravity, and integration parameters. They never carry
-simulation code. The same JSON gets shipped to the server when a run
-is submitted.
+The flat config JSONs here are consumed by the server-side simulation
+(`gs_simulation_building.py` on the GPU server). They are pure configuration —
+materials, boundary conditions, gravity, integration params; never code. The
+same JSON (composed or flat) is shipped to the server when a run is submitted.
 
-## Available recipes
-
-### Materials (different physics, same building)
+## Flat builtin recipes (material starter demos + fallback)
 
 | Name | What it does | Material | Notes |
 |---|---|---|---|
 | `jelly` | Soft body wobble / gentle bounce | jelly | Default starter; very forgiving |
-| `metal` | Stiff metal — dents under load, holds shape | metal | E=50000 (10× jelly), density=3 |
+| `metal` | Stiff metal — dents under load, holds shape | metal | E=50000, density=3 |
 | `sand` | Granular collapse into a pile | sand | No cohesion; building slumps |
 | `foam` | Light squishy foam, slow recovery | foam | density=0.3, E=1000 |
 | `plasticine` | Plastic clay flow / permanent deformation | plasticine | Slow drape & squash |
+| `demolition` | Sequential particle release — top-down collapse | plasticine | R10-ported flat fallback (no composer scenario yet) |
 
-### Scenarios (forces / impactors acting on the building)
+These are **material-only looks** (+ the demolition fallback): they have no
+composer scenario, so they stay as flat recipes reachable via "Browse library".
 
-| Name | What it does | Material | Notes |
+## Composed scenarios (the curated, verified set)
+
+Generated via the composer (`POST /api/compose`), source of truth in
+`gsfluent/authoring/scenarios.py`:
+
+| Scenario | What it does | Recommended material | Verified |
 |---|---|---|---|
-| `demolition` | Sequential particle release — building collapses top-down | plasticine | Dramatic — R10 ported |
-| `earthquake` | Base shaking — 4 cuboid colliders drive the floor laterally | watermelon | Classic seismic test |
-| `wrecking` | Lateral cuboid impact at mid-height (wrecking ball) | plasticine | R10 ported |
+| `earthquake` | Base-shake plate → tower collapses into rubble | watermelon (soft) | ✅ on video 2026-05-29 |
+| `wrecking` | Mid-height impact, pinned base → comes apart | watermelon (soft) | ✅ on video 2026-05-29 |
 
-All recipes ship with `frame_num=150` (≈ 5 sec @ 30 fps target) and use
-`bounding_box + surface_collider` for global containment. Production
-runs happen on the A100 server stack.
+**Key finding:** buildings collapse with the *soft* `watermelon` material
+(E=2000, no yield), not the stiff `plasticine` default — same scenario + stiff
+material just ejects/bends. Material is the lever; the composer makes it a
+one-axis swap.
+
+### Removed (2026-05-29)
+
+`earthquake.json`, `wrecking.json` — superseded by the composer (byte-identical
+output, verified). `wrecking_xl.json`, `collapse_fast.json`, `shatter.json` —
+unverified spicy experiments that exceeded the composer's safety ceilings
+(grid-escape velocity / un-merged fracture dependency); dropped to keep the
+curated set trustworthy.
 
 ### Removed: `meteor`, `uplift`
 
