@@ -112,6 +112,80 @@ SCENARIOS: dict[str, dict] = {
                  "(grid-safe). Soft material -> the building comes apart at the "
                  "impact. Verified on video.",
     },
+
+    # ------------------------------------------------------------------ #
+    # BLAST — a real FORCE detonation in the core (particle_impulse).     #
+    # Unlike the velocity puppets this injects force and lets the         #
+    # material respond. force is single-digit (dv = force/mass, mass~1e-4;#
+    # mag 1.5 buckled a stiff body, escaped at >=3). base=pinned so the   #
+    # foundation holds while the upper structure folds. damping OFF.      #
+    # NOTE: not yet video-verified through the composer — render gates it.#
+    # ------------------------------------------------------------------ #
+    "blast": {
+        "frame_num": 100,
+        "frame_dt": 0.03,
+        "gravity": -15.0,
+        "base": "pinned",
+        "recommended_material": "watermelon",
+        "damping": 1.1,
+        "events": [
+            {"kind": "ground", "surface": "slip", "friction": 0.0,
+             "height": "base"},
+            {"kind": "blast", "height": "mid", "force": 1.5,
+             "direction": [1.0, 0.0, -0.5], "size": 0.25,
+             "num_dt": 6, "at": 0.2},
+        ],
+        "_desc": "Core force-detonation: a real impulse drives the mid-section "
+                 "out + down onto the pinned base; the structure folds.",
+    },
+
+    # ------------------------------------------------------------------ #
+    # TOPPLE — fell the building like a tree. base=pinned (the foot is    #
+    # the PIVOT); drag the top third sideways so the column hinges about  #
+    # the anchored base and lays down. The composer clamps the drag       #
+    # duration so the advected box stays in-grid. damping OFF so the      #
+    # toppling momentum carries. Soft material hinges; stiff would shear. #
+    # ------------------------------------------------------------------ #
+    "topple": {
+        "frame_num": 120,            # needs time to fall past the tipping point
+        "frame_dt": 0.03,
+        "gravity": -15.0,
+        "base": "pinned",
+        "recommended_material": "watermelon",
+        "damping": 1.1,
+        "events": [
+            {"kind": "ground", "surface": "separate", "friction": 0.6,
+             "height": "base"},
+            {"kind": "drag", "toward": "+x", "height": "top",
+             "band_frac": 0.33, "speed": 1.5, "at": 0.05, "duration": 0.3},
+        ],
+        "_desc": "Fell it like a tree: the top third is hauled +x while the foot "
+                 "stays pinned, so the column hinges about its base and lays down.",
+    },
+
+    # ------------------------------------------------------------------ #
+    # CRUSH — top-down pancake. base=pinned (the anvil); release the body #
+    # layer-by-layer from the top so each freed layer drops onto the      #
+    # ones below and the building eats itself down to the foundation.     #
+    # gravity-driven (no escape risk); needs a soft/low-yield material to #
+    # actually collapse rather than self-support. Stronger gravity helps. #
+    # ------------------------------------------------------------------ #
+    "crush": {
+        "frame_num": 100,
+        "frame_dt": 0.03,
+        "gravity": -25.0,            # heavy g so the pancake is decisive
+        "base": "pinned",
+        "recommended_material": "watermelon",
+        "damping": 0.98,             # gravity collapse — light damping is fine
+        "events": [
+            {"kind": "ground", "surface": "slip", "friction": 0.0,
+             "height": "base"},
+            {"kind": "release", "start_position": 1.5, "end_position": 0.65,
+             "num_layers": 80, "start_time": 0.2, "end_time": 1.0},
+        ],
+        "_desc": "Top-down pancake: floors release layer-by-layer and stack onto "
+                 "the pinned foundation; the building crushes itself flat.",
+    },
 }
 
 
