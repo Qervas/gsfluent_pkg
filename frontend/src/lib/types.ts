@@ -65,7 +65,7 @@ export type SequenceItem = {
 
 export type BCFieldSpec = {
   name: string;
-  type: "vec3" | "float" | "string";
+  type: "vec3" | "float" | "int" | "string";
   default: unknown;
   hint: string;
 };

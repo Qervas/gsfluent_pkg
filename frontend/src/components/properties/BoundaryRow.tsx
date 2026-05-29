@@ -6,9 +6,15 @@ import { NumberInput } from "./widgets/NumberInput";
 type BC = { type: string; [k: string]: unknown };
 type FieldSpec = {
   name: string;
-  type: "vec3" | "float" | "string";
+  type: "vec3" | "float" | "int" | "string";
   default: unknown;
   hint: string;
+};
+
+// Known enums for string fields whose valid values are fixed by the solver.
+// (The schema only carries a hint string; this gives the dropdown real options.)
+const STRING_ENUMS: Record<string, string[]> = {
+  surface: ["slip", "separate", "sticky"],
 };
 
 export function BoundaryRow({
@@ -75,28 +81,30 @@ export function BoundaryRow({
           );
         }
         if (f.type === "string") {
+          const cur = typeof v === "string" ? v : String(v);
+          // Use a known enum when we have one; otherwise fall back to the
+          // current value as the only option (preserve it).
+          const opts = STRING_ENUMS[f.name] ?? [cur];
           return (
             <SelectInput
               key={f.name}
               label={f.name}
-              value={typeof v === "string" ? v : String(v)}
-              // Without a fixed enum from the schema, allow the current value
-              // as the only option (lets users at least see / preserve it).
-              // Phase 4 polish could load enum lists from a richer schema.
-              options={[typeof v === "string" ? v : String(v)]}
+              value={cur}
+              options={opts.includes(cur) ? opts : [cur, ...opts]}
               onChange={(nv) => setField(f.name, nv)}
               hint={f.hint}
             />
           );
         }
-        // float
+        // float or int — both numeric. int rounds on change.
+        const isInt = f.type === "int";
         return (
           <NumberInput
             key={f.name}
             label={f.name}
             value={Number(v ?? 0)}
-            onChange={(n) => setField(f.name, n)}
-            step={0.1}
+            onChange={(n) => setField(f.name, isInt ? Math.round(n) : n)}
+            step={isInt ? 1 : 0.1}
             hint={f.hint}
           />
         );

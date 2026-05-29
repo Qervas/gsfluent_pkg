@@ -8,13 +8,23 @@ def test_boundaries(client):
         assert required in body, f"missing BC type: {required}"
     # bounding_box has zero fields
     assert body["bounding_box"] == []
-    # cuboid has the expected fields
+    # cuboid fields MUST match what the sim actually reads (point, not center;
+    # includes reset). The old schema said "center" — the sim ignored it.
     cuboid_field_names = {f["name"] for f in body["cuboid"]}
-    assert cuboid_field_names == {"center", "size", "velocity", "start_time", "end_time"}
-    # cuboid.center is a vec3 with 3-element default
-    center = next(f for f in body["cuboid"] if f["name"] == "center")
-    assert center["type"] == "vec3"
-    assert center["default"] == [0.0, 0.0, 0.0]
+    assert cuboid_field_names == {"point", "size", "velocity", "start_time",
+                                  "end_time", "reset"}
+    point = next(f for f in body["cuboid"] if f["name"] == "point")
+    assert point["type"] == "vec3"
+    # surface_collider uses `surface` (not "surface_type")
+    sc_names = {f["name"] for f in body["surface_collider"]}
+    assert "surface" in sc_names and "surface_type" not in sc_names
+    # release uses the real field set (not the old axis/interval form)
+    rel_names = {f["name"] for f in body["release_particles_sequentially"]}
+    assert rel_names == {"normal", "start_position", "end_position",
+                         "num_layers", "start_time", "end_time"}
+    # the real force + drag primitives are now exposed
+    assert "particle_impulse" in body
+    assert "enforce_particle_translation" in body
 
 
 def test_materials(client):
