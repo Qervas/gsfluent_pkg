@@ -106,6 +106,11 @@ export function RunButton() {
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      // resetForNewRun() flipped simState to "running" before the await, and
+      // the running branch is checked first in render — so without flipping to
+      // "error" here the button stays stuck at 0% and the failure is invisible
+      // (the exact "halts at 0%, no logs" symptom). Surface it.
+      useStore.getState().setSimState("error");
     } finally {
       setBusy(false);
     }

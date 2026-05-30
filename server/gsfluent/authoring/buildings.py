@@ -27,11 +27,21 @@ BUILDINGS: dict[str, dict] = {
         # centered at (1,1,1). The tall aspect means topple/pancake ARE viable
         # (the earlier "squat, can't topple" was an artifact of the wrong bbox).
         "bbox": [0.698, 1.302, 0.821, 1.179, 0.5, 1.5],
-        # World-coord AABB of the scan (NOT a generic [-30,30] box — cluster_6_15
-        # lives at ~(3460, 29045)). Matches recipes/*.json after commit 685c19f
-        # "align sim_area with cluster_6_15 world bbox". sim_area_frame="model"
-        # means the sim driver translates this against the model at run time.
-        "sim_area": [3440, 3480, 29030, 29060, -25, 35],
+        # MODEL-LOCAL sim_area: a symmetric box centered on the model's own
+        # bbox center (sim_area_frame="model" -> the runner adds the model's
+        # bbox center at submit time). Fixed 2026-05-30: the previous value was
+        # WORLD coords [3440,3480,29030,29060,-25,35] but STILL tagged
+        # frame="model", so the runner added the model center ON TOP of already-
+        # world coords (~3460,29045) -> sim_area landed at ~(6900,58000), missed
+        # the model entirely -> "sim_area does not overlap model bbox" 422 ->
+        # the run silently halted at 0%. Model-local is also portable: it
+        # adapts to whatever model is run (original, pruned, re-uploaded).
+        # Symmetric +-30 (not the building's asymmetric per-axis spans) because
+        # the library holds BOTH Z-up (z-span 50.4) and Y-up (y-span 50.4)
+        # variants of this scan; a symmetric cube contains the building in EITHER
+        # orientation (max half-span 25.2 + margin). The model holds only the
+        # building's splats, so a generous box still selects exactly them.
+        "sim_area": [-30, 30, -30, 30, -30, 30],
         "sim_area_frame": "model",
         # Camera block the native renderer (--render_img) reads. Irrelevant to
         # production in-browser playback, but required for verify-to-video.
