@@ -36,6 +36,36 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 
 ---
 
+## 创作仿真:材料 × 场景 × 建筑
+
+配方不再手写,而是由三个正交输入 **MATERIAL × SCENARIO × BUILDING**
+合成。前端 Properties 面板顶部的 **Composer** 就是入口:选场景、选材料、
+选建筑,后端 `POST /api/compose` 生成可直接跑的扁平配方。选好场景 + 材料,
+点 **Run** 就行。
+
+五个精选场景(都已用渲染视频验证过,在推荐的软材料 `watermelon` 下会有
+明显的「楼塌了」效果):
+
+| 场景         | 效果                                   |
+| ---          | ---                                   |
+| `earthquake` | 地基震动 → 整楼塌成废墟                 |
+| `wrecking`   | 中部侧向撞击(地基固定)→ 解体          |
+| `topple`     | 顶部沿薄轴拖拽 → 像多米诺一样倒下       |
+| `burst`      | 核心四块向外炸开 → 结构爆裂             |
+| `demolish`   | 两侧对撞切断底部 → 直接砸塌并碎裂       |
+
+每个场景带 `recommended_material`;剧烈场景对刚性材料(jelly/plasticine)
+会数值爆掉(出网格 → CUDA 崩溃,这是物理本身,不是 bug),所以都推荐软的
+`watermelon`。换场景时 UI 会自动把材料切到推荐值,不匹配时给提示。原来的
+扁平参数面板(Material / Solver / Forces / …)还在,作为合成配方之上的
+折叠「高级覆盖」。
+
+> 合成的配方只存在内存里(带 `_composed_from` 溯源块),**不是**已保存的
+> 服务端配方。已保存的配方是扁平材料 demo + `★` 用户预设。完整 HTTP
+> 参考(含 compose 端点):[`docs/API.md`](docs/API.md)。
+
+---
+
 ## 架构
 
 ```

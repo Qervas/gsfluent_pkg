@@ -39,6 +39,41 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 
 ---
 
+## Authoring a sim: material × scenario × building
+
+Recipes aren't hand-written — they're **composed** from three orthogonal
+inputs: **MATERIAL × SCENARIO × BUILDING**. The **Composer** panel at the
+top of Properties is the entry point: pick a scenario, a material, and a
+building; the backend's `POST /api/compose` generates a ready-to-run flat
+recipe. Pick scenario + material, hit **Run** — that's it.
+
+The five curated scenarios (all verified on rendered video to give a
+dramatic "the building collapses" moment on the recommended soft material,
+`watermelon`):
+
+| Scenario     | What happens                                              |
+| ---          | ---                                                      |
+| `earthquake` | Base-shake plate → the tower collapses into rubble       |
+| `wrecking`   | Mid-height side impact (pinned base) → shears apart      |
+| `topple`     | Top third dragged along the thin axis → falls like a domino |
+| `burst`      | Four core slabs shove outward → the structure explodes   |
+| `demolish`   | Two opposing base-cut impacts → it crashes down + breaks |
+
+Each scenario carries a `recommended_material`. The violent scenarios
+numerically eject *stiff* materials (jelly/plasticine) — a grid-escape
+crash that's physics, not a bug — so they recommend the soft `watermelon`.
+The UI snaps material to the recommendation on scenario change and warns on
+a mismatch. The old flat parameter panels (Material / Solver / Forces / …)
+are still there as collapsed *advanced overrides* on top of the composed
+recipe.
+
+> Composed recipes are in-memory only (they carry a `_composed_from` block)
+> — they are **not** saved server recipes. Saved recipes are the flat
+> material demos + `★` user presets. Full HTTP reference, including the
+> composer endpoints: [`docs/API.md`](docs/API.md).
+
+---
+
 ## Architecture
 
 ```
