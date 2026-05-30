@@ -212,6 +212,69 @@ def test_earthquake_and_wrecking_recommend_watermelon():
         assert get_scenario(name)["recommended_material"] == "watermelon"
 
 
+# ---------------------------------------------------------------------------
+# demolish — controlled-demolition base-cut (two opposing impactors + pin).
+# Replaced the impossible vertical "crush" (verified 2026-05-30). This pins the
+# semantic contract so a regression in the impact expansion is caught by name.
+# ---------------------------------------------------------------------------
+
+
+def test_demolish_has_two_opposing_low_impactors_over_pinned_base():
+    r = compose("watermelon", "demolish", "cluster_6_15")
+    bbox = get_building("cluster_6_15")["bbox"]
+    cx = 0.5 * (bbox[0] + bbox[1])
+
+    # exactly one rigid base pin (the foot stays while the legs are cut)
+    pins = [
+        b for b in r["boundary_conditions"]
+        if b["type"] == "enforce_particle_translation"
+        and b.get("velocity") == [0.0, 0.0, 0.0]
+    ]
+    assert len(pins) == 1, "demolish pins the foot (base='pinned')"
+
+    # exactly two impactor cuboids
+    cuboids = [b for b in r["boundary_conditions"] if b["type"] == "cuboid"]
+    assert len(cuboids) == 2, "demolish cuts the legs with two impactors"
+
+    # they OPPOSE on x: one moves -x, the other +x, and their x-velocities sum
+    # to ~0 (mirrored speed)
+    vx = sorted(c["velocity"][0] for c in cuboids)
+    assert vx[0] < 0 < vx[1], f"impactors must oppose on x; got {vx}"
+    assert vx[0] == pytest.approx(-vx[1], abs=1e-6), "opposing speeds mirror"
+
+    # the +x-side impactor (point.x > center) sweeps inward (-x) and vice-versa
+    for c in cuboids:
+        if c["point"][0] > cx:
+            assert c["velocity"][0] < 0, "the +x-side impactor sweeps inward (-x)"
+        else:
+            assert c["velocity"][0] > 0, "the -x-side impactor sweeps inward (+x)"
+
+    # both fire at the LOWER section (cut the legs), well below mid-height
+    mid_z = 0.5 * (bbox[4] + bbox[5])
+    for c in cuboids:
+        assert c["point"][2] < mid_z, "demolish impactors hit the lower section"
+
+
+def test_demolish_recommends_watermelon():
+    from gsfluent.authoring.scenarios import get_scenario
+    assert get_scenario("demolish")["recommended_material"] == "watermelon"
+
+
+def test_all_five_scenarios_compose_clean_across_materials():
+    """The curated set is exactly five; every one composes on every shipped
+    material without raising (the render gate further filters stiff-material
+    ejects, but compose() itself must never crash)."""
+    from gsfluent.authoring.scenarios import SCENARIOS
+    from gsfluent.authoring.materials import MATERIALS
+    assert set(SCENARIOS) == {
+        "earthquake", "wrecking", "topple", "burst", "demolish"
+    }
+    for s in SCENARIOS:
+        for m in MATERIALS:
+            r = compose(m, s, "cluster_6_15")  # must not raise
+            assert r["boundary_conditions"][0] == {"type": "bounding_box"}
+
+
 def test_shake_plates_stay_under_imposed_speed_ceiling():
     r = compose("plasticine", "earthquake", "cluster_6_15")
     for c in r["boundary_conditions"]:
@@ -234,15 +297,18 @@ def test_impact_speed_over_ceiling_raises():
         del SCENARIOS["_hot_test"]
 
 
-def test_blast_force_over_ceiling_raises():
+def test_removed_blast_event_kind_is_rejected():
+    """The fragile force-based `blast` event was removed 2026-05-30 (superseded
+    by `burst`). A scenario still asking for kind 'blast' must be rejected as an
+    unknown event kind, not silently produce a particle_impulse BC."""
     from gsfluent.authoring.scenarios import SCENARIOS
     blast = {
         "frame_num": 100, "frame_dt": 0.03, "gravity": -15.0, "base": "free",
-        "events": [{"kind": "blast", "height": "mid", "force": 50.0}],
+        "events": [{"kind": "blast", "height": "mid", "force": 1.5}],
     }
     SCENARIOS["_blast_test"] = blast
     try:
-        with pytest.raises(ComposeError):
+        with pytest.raises(ComposeError, match="unknown event kind"):
             compose("plasticine", "_blast_test", "cluster_6_15")
     finally:
         del SCENARIOS["_blast_test"]

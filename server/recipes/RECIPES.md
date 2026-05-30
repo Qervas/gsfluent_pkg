@@ -33,13 +33,37 @@ Generated via the composer (`POST /api/compose`), source of truth in
 
 | Scenario | What it does | Recommended material | Verified |
 |---|---|---|---|
-| `earthquake` | Base-shake plate → tower collapses into rubble | watermelon (soft) | ✅ on video 2026-05-29 |
-| `wrecking` | Mid-height impact, pinned base → comes apart | watermelon (soft) | ✅ on video 2026-05-29 |
+| `earthquake` | Base-shake plate → tower collapses into rubble | watermelon (soft) | ✅ on video |
+| `wrecking` | Mid-height impact, pinned base → shears apart | watermelon (soft) | ✅ on video |
+| `topple` | Top third hauled +y (thin axis) → tower falls like a domino | watermelon (soft) | ✅ on video |
+| `burst` | 4 core slabs blow the mid-section outward → explodes apart | watermelon (soft) | ✅ on video |
+| `demolish` | Two impactors cut the legs → tower crashes down + breaks up | watermelon (soft) | ✅ on video |
 
-**Key finding:** buildings collapse with the *soft* `watermelon` material
-(E=2000, no yield), not the stiff `plasticine` default — same scenario + stiff
-material just ejects/bends. Material is the lever; the composer makes it a
-one-axis swap.
+All five are **active lateral destabilization** (shake / impact / drag / explode /
+leg-cut) — the material yields sideways into open grid, which is what the solver
+allows. Two mechanisms were tried and DROPPED as physically unachievable here:
+`implode` (down-drag of the core) and a vertical-press `crush` both inject a
+DOWNWARD imposed velocity that traps the near-incompressible body against the
+floor → pressure spike → grid escape (CUDA 700, frames 15-25). A pure-gravity
+pancake also fails: the tower self-supports under gravity (every material,
+pinned or free). `demolish` delivers the "building collapses + breaks" goal that
+`crush` was reaching for, via the robust lateral cut instead.
+
+**Key finding #1 (material):** buildings collapse with the *soft* `watermelon`
+material (E=2000, no yield), not the stiff `plasticine` default — same scenario
++ stiff material just ejects/bends. Material is the lever; the composer makes it
+a one-axis swap. The violent scenarios (burst/wrecking/earthquake) crash the
+*stiff* materials (jelly/plasticine) with grid-escape — that's physics, not a
+bug, so they recommend watermelon.
+
+**Key finding #2 (geometry, 2026-05-29):** the cube-frame `bbox` in
+`authoring/buildings.py` MUST be the true normalized extent (measured by
+replaying the sim's `transform2origin`), not a guess. `cluster_6_15` is a TALL
+slender slab (z-span 1.0, x 0.60, y 0.36 — thin). An earlier guessed bbox was
+2–3.6× too wide, which sized every lateral BC wrong (the implode core column
+came out wider than the building and ejected it) and produced the false "squat,
+can't topple" conclusion. With the real bbox, topple is viable and all lateral
+BCs are building-relative.
 
 ### Removed (2026-05-29)
 

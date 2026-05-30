@@ -32,14 +32,12 @@ _GRID_LIM = 2
 # under the divergence threshold (the lint gate uses the bound itself).
 _CFL_MARGIN = 0.9
 
-# ENERGY-FAMILY SAFETY CEILINGS (verified 2026-05-29 on the size-2 grid).
-# imposed-velocity: a cuboid/drag speed above this launches debris past the
-# grid edge -> CUDA 700 (v=4 crashed; v=2 contained). force: the solver does
-# dv = force/particle_mass with mass ~ 1e-4, so force in the thousands meant
-# dv in the millions -> instant escape; single-digit force is the real scale
-# (mag 1.0 buckled, 3.0 escaped).
+# IMPOSED-VELOCITY SAFETY CEILING (verified 2026-05-29 on the size-2 grid): a
+# cuboid/drag speed above this launches debris past the grid edge -> CUDA 700
+# (v=4 crashed; v=2 contained). All five live scenarios are imposed-velocity
+# (shake/impact/drag/burst); the force-based `blast` (particle_impulse) was
+# removed as a fragile footgun — see the event-kind dispatch note below.
 _MAX_IMPOSED_SPEED = 2.0
-_MAX_BLAST_FORCE = 2.0
 
 
 class ComposeError(Exception):
@@ -281,29 +279,10 @@ def _event_to_bcs(ev: dict, bbox: list[float], scenario: dict) -> list[dict]:
             "end_time": round(at + dur, 4),
         }]
 
-    if kind == "blast":
-        # A real FORCE on a box (particle_impulse). dv = force/mass, mass~1e-4,
-        # so force is SINGLE DIGITS (verified). Drives material from a point.
-        z = _height_z(bbox, ev.get("height", "mid"))
-        x0, x1, y0, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
-        xc, yc = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
-        mag = float(ev.get("force", 1.5))
-        if mag > _MAX_BLAST_FORCE:
-            raise ComposeError(
-                f"blast force {mag} exceeds the force ceiling {_MAX_BLAST_FORCE} "
-                f"(dv=force/mass, mass~1e-4; high force -> instant grid escape)."
-            )
-        # direction: outward+down by default to drive onto the base
-        d = ev.get("direction", [1.0, 0.0, -0.5])
-        s = float(ev.get("size", 0.25))
-        return [{
-            "type": "particle_impulse",
-            "point": [round(xc, 4), round(yc, 4), round(z, 4)],
-            "size": [s, s, s],
-            "force": [round(d[i] * mag, 4) for i in range(3)],
-            "num_dt": int(ev.get("num_dt", 6)),
-            "start_time": float(ev.get("at", 0.2)),
-        }]
+    # NOTE: the force-based `blast` event (particle_impulse) was REMOVED
+    # 2026-05-30. It crashed 4/5 materials (dv=force/mass, mass~1e-4 is
+    # intrinsically twitchy -> grid escape) and was superseded by `burst`, which
+    # gets the explosion read from the robust cuboid velocity-puppet family.
 
     if kind == "release":
         # Staged top-down gravity collapse (release_particles_sequentially).
@@ -317,6 +296,56 @@ def _event_to_bcs(ev: dict, bbox: list[float], scenario: dict) -> list[dict]:
             "start_time": float(ev.get("start_time", 0.2)),
             "end_time": float(ev.get("end_time", 1.0)),
         }]
+
+    if kind == "burst":
+        # Internal explosion via 4 cuboid velocity puppets (NOT the fragile
+        # particle_impulse): four slabs offset around the core, each shoving
+        # its half OUTWARD (+x/-x/+y/-y). Bursts the structure apart from
+        # inside while staying stable + grid-contained. All extents are
+        # BUILDING-RELATIVE (fractions of the footprint half-extent) so the
+        # slabs sit inside the body regardless of its proportions — critical
+        # for a slender slab where the thin axis is far smaller than the wide.
+        x0, x1, y0, y1, z0, z1 = bbox
+        xc, yc = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+        hx, hy = 0.5 * (x1 - x0), 0.5 * (y1 - y0)
+        z = _height_z(bbox, ev.get("height", "mid"))
+        speed = float(ev.get("speed", 1.8))
+        if speed > _MAX_IMPOSED_SPEED:
+            raise ComposeError(
+                f"burst speed {speed} exceeds imposed-velocity ceiling "
+                f"{_MAX_IMPOSED_SPEED}."
+            )
+        off_frac = float(ev.get("offset_frac", 0.45))   # slab center, frac of half
+        size_frac = float(ev.get("size_frac", 0.4))     # slab half-extent, frac of half
+        at = float(ev.get("at", 0.2))
+        sz = 0.5 * (z1 - z0) * float(ev.get("band_frac", 0.5))  # vertical reach
+        out = []
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            # per-axis half-extent this slab spans (thin in the building's
+            # thin axis), and its outward offset from center
+            sx_ = size_frac * hx if dx else size_frac * hx
+            sy_ = size_frac * hy if dy else size_frac * hy
+            cx = xc + dx * off_frac * hx
+            cy = yc + dy * off_frac * hy
+            # clamp duration so this slab's leading wall stays in-grid
+            if dx > 0:   room = (_GRID_LIM - 0.02) - (cx + sx_)
+            elif dx < 0: room = (cx - sx_) - 0.02
+            elif dy > 0: room = (_GRID_LIM - 0.02) - (cy + sy_)
+            else:        room = (cy - sy_) - 0.02
+            dur = min(float(ev.get("duration", 0.3)), max(room / speed if speed > 0 else 0.0, 0.0))
+            if dur <= 0:
+                raise ComposeError("burst slab already at grid edge")
+            vel = [round(dx * speed, 4), round(dy * speed, 4), 0.0]
+            out.append({
+                "type": "cuboid",
+                "point": [round(cx, 4), round(cy, 4), round(z, 4)],
+                "size": [round(sx_, 4), round(sy_, 4), round(sz, 4)],
+                "velocity": vel,
+                "start_time": round(at, 4),
+                "end_time": round(at + dur, 4),
+                "reset": 0,
+            })
+        return out
 
     raise ComposeError(f"unknown event kind {kind!r}")
 

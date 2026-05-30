@@ -38,7 +38,10 @@ EVENT KINDS (each maps to exactly one verified solver primitive):
     shake    -> set_velocity_on_cuboid x N     (L1022)  alternating base plate
     drag     -> enforce_particle_velocity_..   (L1247)  rigidly haul a region
     release  -> release_particles_sequentially (L1401)  staged top-down drop
-    blast    -> add_impulse_on_particles       (L1198)  a real FORCE on a box
+    burst    -> set_velocity_on_cuboid x 4     (L1022)  4 core slabs shoved OUT
+(`blast` -> add_impulse_on_particles was REMOVED 2026-05-30: fragile real-force
+ primitive, dv=force/mass with mass~1e-4 crashed 4/5 materials; superseded by
+ `burst`, which gets the explosion read from robust velocity puppets.)
 (The base regime injects its own ground/pin/shake BCs; events[] is the
 scenario-specific action on top.)
 """
@@ -114,77 +117,98 @@ SCENARIOS: dict[str, dict] = {
     },
 
     # ------------------------------------------------------------------ #
-    # BLAST — a real FORCE detonation in the core (particle_impulse).     #
-    # Unlike the velocity puppets this injects force and lets the         #
-    # material respond. force is single-digit (dv = force/mass, mass~1e-4;#
-    # mag 1.5 buckled a stiff body, escaped at >=3). base=pinned so the   #
-    # foundation holds while the upper structure folds. damping OFF.      #
-    # NOTE: not yet video-verified through the composer — render gates it.#
+    # BURST — internal explosion that throws the structure outward.       #
+    # Replaces blast, whose particle_impulse primitive crashed 4/5        #
+    # materials (frame 6, grid escape: dv=force/mass with mass~1e-4 is    #
+    # intrinsically twitchy — verified 2026-05-29). burst gets the same   #
+    # "explode from inside" read using the ROBUST cuboid velocity-puppet  #
+    # family: four slabs at the core, each shoving its quadrant OUTWARD    #
+    # (+x/-x/+y/-y). Grid-clamped, stays under the |v|<=2 ceiling.        #
+    # base=pinned so the foundation holds while the mid-section bursts.    #
     # ------------------------------------------------------------------ #
-    "blast": {
+    "burst": {
         "frame_num": 100,
         "frame_dt": 0.03,
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 1.1,
+        "damping": 1.1,              # OFF — let the blown-out debris keep flying
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
-            {"kind": "blast", "height": "mid", "force": 1.5,
-             "direction": [1.0, 0.0, -0.5], "size": 0.25,
-             "num_dt": 6, "at": 0.2},
+            # Four mid-height slabs blow the core apart at 1.8 over 0.3 s; sizes
+            # are building-relative (frac of footprint) so they fit a slender
+            # slab; the composer clamps duration so debris stays in-grid.
+            {"kind": "burst", "height": "mid", "speed": 1.8,
+             "size_frac": 0.4, "offset_frac": 0.5, "band_frac": 0.5,
+             "at": 0.2, "duration": 0.3},
         ],
-        "_desc": "Core force-detonation: a real impulse drives the mid-section "
-                 "out + down onto the pinned base; the structure folds.",
+        "_desc": "Internal explosion: four core slabs shove the mid-section "
+                 "outward in every direction; the structure bursts apart. "
+                 "Replaces blast (fragile force primitive crashed 4/5).",
     },
 
     # ------------------------------------------------------------------ #
-    # TOPPLE — fell the building like a tree. base=pinned (the foot is    #
-    # the PIVOT); drag the top third sideways so the column hinges about  #
-    # the anchored base and lays down. The composer clamps the drag       #
-    # duration so the advected box stays in-grid. damping OFF so the      #
-    # toppling momentum carries. Soft material hinges; stiff would shear. #
+    # TOPPLE — fell the tower like a domino. RE-ENABLED 2026-05-29 after   #
+    # the bbox fix: the building is a TALL slender slab (z-span 1.0, y-span #
+    # 0.36), not the squat block the wrong bbox implied — so it CAN topple. #
+    # base=pinned (the foot is the hinge); drag the top third in +y (the    #
+    # THIN axis -> tips over like a wall/domino, the most dramatic fall).   #
+    # robust `drag` primitive (edge-style, like wrecking); duration auto-   #
+    # clamped so the advected box stays in-grid. damping OFF so momentum    #
+    # carries it past the tipping point.                                    #
     # ------------------------------------------------------------------ #
     "topple": {
-        "frame_num": 120,            # needs time to fall past the tipping point
+        "frame_num": 120,            # time to fall past the tipping point
         "frame_dt": 0.03,
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 1.1,
+        "damping": 1.1,              # OFF — toppling momentum must carry
         "events": [
             {"kind": "ground", "surface": "separate", "friction": 0.6,
              "height": "base"},
-            {"kind": "drag", "toward": "+x", "height": "top",
-             "band_frac": 0.33, "speed": 1.5, "at": 0.05, "duration": 0.3},
+            {"kind": "drag", "toward": "+y", "height": "top",
+             "band_frac": 0.33, "speed": 1.5, "at": 0.05, "duration": 0.4},
         ],
-        "_desc": "Fell it like a tree: the top third is hauled +x while the foot "
-                 "stays pinned, so the column hinges about its base and lays down.",
+        "_desc": "Fell it like a domino: the top third is hauled +y (the thin "
+                 "axis) while the foot stays pinned, so the slab hinges about "
+                 "its base and topples over. Viable because the building is tall.",
     },
 
     # ------------------------------------------------------------------ #
-    # CRUSH — top-down pancake. base=pinned (the anvil); release the body #
-    # layer-by-layer from the top so each freed layer drops onto the      #
-    # ones below and the building eats itself down to the foundation.     #
-    # gravity-driven (no escape risk); needs a soft/low-yield material to #
-    # actually collapse rather than self-support. Stronger gravity helps. #
+    # DEMOLISH — controlled-demolition COLLAPSE. Cut the legs: two opposing #
+    # impactors sweep through the LOWER section (+x and -x at base height)  #
+    # so the support is blown out sideways and the whole tower crashes      #
+    # straight down, breaking apart into a rubble field. This REPLACES the  #
+    # impossible "crush" (verified 2026-05-30): a forced vertical pancake   #
+    # cannot work here — gravity alone self-supports the tower (every       #
+    # material, pinned or free) and a driven downward press traps the       #
+    # near-incompressible body against the floor and ejects it (CUDA 700).  #
+    # demolish gets the same building-falls-down-and-breaks result through  #
+    # the ROBUST lateral-impact mechanism (material yields sideways into    #
+    # open grid, exactly like wrecking). Verified dramatic on watermelon.   #
     # ------------------------------------------------------------------ #
-    "crush": {
-        "frame_num": 100,
+    "demolish": {
+        "frame_num": 120,            # time for the full collapse to settle
         "frame_dt": 0.03,
-        "gravity": -25.0,            # heavy g so the pancake is decisive
-        "base": "pinned",
+        "gravity": -20.0,            # strong g pulls the cut tower straight down
+        "base": "pinned",            # the very foot anchors; the legs above fail
         "recommended_material": "watermelon",
-        "damping": 0.98,             # gravity collapse — light damping is fine
+        "damping": 1.1,              # OFF — let the collapsing debris keep moving
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
-            {"kind": "release", "start_position": 1.5, "end_position": 0.65,
-             "num_layers": 80, "start_time": 0.2, "end_time": 1.0},
+            # Two opposing impactors cut the lower section from +x and -x at the
+            # grid-safe speed 2; the support fails and the tower drops + breaks.
+            {"kind": "impact", "from": "+x", "height": "base",
+             "size": 0.28, "speed": 2.0, "at": 0.3, "duration": 0.5},
+            {"kind": "impact", "from": "-x", "height": "base",
+             "size": 0.28, "speed": 2.0, "at": 0.3, "duration": 0.5},
         ],
-        "_desc": "Top-down pancake: floors release layer-by-layer and stack onto "
-                 "the pinned foundation; the building crushes itself flat.",
+        "_desc": "Controlled demolition: two impactors cut the lower section so "
+                 "the tower crashes straight down and breaks into rubble. "
+                 "Replaces crush (a forced vertical pancake is not achievable).",
     },
 }
 

@@ -6,10 +6,14 @@ occupies (for resolving building-relative anchors), the metric `sim_area`, and
 the camera the native-render verify-to-video path reads.
 
 `bbox` is in the cube frame the sim runs in (longest axis -> 1.0, centered at
-(1,1,1)). For now we read it from the recipe's particle_filling.boundary (the
-"start with #1" decision); a later upgrade reads the true frame-0 particle
-min/max. Everything building-relative in a scenario (base/mid/top, +x/-x) is
-resolved against this bbox by compose.anchors.
+(1,1,1)). MEASURED 2026-05-29 by replicating the sim's own preprocessing
+(identity rotation -> sim_area crop -> transform2origin, the uniform
+scale=1/max_extent in utils/transformation_utils.py) against the actual
+683k-point scan. Everything building-relative in a scenario (base/mid/top,
++x/-x) is resolved against this bbox by compose.anchors, so it MUST be tight to
+the real geometry — an over-wide bbox sizes every lateral BC wrong (verified:
+the old guessed [0.35,1.65,...] footprint was 2-3.6x too wide, so the implode
+core column was wider than the building itself and ejected it).
 """
 from __future__ import annotations
 
@@ -17,7 +21,12 @@ from __future__ import annotations
 BUILDINGS: dict[str, dict] = {
     "cluster_6_15": {
         "model_path": "/data/yinshaoxuan/GaussianFluent/model/cluster_6_15",
-        "bbox": [0.35, 1.65, 0.35, 1.65, 0.6, 1.52],
+        # TRUE cube-frame extent: a TALL SLENDER SLAB. z-span 1.0 (full height,
+        # the longest axis), x-span 0.60 (medium), y-span 0.36 (thin). Raw scan
+        # was z=50.4 x=30.4 y=18.0 world units; uniform-scaled by 1/50.4 and
+        # centered at (1,1,1). The tall aspect means topple/pancake ARE viable
+        # (the earlier "squat, can't topple" was an artifact of the wrong bbox).
+        "bbox": [0.698, 1.302, 0.821, 1.179, 0.5, 1.5],
         # World-coord AABB of the scan (NOT a generic [-30,30] box — cluster_6_15
         # lives at ~(3460, 29045)). Matches recipes/*.json after commit 685c19f
         # "align sim_area with cluster_6_15 world bbox". sim_area_frame="model"
