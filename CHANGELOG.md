@@ -4,6 +4,107 @@ All notable user-visible changes to gsfluent. Follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Structured recipe composer + 5 destruction scenarios
+
+Recipes are now **composed** from three orthogonal inputs —
+**MATERIAL × SCENARIO × BUILDING** — instead of being hand-edited. The
+frontend's Composer panel is the primary authoring surface; the flat
+parameter panels become advanced overrides on top of whatever it produces.
+Ships five curated destruction scenarios, each verified on rendered video.
+
+See [docs/API.md](docs/API.md) for the composer endpoints and
+`server/gsfluent/authoring/` for the source of truth.
+
+### Added
+
+- **Composer authoring layer** (`server/gsfluent/authoring/`):
+  `materials.py`, `scenarios.py`, `buildings.py`, `compose.py`. A scenario
+  speaks in building-relative anchors (base/mid/top, ±x/±y, fractions) and
+  times in seconds; `compose(material, scenario, building)` resolves those
+  against the building's bbox into a flat sim recipe (CFL-derived
+  `substep_dt`, auto base-pin, grid-containment + energy-family safety
+  ceilings). The flat recipe is a deterministic build artifact, never
+  hand-authored.
+- **`GET /api/compose/library`** — lists scenarios/materials/buildings for
+  the picker (read dynamically from the authoring modules — new scenarios
+  appear with no API change).
+- **`POST /api/compose`** — `{material, scenario, building}` → `recipe_data`
+  (the object you forward to `POST /api/runs`). Over-ceiling / unknown picks
+  return a 422 with a human reason; nothing is silently clamped.
+- **Five curated scenarios** (recommended material `watermelon`, all
+  video-verified): `earthquake` (base shake → rubble), `wrecking`
+  (side impact → shear), `topple` (drag the top along the thin axis →
+  domino fall), `burst` (4 core slabs blow outward → explode), `demolish`
+  (two opposing base-cut impacts → crashes down + breaks apart).
+- **Composer UI** (`ComposerPanel.tsx`): three dropdowns (scenario /
+  material / building) driving `POST /api/compose`. Self-seeds a verified
+  default, snaps material to each scenario's recommendation, and warns on a
+  mismatch. `api.compose.{library,run}` + types added.
+- **CLI** `server/tools/compose_recipe.py` (`--material --scenario
+  --building`) for composing a recipe outside the UI.
+
+### Changed
+
+- **Composer is the primary Properties surface** (open by default). The
+  flat panels (Material / Solver / Forces / Sim setup / Boundary) are
+  demoted to collapsed *advanced overrides*, shown only once a recipe is
+  active. `MaterialPanel` is now fine-tune-only (no material dropdown).
+- **`cluster_6_15` bbox corrected.** The cube-frame bbox in `buildings.py`
+  was a guess 2–3.6× too wide; re-measured by replaying the sim's own
+  `transform2origin` against the 683k-point scan. The building is a tall
+  slender slab (z-span 1.0, x 0.60, y 0.36) — which is why `topple` works.
+  An over-wide bbox sizes every lateral boundary condition wrong, so this
+  matters for *every* composed scenario.
+- **Boundary-condition schema** (`schemas/boundary.py`) rewritten to match
+  the solver (was stale: `surface_type`/`center`; now `surface`/`point`/
+  `reset`, plus particle_impulse + enforce_particle_translation).
+
+### Fixed
+
+- **Composed runs now actually start.** The composer emitted `sim_area` in
+  world coords but tagged it `sim_area_frame: "model"`, so the runner
+  double-translated it into empty space → 422 ("sim_area does not overlap
+  the model bbox") → the run silently halted at 0% with no logs and no
+  sequence. The composer now emits a model-local `sim_area`
+  (`[-30,30,-30,30,-30,30]` + `frame:"model"`), which the runner translates
+  against whatever model you run — portable across original / pruned /
+  re-uploaded scans, and orientation-agnostic (the library holds both Z-up
+  and Y-up variants of the scan).
+- **Composed recipes are runnable from the UI.** Composer recipe names use
+  a `·` separator (`earthquake·watermelon`), which is outside the allowed
+  run-name charset — the run name failed `CellRef` validation, and the
+  pre-dispatch recipe re-fetch hit `GET /api/recipes/earthquake·watermelon`
+  (a 422, since composed recipes aren't saved). Fix: `sanitizeCellName()`
+  coerces the run name to `[A-Za-z0-9_.-]`, and the re-fetch is skipped for
+  composed recipes (detected via `_composed_from`).
+- **Failed runs surface their reason.** `RunButton` caught the 422 but
+  state had already flipped to "running" (rendered first), so the button
+  stuck at 0% with the cause hidden. It now flips to "error" and shows the
+  backend message.
+
+### Removed
+
+- **`crush` and `implode` scenarios** — a forced vertical pancake is not
+  achievable on this building: a downward imposed-velocity press traps the
+  near-incompressible material against the floor and ejects it (CUDA crash),
+  and pure gravity self-supports the tower. `demolish` (a lateral base-cut)
+  delivers the "collapse + visible breaking" goal instead.
+- **`blast` event kind** (composer) — the force-based `particle_impulse`
+  primitive crashed 4/5 materials (`dv = force/mass`, mass ~1e-4); superseded
+  by `burst`, which gets the explosion read from robust velocity puppets.
+- **`CameraPanel` / `OtherPanel`** (frontend) — they edited preview-only
+  fields the in-browser playback never reads (the composer fills the camera
+  block).
+
+### Notes for the team
+
+- **No new run steps.** Pick scenario + material in the Composer, hit Run.
+  The UI is data-driven, so it picks up the five scenarios automatically.
+- **Match material to scenario.** Use the recommended material (watermelon)
+  for the destruction scenarios; stiff materials eject under them.
+- The live backend was deployed on branch `playback-raf-simplify` and the
+  branch was fast-forwarded to `main`.
+
 ## [Unreleased] — Frontend: in-browser playback + run→play
 
 Sequence playback now runs entirely client-side in one
