@@ -2,7 +2,7 @@ import { Play, Check, X, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { CellRef } from "@/lib/cell";
+import { CellRef, sanitizeCellName } from "@/lib/cell";
 import { useOverrides } from "@/lib/use-overrides";
 
 /** Run button with five visual states, consolidating what used to be
@@ -66,31 +66,47 @@ export function RunButton() {
       // user updated, etc.) override the stale baseline. We then
       // re-merge with the in-memory overrides so the user's per-run
       // tweaks survive the refresh.
+      //
+      // COMPOSED recipes (material × scenario × building) are NOT saved
+      // server recipes — they live only in memory (activeRecipeData carries
+      // a `_composed_from` provenance block, and the name uses a "·"
+      // separator like "earthquake·watermelon"). GET /api/recipes/<name>
+      // would 422 on that name, so skip the re-fetch and use the composed
+      // recipe data directly. The re-fetch is only meaningful for saved
+      // recipes (flat material demos + ★ user presets).
+      const isComposed = !!(
+        activeRecipeData as Record<string, unknown> | null
+      )?._composed_from;
       let baseToSend: Record<string, unknown> = effective;
-      try {
-        const fresh = await api.recipes.get(activeRecipeName!);
-        const overrides = useStore.getState().simOverrides;
-        baseToSend = { ...fresh.data, ...overrides };
-        // Update the store's baseline so the Form/JSON view reflects
-        // the fresh recipe too. Doesn't clobber overrides — the user's
-        // tweaks stay in simOverrides.
-        useStore.getState().setSimRecipeBaseline(
-          JSON.parse(JSON.stringify(fresh.data)),
-        );
-        // setSimRecipeBaseline clears overrides per its implementation;
-        // restore them since we want the merged dispatch + UI continuity.
-        for (const [k, v] of Object.entries(overrides)) {
-          useStore.getState().setOverride(k, v);
+      if (!isComposed) {
+        try {
+          const fresh = await api.recipes.get(activeRecipeName!);
+          const overrides = useStore.getState().simOverrides;
+          baseToSend = { ...fresh.data, ...overrides };
+          // Update the store's baseline so the Form/JSON view reflects
+          // the fresh recipe too. Doesn't clobber overrides — the user's
+          // tweaks stay in simOverrides.
+          useStore.getState().setSimRecipeBaseline(
+            JSON.parse(JSON.stringify(fresh.data)),
+          );
+          // setSimRecipeBaseline clears overrides per its implementation;
+          // restore them since we want the merged dispatch + UI continuity.
+          for (const [k, v] of Object.entries(overrides)) {
+            useStore.getState().setOverride(k, v);
+          }
+        } catch {
+          // Recipe fetch failed (network blip, recipe deleted) — fall
+          // back to the stale in-memory baseline. The server's own
+          // validation will reject if the recipe truly doesn't exist.
         }
-      } catch {
-        // Recipe fetch failed (network blip, recipe deleted) — fall
-        // back to the stale in-memory baseline. The server's own
-        // validation will reject if the recipe truly doesn't exist.
       }
 
       const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
       const baseName = activeRecipeName!.replace(/^★ /, "");
-      const run_name = `${activeModel!.name}_${baseName}_${ts}`;
+      // Sanitize: composed names carry "·" (earthquake·watermelon), which is
+      // invalid for both CellRef and the backend run_name regex. Coerce the
+      // whole run name to the allowed charset.
+      const run_name = sanitizeCellName(`${activeModel!.name}_${baseName}_${ts}`);
       // Forward the recipe's frame_num so the progress denominator is
       // correct from the first render, not a stale 150. Non-numeric or
       // missing → undefined → store falls back to 0 until tqdm reports.

@@ -7,7 +7,7 @@ import { Viewport } from "@/components/viewport/Viewport";
 import { CommandPalette } from "@/components/command-palette/CommandPalette";
 import { RecipesModal } from "@/components/recipes/RecipesModal";
 import { useStore } from "@/lib/store";
-import { CellRef } from "@/lib/cell";
+import { CellRef, sanitizeCellName } from "@/lib/cell";
 import { api } from "@/lib/api";
 import type { SequenceItem, ModelItem } from "@/lib/types";
 
@@ -105,7 +105,9 @@ export default function App() {
     }
     const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
     const baseName = st.activeRecipeName.replace(/^★ /, "");
-    const run_name = `${st.activeModel.name}_${baseName}_${ts}`;
+    // Sanitize: composed recipe names carry "·" (earthquake·watermelon),
+    // invalid for CellRef + the backend run_name regex.
+    const run_name = sanitizeCellName(`${st.activeModel.name}_${baseName}_${ts}`);
     st.resetForNewRun(run_name);
     st.setActiveCell(new CellRef("sequence", run_name));
     try {

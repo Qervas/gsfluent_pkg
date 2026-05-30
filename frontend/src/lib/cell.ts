@@ -1,5 +1,15 @@
 export type CellKind = "sequence" | "model";
 
+/** Coerce an arbitrary label into a valid cell / run name: replace any run of
+ *  disallowed characters with a single underscore, then trim leading/trailing
+ *  underscores. Composed-recipe names use a "·" separator
+ *  (e.g. "earthquake·watermelon") which is NOT in the allowed
+ *  [A-Za-z0-9_.-] set — without this the CellRef ctor throws
+ *  ("invalid cell name") and the backend's run_name regex 422s the run. */
+export function sanitizeCellName(raw: string): string {
+  return raw.replace(/[^A-Za-z0-9_.\-]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
 /** Typed reference to a cell displayed in the SPA viewport.
  *
  *  Cells are identified by a "wire format" — a single string with a
