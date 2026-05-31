@@ -75,11 +75,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,            # stronger g helps the soft body fall
         "base": "driven",
         "recommended_material": "watermelon",
-        "damping": 0.99,             # lightly damped (was 1.1/OFF): 1% grid-vel
-                                     # clip stops the resonance runaway to NaN
-                                     # while still collapsing (verified 2026-05-31:
-                                     # 1.1 diverged 140/151 on a teammate's model;
-                                     # 0.99 -> 81/81 finite, height 50->22, xy ~2x)
+        "damping": 1.1,              # OFF — resonance must accumulate
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
@@ -108,7 +104,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 0.99,             # lightly damped (was 1.1/OFF): clips NaN runaway, still dramatic
+        "damping": 1.1,              # OFF — let the struck region keep moving
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
@@ -136,7 +132,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 0.99,             # lightly damped (was 1.1/OFF): clips NaN runaway, still dramatic
+        "damping": 1.1,              # OFF — let the blown-out debris keep flying
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
@@ -168,7 +164,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 0.99,             # lightly damped (was 1.1/OFF): clips NaN runaway, still dramatic
+        "damping": 1.1,              # OFF — toppling momentum must carry
         "events": [
             {"kind": "ground", "surface": "separate", "friction": 0.6,
              "height": "base"},
@@ -199,7 +195,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -20.0,            # strong g pulls the cut tower straight down
         "base": "pinned",            # the very foot anchors; the legs above fail
         "recommended_material": "watermelon",
-        "damping": 0.99,             # lightly damped (was 1.1/OFF): clips NaN runaway, still dramatic
+        "damping": 1.1,              # OFF — let the collapsing debris keep moving
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
