@@ -42,6 +42,18 @@ FastAPI 默认结构。任何非 2xx 响应都是:
 - 全链路坐标系是 **Z-up**。Y-up 输入在 import 阶段会被转过去,`_meta.json` 里记一条 `converted_from: "y-up"`。
 - 运行名(run name)要满足 `^[A-Za-z0-9_.\-]+$`。recipe 名是 `^[A-Za-z0-9_\-]+$`,model 名是 `^[A-Za-z0-9_.\-]+$`。任何路径穿越尝试都会被打成 400 或 422。
 
+### 从哪开始
+
+要创作一次仿真,用 **[Compose](#compose材料--场景--建筑)** 这组接口
+(材料 × 场景 × 建筑 → 扁平配方),再把结果交给
+[`POST /api/runs`](#post-apiruns)。典型链路:
+
+1. `GET /api/compose/library` → 填充下拉框
+2. `POST /api/compose` → `recipe_data`
+3. `POST /api/runs`(带 `recipe_data` + 选好的 `model_path`)
+4. 轮询 `GET /api/runs/{name}/log` 看进度;`GET /api/runs/history` 看结果
+5. `done` 后:`POST …/cache/build` → 轮询 `…/cache/build-status` → `GET …/cache/splats.gsq`
+
 ---
 
 ## Health
@@ -72,9 +84,116 @@ curl ${BACKEND_URL}/api/health
 
 ---
 
+## Compose(材料 × 场景 × 建筑)
+
+创作仿真的主路径。与其手写一份扁平 recipe,不如选三个正交输入
+—— **材料 MATERIAL × 场景 SCENARIO × 建筑 BUILDING** —— 由后端合成出
+`POST /api/runs` 要吃的扁平 recipe。源头在
+`server/gsfluent/authoring/`(`materials.py`、`scenarios.py`、
+`buildings.py`、`compose.py`)。composer 是纯函数 + 确定性的 —— 不碰 GPU、
+不跑仿真。两个接口都实时读 authoring 模块,所以新增场景/材料不需要改 API。
+
+### GET /api/compose/library
+
+列出三个库,给前端下拉框用。
+
+**Response**
+
+```json
+{
+  "scenarios": [
+    { "name": "earthquake", "base": "driven", "frame_num": 150,
+      "gravity": -15.0, "recommended_material": "watermelon",
+      "damping": 1.1, "num_events": 2, "desc": "地基震动 → 整楼塌成废墟" }
+  ],
+  "materials": [
+    { "name": "watermelon", "material": "watermelon", "E": 2000.0, "nu": 0.38,
+      "density": 1.0, "yield_stress": 0.0, "friction_angle": 45.0,
+      "desc": "软超弹性 —— 真正会「塌」的材料" }
+  ],
+  "buildings": [
+    { "name": "cluster_6_15", "model_path": "…", "bbox": [ "..." ],
+      "sim_area": [ "..." ], "desc": "高层楼扫描" }
+  ]
+}
+```
+
+**五个精选场景**(都已用渲染视频验证过,在推荐的软材料 `watermelon` 下会有
+明显的「楼塌了」效果):
+
+| 场景         | 效果                                   |
+| ---          | ---                                   |
+| `earthquake` | 地基震动 → 整楼塌成废墟                 |
+| `wrecking`   | 中部侧向撞击(地基固定)→ 解体          |
+| `topple`     | 顶部沿薄轴拖拽 → 像多米诺一样倒下       |
+| `burst`      | 核心四块向外炸开 → 结构爆裂             |
+| `demolish`   | 两侧对撞切断底部 → 直接砸塌并碎裂       |
+
+每个场景带 `recommended_material`。剧烈场景对刚性材料(jelly/plasticine)
+会数值爆掉(出网格 → CUDA 崩溃,这是物理本身,不是 bug),所以都推荐软的
+`watermelon`。前端换场景时会自动把材料切到推荐值,不匹配时给提示。
+
+### POST /api/compose
+
+从三个选择合成出扁平 recipe。
+
+**Request body** (`application/json`)
+
+```json
+{ "material": "watermelon", "scenario": "demolish", "building": "cluster_6_15" }
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `material` | string | `GET /api/compose/library` 里的材料名。 |
+| `scenario` | string | 场景名。 |
+| `building` | string | 建筑名。 |
+
+**Response**
+
+```json
+{
+  "material": "watermelon",
+  "scenario": "demolish",
+  "building": "cluster_6_15",
+  "recipe_data": { "...": "扁平 recipe —— 直接回传给 POST /api/runs" }
+}
+```
+
+`recipe_data` 就是回传给 `POST /api/runs` 当 `recipe_data` 用的对象。它带一个
+`_composed_from` 溯源块(`{material, scenario, building, base_regime}`),
+以及一个 model-local 的 `sim_area`(`sim_area_frame: "model"`),由 runner
+在提交时按所选 model 平移到世界坐标。
+
+**合成的 recipe 只在内存里 —— 不是已保存的服务端 recipe。** 别去
+`GET /api/recipes/<合成名>`(会 422)。合成名用 `·` 分隔
+(`earthquake·watermelon`);拿来当 `run_name` 之前要清洗成
+`[A-Za-z0-9_.\-]`。
+
+**状态码**
+
+| 状态码 | 触发原因 |
+| --- | --- |
+| 422 | 材料/场景/建筑未知(message 会列出合法名),或某个值超安全上限(比如撞击速度超过出网格阈值)。不会静默 clamp —— `error.message` 会说明原因。 |
+
+**curl**
+
+```bash
+curl ${BACKEND_URL}/api/compose/library
+curl -X POST ${BACKEND_URL}/api/compose \
+  -H 'Content-Type: application/json' \
+  -d '{"material":"watermelon","scenario":"demolish","building":"cluster_6_15"}'
+```
+
+---
+
 ## Recipes
 
 一份 recipe 就是驱动一次仿真用的 JSON 配置(sim_area、n_grid、材料参数、边界条件等等)。内置 recipe 放在 `server/recipes/*.json`,只读;用户保存的写到 `work/_user_recipes/`。名字要满足 `^[A-Za-z0-9_\-]+$`。
+
+> **Composer 和已保存 recipe 的区别。** 上面五个 destruction 场景是
+> *合成* 的(在内存里),不在这里列。已保存的 recipe 是扁平材料 demo
+>(jelly/metal/sand/foam/plasticine)+ `demolition` fallback + `★` 用户预设。
 
 ### GET /api/recipes
 
