@@ -32,7 +32,13 @@ const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 export function SplatScene() {
   const { activeCell, isSequence, isModel } = useActiveCell();
   const { data: models = [] } = useQuery({ queryKey: ["models"], queryFn: api.models.list });
-  const modelPath = isModel ? (models.find((m) => m.name === activeCell?.name)?.path ?? null) : null;
+  const modelEntry = isModel ? (models.find((m) => m.name === activeCell?.name) ?? null) : null;
+  const modelPath = modelEntry?.path ?? null;
+  // sha changes whenever the .ply bytes change (e.g. an in-place reorient).
+  // It's both a fetch cache-bust AND a model-effect dep, so re-orienting the
+  // model (same path, new contents) reloads the splats instead of showing the
+  // stale cloud.
+  const modelSha = modelEntry?.sha256 ?? null;
   const name = isSequence ? activeCell?.name ?? null : null;
   const url = name ? splatsGsqUrl(name) : null;
 
@@ -199,7 +205,9 @@ export function SplatScene() {
     };
 
     void (async () => {
-      const u = modelPlyUrl(modelPath);
+      // Cache-bust by content hash: the .ply is overwritten at the same path
+      // on reorient, so without ?v=<sha> the browser/Spark serves the stale cloud.
+      const u = modelPlyUrl(modelPath) + (modelSha ? `&v=${encodeURIComponent(modelSha)}` : "");
       try {
         const buf = await fetch(u).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -223,7 +231,7 @@ export function SplatScene() {
 
     return () => { alive = false; if (mesh) scene.remove(mesh); scene.clearGround(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isModel, modelPath, activeCell?.name]);
+  }, [isModel, modelPath, modelSha, activeCell?.name]);
 
   return (
     <div ref={scene.mountRef} className="h-full w-full relative bg-canvas">

@@ -17,6 +17,10 @@ export type ModelItem = {
   // ("registered"). Optional because /api/models list responses don't
   // carry a mode.
   mode?: "registered" | "copied-and-converted";
+  // Content hash of the highest-iteration .ply. Changes whenever the model's
+  // bytes change (e.g. an in-place reorient), so the viewport cache-busts the
+  // splat fetch (same path, new contents).
+  sha256?: string;
 };
 export type RunState = "queued" | "running" | "done" | "error" | "cancelled";
 export type RunStatus = { id: string; name: string; state: RunState };

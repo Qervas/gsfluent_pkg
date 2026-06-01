@@ -235,3 +235,27 @@ def delete_endpoint(name: str):
     if not ok:
         raise HTTPException(500, f"failed to delete model: {name}")
     return {"deleted": name}
+
+
+class ReorientRequest(BaseModel):
+    transform: str  # "y_up_to_z_up" | "flip_180"
+
+
+@router.post("/{name}/reorient")
+def reorient_endpoint(name: str, req: ReorientRequest):
+    """Apply an in-place orientation transform to a stored model's .ply.
+
+    `transform` is "y_up_to_z_up" (stand a lying-down Y-up model up) or
+    "flip_180" (right an upside-down one). Rewrites positions + gaussian
+    quaternions + normals; everything else passes through. Repeatable — no
+    lock — so apply, eyeball, apply again until it's upright. The response is
+    the updated model meta, including a fresh `sha256` the client uses to
+    cache-bust the splat fetch (the .ply is overwritten at the same path)."""
+    if not Model.exists(name):
+        raise HTTPException(404, f"model not found: {name}")
+    try:
+        return m.reorient_model(name, req.transform)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except KeyError as e:
+        raise HTTPException(404, str(e)) from e
