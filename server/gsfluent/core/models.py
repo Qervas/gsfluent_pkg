@@ -64,6 +64,66 @@ def list_models() -> list[dict]:
     return with_ts + no_ts
 
 
+def reorient_model(name: str, transform: str) -> dict:
+    """Apply an in-place orientation transform to a stored model's .ply(s).
+
+    `transform` is one of `coord_convert.TRANSFORM_NAMES` (y_up_to_z_up /
+    flip_180). Rewrites EVERY `iteration_*/point_cloud.ply` under the model so
+    the displayed highest-iteration ply and any siblings stay consistent, then
+    recomputes bbox / n_splats / sha256 and rewrites `_meta.json` preserving
+    the model's other fields. Repeatable by design — no convention lock — so
+    the caller can apply, eyeball, and apply again (y_up_to_z_up x4 and
+    flip_180 x2 are identities). The new sha256 lets the frontend cache-bust
+    the splat fetch. Returns the fresh `meta_dict()`.
+
+    Raises KeyError if the model (or its ply) is unknown; ValueError on a bad
+    transform.
+    """
+    import hashlib
+
+    from .coord_convert import TRANSFORM_NAMES, transform_3dgs_ply
+
+    if transform not in TRANSFORM_NAMES:
+        raise ValueError(
+            f"unknown transform {transform!r}; expected one of {list(TRANSFORM_NAMES)}"
+        )
+
+    m = Model.load(name)
+    if m is None:
+        raise KeyError(name)
+
+    pc_root = m.path / "point_cloud"
+    plys = (
+        sorted(pc_root.glob("iteration_*/point_cloud.ply")) if pc_root.is_dir() else []
+    )
+    if not plys:
+        raise KeyError(f"{name}: no point_cloud.ply under {pc_root}")
+
+    for ply in plys:
+        transform_3dgs_ply(ply, ply, transform)  # in place (read-before-write)
+
+    # Recompute meta from the highest-iteration ply (the displayed one).
+    best = m.highest_iteration_ply()
+    n_splats, bbox = read_ply_bbox_and_count(best) if best is not None else (None, None)
+    sha256 = hashlib.sha256(best.read_bytes()).hexdigest() if best is not None else None
+
+    prev = m.meta or {}
+    Model.write_meta(
+        name=name,
+        source=prev.get("source", "upload"),
+        source_path=prev.get("source_path"),
+        n_splats=n_splats,
+        bbox=bbox,
+        coord_convention=prev.get("coord_convention", "z-up"),
+        imported_at=prev.get("imported_at"),
+        converted_from=prev.get("converted_from"),
+        sha256=sha256,
+        path=m.path,  # external registered models keep meta beside their dir
+    )
+    reloaded = Model.load(name)
+    return reloaded.meta_dict() if reloaded is not None else {"name": name, "path": str(m.path)}
+
+
 def wrap_ply_upload(
     orig_filename: str,
     content: bytes,

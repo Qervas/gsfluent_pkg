@@ -4,6 +4,7 @@ import { EmptyState } from "./EmptyState";
 import { DropZone } from "./DropZone";
 import { FpsIndicator } from "./FpsIndicator";
 import { PlaybackBar } from "./PlaybackBar";
+import { ReorientControls } from "./ReorientControls";
 
 export function Viewport() {
   const { activeCell } = useActiveCell();
@@ -13,6 +14,7 @@ export function Viewport() {
     <div className="h-full w-full relative bg-canvas">
       <SplatScene />
       {!hasContent && <EmptyState />}
+      <ReorientControls />
       <DropZone />
       <FpsIndicator />
       <PlaybackBar />

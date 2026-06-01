@@ -14,6 +14,7 @@ import pytest
 from gsfluent.core.run_manager import AsyncioRunManager
 from gsfluent.core.sim_engines.mock import MockSimulationEngine
 from gsfluent.core.state import RunStateStore
+from gsfluent.observability.jsonlog import EmitLevelMethods
 from gsfluent.protocols.runs import (
     RecoveryReport,
     RunId,
@@ -23,7 +24,7 @@ from gsfluent.protocols.runs import (
 from gsfluent.protocols.sim import ModelRef
 
 
-class _NullEmitter:
+class _NullEmitter(EmitLevelMethods):
     def emit(self, event: str, **context) -> None: pass
     def child(self, **context): return self
 

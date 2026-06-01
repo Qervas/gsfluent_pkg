@@ -15,6 +15,7 @@ from gsfluent.core.sim_engines.mpm import (
     load_error_patterns,
     pick_free_gpu,
 )
+from gsfluent.observability.jsonlog import EmitLevelMethods
 from gsfluent.protocols.sim import (
     GPUUnavailableError,
     SimCrashedError,
@@ -413,7 +414,7 @@ def test_auto_gpu_enabled_values(
 # ---------- auto-GPU resolution + event emission --------------------------
 
 
-class _RecordingEmitter:
+class _RecordingEmitter(EmitLevelMethods):
     """Minimal EventEmitter test double — records (event, context) tuples."""
 
     def __init__(self) -> None:

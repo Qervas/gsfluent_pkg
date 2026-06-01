@@ -194,6 +194,14 @@ export const api = {
       f(`/api/models/${encodeURIComponent(n)}`, { method: "DELETE" }).then(
         j<{ deleted: string }>,
       ),
+    /** Apply an in-place orientation transform to a stored model. Returns the
+     *  updated model meta (new sha256 → cache-bust the splat fetch). */
+    reorient: (n: string, transform: "y_up_to_z_up" | "flip_180") =>
+      f(`/api/models/${encodeURIComponent(n)}/reorient`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transform }),
+      }).then(j<ModelItem>),
   },
   runs: {
     list:    () => f("/api/runs").then(j<RunStatus[]>),
