@@ -20,8 +20,15 @@ class EventEmitter(Protocol):
     """
 
     def emit(self, event: str, **context: Any) -> None:
-        """Emit one event. Idempotent semantics not guaranteed —
-        callers should not double-emit on retry."""
+        """Emit one structured event.
+
+        The optional `level` kwarg (string) is respected by implementations
+        that support log levels (INFO, DEBUG, ERROR, WARNING, etc.).
+        If omitted, implementations typically default to "INFO".
+
+        Context values should be JSON-serializable. Non-serializable values
+        are stringified by the StdlibJSONEmitter.
+        """
         ...
 
     def child(self, **context: Any) -> EventEmitter:

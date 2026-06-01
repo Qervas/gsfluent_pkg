@@ -28,7 +28,42 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-class StdlibJSONEmitter:
+# Numeric severity for each level name, mirroring stdlib logging's ordering.
+# Used to decide whether an event clears the emitter's min_level threshold.
+_LEVEL_SEVERITY = {
+    "DEBUG": 10,
+    "INFO": 20,
+    "WARNING": 30,
+    "WARN": 30,
+    "ERROR": 40,
+    "CRITICAL": 50,
+}
+
+
+class EmitLevelMethods:
+    """Mixin adding info()/debug()/error() that delegate to ``emit()``.
+
+    The EventEmitter Protocol only guarantees ``emit()`` + ``child()`` (so
+    minimal structural stubs keep satisfying it). These three convenience
+    methods are pure sugar over ``emit(event, level=...)`` — any emitter,
+    including the per-run wrapper in run_manager and the test doubles, mixes
+    this in to get them without reimplementing the level plumbing.
+    """
+
+    def emit(self, event: str, **context: Any) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def info(self, event: str, **context: Any) -> None:
+        self.emit(event, level="INFO", **context)
+
+    def debug(self, event: str, **context: Any) -> None:
+        self.emit(event, level="DEBUG", **context)
+
+    def error(self, event: str, **context: Any) -> None:
+        self.emit(event, level="ERROR", **context)
+
+
+class StdlibJSONEmitter(EmitLevelMethods):
     """EventEmitter that writes one JSON line per event to a text stream.
 
     Construction:
@@ -45,16 +80,40 @@ class StdlibJSONEmitter:
         self,
         stream: TextIO | None = None,
         level: str = "INFO",
+        min_level: str = "DEBUG",
         _context: dict[str, Any] | None = None,
     ) -> None:
         self._stream = stream if stream is not None else sys.stdout
+        # `level` is the default level stamped on a bare emit() with no level=.
         self._level = level
+        # `min_level` is the suppression threshold: events below it are dropped.
+        # Default DEBUG == emit everything (the production root raises this via
+        # GSFLUENT_LOG_LEVEL so DEBUG noise can be turned off without code).
+        self._min_level = min_level
         self._context: dict[str, Any] = dict(_context or {})
 
+    def _should_emit(self, level: str) -> bool:
+        """True if `level` clears this emitter's min_level threshold.
+
+        Unknown level names fail open (treated as at-threshold) so a typo in
+        a level string never silently swallows a log line.
+        """
+        threshold = _LEVEL_SEVERITY.get(self._min_level.upper(), 0)
+        severity = _LEVEL_SEVERITY.get(level.upper(), threshold)
+        return severity >= threshold
+
     def emit(self, event: str, **context: Any) -> None:
+        # Per-call level takes precedence over the emitter's default level.
+        level = context.pop("level", self._level)
+        if not isinstance(level, str):
+            level = str(level).upper()
+
+        if not self._should_emit(level):
+            return
+
         merged: dict[str, Any] = {
             "ts": _now_iso(),
-            "level": self._level,
+            "level": level,
             "event": event,
             **{k: _coerce(v) for k, v in self._context.items()},
             **{k: _coerce(v) for k, v in context.items()},
@@ -71,8 +130,11 @@ class StdlibJSONEmitter:
         return StdlibJSONEmitter(
             stream=self._stream,
             level=self._level,
+            min_level=self._min_level,
             _context=merged,
         )
+
+    # info()/debug()/error() come from EmitLevelMethods.
 
 
 # Adapter that bridges stdlib `logging` calls to our EventEmitter.

@@ -144,8 +144,12 @@ def build_app(cfg: AppConfig) -> FastAPI:
     """
     _ensure_work_dirs(cfg)
 
-    obs: EventEmitter = StdlibJSONEmitter(stream=sys.stdout)
-    obs.emit("backend.boot", work_dir=str(cfg.work_dir), sim_home=str(cfg.sim_home))
+    # GSFLUENT_LOG_LEVEL gates the verbosity floor: INFO (default) hides the
+    # per-stage DEBUG trace; set DEBUG to surface it for a noisy run.
+    log_level = os.environ.get("GSFLUENT_LOG_LEVEL", "INFO").upper()
+    obs: EventEmitter = StdlibJSONEmitter(stream=sys.stdout, min_level=log_level)
+    obs.emit("backend.boot", work_dir=str(cfg.work_dir), sim_home=str(cfg.sim_home),
+             log_level=log_level)
 
     # Concrete impls.
     storage: Storage = FilesystemStorage(root=cfg.work_dir / "cache" / "splats")

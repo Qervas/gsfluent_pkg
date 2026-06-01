@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from gsfluent.core.recovery import RecoveryDecision, classify_recovery
+from gsfluent.observability.jsonlog import EmitLevelMethods
 from gsfluent.core.state import (
     RunStateRecord,
     RunStateStore,
@@ -335,7 +336,7 @@ class AsyncioRunManager:
         mgr = self
         engine_error_emitted: set[str] = set()
 
-        class _PidCapturingEmitter:
+        class _PidCapturingEmitter(EmitLevelMethods):
             def __init__(self, inner):
                 self._inner = inner
 
@@ -372,7 +373,7 @@ class AsyncioRunManager:
         # no-op it.
         try:
             await self._sim.preflight()
-            run_obs.emit("run.preflight_ok")
+            run_obs.info("run.preflight_ok")
         except Exception:
             # Re-raise so the unified except below records the failure with
             # the right error.kind mapping.
@@ -383,7 +384,12 @@ class AsyncioRunManager:
         if rec is not None:
             self._state_store.write(rec.transition(state=RunState.STARTED))
         started_at = time.time()
-        run_obs.emit("run.started", started_at=started_at)
+        run_obs.info(
+            "run.started",
+            started_at=started_at,
+            wall_time_sec=wall_time,
+            particles=recipe.get("particle_count"),
+        )
 
         try:
             # Wall-time cap: on timeout we issue escalate_kill_pg against the
@@ -416,10 +422,10 @@ class AsyncioRunManager:
             # historically lived in the engine itself; if a future engine
             # decomposes them back into the run manager those stages would
             # also emit run.fused / run.packed here.)
-            run_obs.emit(
+            run_obs.info(
                 "run.simmed",
                 n_frames=result.n_frames,
-                duration_sec=result.duration_sec,
+                duration_sec=round(result.duration_sec, 2),
             )
 
             # Success path.
@@ -430,10 +436,10 @@ class AsyncioRunManager:
                     finished_at=time.time(),
                     paths={"frames_dir": str(result.frames_dir)},
                 ))
-            run_obs.emit(
+            run_obs.info(
                 "run.completed",
                 n_frames=result.n_frames,
-                duration_sec=result.duration_sec,
+                duration_sec=round(result.duration_sec, 2),
             )
             if not fut.done():
                 fut.set_result(None)

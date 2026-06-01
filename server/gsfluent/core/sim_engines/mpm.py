@@ -76,7 +76,12 @@ def load_error_patterns(path: Path | None = None) -> list[MPMErrorPattern]:
     server/gsfluent/core/sim_engines/mpm_error_patterns.yaml.
     """
     p = path if path is not None else _default_patterns_path()
-    raw = yaml.safe_load(p.read_text())
+    try:
+        raw = yaml.safe_load(p.read_text())
+    except Exception as e:
+        # This is fatal for the engine — better to surface it loudly.
+        raise RuntimeError(f"Failed to load error patterns from {p}: {e}") from e
+
     out: list[MPMErrorPattern] = []
     for entry in raw.get("patterns", []):
         flags = re.IGNORECASE if entry.get("case_insensitive", False) else 0
@@ -264,7 +269,7 @@ class MPMSimulationEngine:
         Emits sim.* + fuse.* events through on_event. Returns SimResult
         on success, raises classified SimError on failure.
         """
-        on_event.emit("sim.preflight_ok")
+        on_event.info("sim.preflight_ok", model=model.name, particles=recipe.get("particle_count"))
 
         # Resolve paths the same way run_sim.sh did so we keep
         # bug-for-bug compatibility on the directory layout.
@@ -274,6 +279,7 @@ class MPMSimulationEngine:
         library_seq_dir = PKG_ROOT / "work" / "library" / "sequences" / run_name
         fused_dir = library_seq_dir / "frames"
 
+        on_event.debug("sim.dirs.ensure", paths=[str(sim_output_dir), str(library_seq_dir), str(fused_dir)])
         sim_output_dir.mkdir(parents=True, exist_ok=True)
         library_seq_dir.mkdir(parents=True, exist_ok=True)
         fused_dir.mkdir(parents=True, exist_ok=True)
@@ -281,47 +287,52 @@ class MPMSimulationEngine:
         # Find the highest-iteration reference ply under model/point_cloud/.
         reference_ply = _find_reference_ply(model.path)
         if reference_ply is None:
+            on_event.error("sim.no_reference_ply", model_path=str(model.path))
             raise SimCrashedError(
                 f"no reference ply under {model.path}/point_cloud/"
             )
+        on_event.debug("sim.reference_ply.selected", path=str(reference_ply))
 
         # Preserve the merged recipe.json early so a sim crash doesn't lose it.
-        config_path = library_seq_dir / "recipe.json"
-        import json
-        config_path.write_text(json.dumps(recipe, indent=2))
+        try:
+            config_path = library_seq_dir / "recipe.json"
+            import json
+            config_path.write_text(json.dumps(recipe, indent=2))
+        except Exception as e:  # noqa: BLE001
+            on_event.error("sim.manifest.write_failed", path=str(config_path), error=str(e))
 
         particles = int(recipe.get("particle_count", 200_000))
+        bcs = recipe.get("boundary_conditions", [])
+        on_event.debug("sim.recipe.summary", n_bcs=len(bcs), has_frame_num=bool(recipe.get("frame_num")))
 
-        # Write the run manifest BEFORE either subprocess spawns. The
-        # frontend's history view + the api/runs.py history overlay both
-        # read `manifest.json` for {model_ref (via model_dir), recipe_source,
-        # particles, status, started_at, finished_at} — without this the
-        # sequence shows up as an "Orphan sequence" forever and history
-        # never reports the model/recipe that produced it. The legacy
-        # core/runner.py owned this until commit fe2831e deleted that
-        # module and nothing took over.
+        # Write the run manifest BEFORE either subprocess spawns.
         recipe_source = str(recipe.get("_recipe_source_name") or "")
-        _manifest.write_initial(
-            run_dir=library_seq_dir,
-            run_name=run_name,
-            model_dir=model.path,
-            recipe_source=recipe_source,
-            particles=particles,
-        )
+        try:
+            _manifest.write_initial(
+                run_dir=library_seq_dir,
+                run_name=run_name,
+                model_dir=model.path,
+                recipe_source=recipe_source,
+                particles=particles,
+            )
+        except Exception as e:  # noqa: BLE001
+            on_event.error("sim.manifest.write_failed", error=str(e))
 
-        # Open the on-disk run.log so sim + fuse stdout/stderr is persisted
-        # for /api/runs/{name}/log to serve. Same regression as the manifest:
-        # the legacy runner tailed stdout into <run_dir>/run.log and the
-        # workbench console polled it; when the runner was deleted, stdout
-        # started getting discarded (see `_wait_capturing_stderr` body, the
-        # `discard` line) and the console stayed empty for the whole run.
+        # Open the on-disk run.log
         log_path = library_seq_dir / "run.log"
-        log_fh = log_path.open("a", buffering=1, encoding="utf-8")
+        log_fh = None
+        try:
+            log_fh = log_path.open("a", buffering=1, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            on_event.error("sim.run_log.open_failed", path=str(log_path), error=str(e))
+            # Continue without file logging — we'll still capture in memory for classification.
 
         t0 = time.monotonic()
         run_status = "running"
         run_error: dict[str, str] | None = None
         try:
+            on_event.info("sim.stage.start", stage="sim", run_name=run_name)
+
             # ---- stage 1: MPM sim --------------------------------------
 
             sim_argv = self._build_sim_argv(
@@ -330,12 +341,15 @@ class MPMSimulationEngine:
                 config_path=config_path,
                 particles=particles,
             )
+            on_event.debug("sim.command.built", argv=sim_argv)
 
             # Auto-select the least-busy GPU on a shared box, overriding the
             # static .env CUDA_VISIBLE_DEVICES pin for this sim only. None ->
             # inherit the pin unchanged (every failure / disabled path).
+            on_event.debug("sim.gpu_selection.start")
             gpu_overlay = _resolve_sim_gpu_env(on_event=on_event)
             sim_env = {**os.environ, **gpu_overlay} if gpu_overlay else None
+            on_event.debug("sim.env.resolved", has_gpu_overlay=bool(gpu_overlay))
 
             sim_proc = await self._spawn_in_new_pg(
                 argv=sim_argv,
@@ -344,7 +358,7 @@ class MPMSimulationEngine:
             )
             pgid = os.getpgid(sim_proc.pid)
             pid_starttime = _read_pid_starttime(sim_proc.pid)
-            on_event.emit(
+            on_event.info(
                 "sim.spawned",
                 pid=sim_proc.pid,
                 pgid=pgid,
@@ -352,24 +366,34 @@ class MPMSimulationEngine:
                 argv=sim_argv,
             )
 
+            on_event.info("sim.waiting_for_process", pid=sim_proc.pid)
+
             sim_stderr_chunks: list[str] = []
             sim_rc = await _wait_capturing_stderr(
                 sim_proc, sim_stderr_chunks, log_file=log_fh,
             )
+            on_event.debug("sim.process_exited", pid=sim_proc.pid, rc=sim_rc)
+
             sim_duration = time.monotonic() - t0
-            on_event.emit(
+            on_event.info(
                 "sim.completed",
                 returncode=sim_rc,
-                duration_sec=sim_duration,
+                duration_sec=round(sim_duration, 2),
+                n_expected_frames=recipe.get("frame_num"),
             )
             if sim_rc != 0:
                 joined = "".join(sim_stderr_chunks)
+                on_event.debug("sim.stderr.tail", tail=joined[-2000:])
                 kind = classify_stderr(joined, self._patterns)
                 msg = (
                     f"sim exited with rc={sim_rc} after {sim_duration:.1f}s; "
                     f"classified as {kind or 'sim.crashed'}"
                 )
-                on_event.emit(
+                # Keep the canonical `error.<kind>` taxonomy name — the run
+                # manager's de-dup guard matches on the `error.` prefix, and
+                # this is the boundary event other tooling keys off. The new
+                # ERROR level is orthogonal to the dotted event name.
+                on_event.error(
                     f"error.{kind or 'sim.crashed'}",
                     returncode=sim_rc,
                     stderr_tail=joined[-2000:],
@@ -377,13 +401,18 @@ class MPMSimulationEngine:
                 run_error = {"kind": kind or "sim.crashed", "message": msg}
                 raise _kind_to_exception(kind or "sim.crashed", msg)
 
-            # ---- stage 2: fuse -----------------------------------------
+            on_event.info("sim.stage.complete", stage="sim", duration_sec=round(sim_duration, 2))
 
+            # ---- stage 2: fuse -----------------------------------------
+            on_event.info("sim.stage.start", stage="fuse", run_name=run_name)
+
+            # Build fuse command (this is where we do the heavy KNN + Kabsch work)
             fuse_argv = self._build_fuse_argv(
                 reference_ply=reference_ply,
                 sim_ply_dir=sim_ply_dir,
                 fused_dir=fused_dir,
             )
+            on_event.debug("fuse.command.built", argv=fuse_argv)
 
             t1 = time.monotonic()
             # The sim has already exited (awaited above), so its process
@@ -391,30 +420,29 @@ class MPMSimulationEngine:
             # pg raises in the preexec_fn). The two stages run sequentially,
             # so give the fuse its own process group; killpg on cancel /
             # timeout targets fuse_pgid here.
-            fuse_proc = await self._spawn_in_new_pg(
-                argv=fuse_argv,
-                cwd=str(PKG_ROOT),
-            )
+            try:
+                fuse_proc = await self._spawn_in_new_pg(
+                    argv=fuse_argv,
+                    cwd=str(PKG_ROOT),
+                )
+            except Exception as e:
+                on_event.error("fuse.spawn_failed", argv=fuse_argv, error=str(e))
+                raise
+
             fuse_pgid = os.getpgid(fuse_proc.pid)
-            on_event.emit(
-                "fuse.spawned", pid=fuse_proc.pid, pgid=fuse_pgid, argv=fuse_argv,
-            )
+            on_event.info("fuse.spawned", pid=fuse_proc.pid, pgid=fuse_pgid, argv=fuse_argv)
+            on_event.info("fuse.waiting_for_process", pid=fuse_proc.pid)
+
             fuse_stderr_chunks: list[str] = []
             fuse_rc = await _wait_capturing_stderr(
                 fuse_proc, fuse_stderr_chunks, log_file=log_fh,
             )
+            on_event.debug("fuse.process_exited", pid=fuse_proc.pid, rc=fuse_rc)
+
             fuse_duration = time.monotonic() - t1
-            on_event.emit(
-                "fuse.completed",
-                returncode=fuse_rc,
-                duration_sec=fuse_duration,
-            )
             if fuse_rc != 0:
                 joined = "".join(fuse_stderr_chunks)
-                # Spec invariant: emit one structured boundary event per
-                # failure. The RunManager's de-dup guard checks for this
-                # exact event name so it doesn't mirror it.
-                on_event.emit(
+                on_event.error(
                     "error.fuse.crashed",
                     returncode=fuse_rc,
                     stderr_tail=joined[-2000:],
@@ -426,7 +454,18 @@ class MPMSimulationEngine:
                 run_error = {"kind": "fuse.crashed", "message": msg}
                 raise SimCrashedError(msg)
 
+            # Count fused output before announcing completion — fuse.completed
+            # reports n_frames, so it has to run after the glob.
+            on_event.debug("fuse.counting_output_frames")
             n_frames = sum(1 for _ in fused_dir.glob("frame_*.ply"))
+            on_event.debug("fuse.output_frames_counted", n_frames=n_frames)
+
+            on_event.info(
+                "fuse.completed",
+                returncode=fuse_rc,
+                duration_sec=round(fuse_duration, 2),
+                n_frames=n_frames,
+            )
 
             # Fail loudly on a diverged sim. The fuser silently skips frames
             # whose sim positions are NaN/Inf, so fewer fused frames than sim
@@ -434,29 +473,45 @@ class MPMSimulationEngine:
             # the run would be marked `done` with a truncated sequence — a
             # silent corruption. Tolerance configurable via
             # GSFLUENT_ALLOWED_NONFINITE_FRAMES (default 0 = any drop fails).
+            on_event.debug("sim.stability_check.start")
+
             n_sim_frames = sum(1 for _ in sim_ply_dir.glob("sim_*.ply"))
             allowed = int(os.environ.get("GSFLUENT_ALLOWED_NONFINITE_FRAMES", "0"))
-            # A complete sim writes `frame_num + 1` plys (frame 0 is the
-            # initial state). A diverged solver can stop early and emit
-            # fewer — in which case n_sim == n_fused and the NaN-drop
-            # signature alone would miss it. Pass the expected count so the
-            # guard also catches a truncated sim.
             expected_frames = _expected_sim_frames(recipe)
+
             unstable = check_sim_stability(
                 n_sim=n_sim_frames,
                 n_fused=n_frames,
                 allowed_nonfinite=allowed,
                 expected_frames=expected_frames,
             )
+            on_event.debug(
+                "sim.stability_check.done",
+                n_sim=n_sim_frames,
+                n_fused=n_frames,
+                expected=expected_frames,
+                allowed_nonfinite=allowed,
+                unstable=bool(unstable),
+            )
             if unstable:
-                on_event.emit(
+                on_event.error(
                     "error.sim.unstable_recipe",
                     n_sim=n_sim_frames,
                     n_fused=n_frames,
                     dropped=n_sim_frames - n_frames,
+                    allowed_nonfinite=allowed,
+                    message=unstable,
                 )
                 run_error = {"kind": "sim.unstable_recipe", "message": unstable}
                 raise SimUnstableRecipeError(unstable)
+
+            on_event.info(
+                "sim.pipeline.complete",
+                total_duration_sec=round(time.monotonic() - t0, 2),
+                sim_duration_sec=round(sim_duration, 2),
+                fuse_duration_sec=round(fuse_duration, 2),
+                final_frames=n_frames,
+            )
 
             run_status = "done"
             return SimResult(
@@ -464,24 +519,42 @@ class MPMSimulationEngine:
                 n_frames=n_frames,
                 duration_sec=time.monotonic() - t0,
             )
-        except BaseException:
+        except BaseException as exc:
             # Cancellation (CancelledError) + classified failures both flow
             # through here. We mark the manifest as failed so the history
             # view reflects reality and the orphan-detection in the API
             # surfaces the failure instead of leaving "running" forever.
             if run_status == "running":
                 run_status = "failed"
+                # Only shout "unexpected" for genuinely unclassified failures.
+                # Cancellation is normal teardown (the run manager emits
+                # run.cancelled), and a classified SimError already emitted its
+                # own error.* boundary event above (run_error is set) — emitting
+                # here too would double-log at ERROR.
+                if not isinstance(exc, asyncio.CancelledError) and run_error is None:
+                    on_event.error(
+                        "sim.unexpected_crash",
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        run_name=run_name,
+                    )
             raise
         finally:
+            # Final manifest update — very important for history and recovery
             try:
                 fields = {"status": run_status, "finished_at": time.time()}
                 if run_error is not None:
                     fields["error"] = run_error
                 _manifest.update(library_seq_dir, **fields)
-            except Exception:  # pragma: no cover — telemetry, not load-bearing
-                pass
+            except Exception as e:
+                on_event.error(
+                    "sim.manifest.final_update_failed",
+                    run_name=run_name,
+                    error=str(e),
+                )
             try:
-                log_fh.close()
+                if log_fh is not None:
+                    log_fh.close()
             except Exception:
                 pass
 
@@ -531,6 +604,7 @@ class MPMSimulationEngine:
         sim_ply_dir: Path,
         fused_dir: Path,
     ) -> list[str]:
+        # This is the heavy post-processing step (KNN skinning + Kabsch rotation)
         return [
             self._sim_python,
             str(PKG_ROOT / "server" / "tools" / "fuse_to_full_ply.py"),
@@ -561,14 +635,18 @@ class MPMSimulationEngine:
         The sim stage passes ``{**os.environ, "CUDA_VISIBLE_DEVICES": "N"}``
         to override the pin for an auto-selected GPU on a shared box.
         """
-        return await _spawn(
-            *argv,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-            env=env,
-        )
+        try:
+            return await _spawn(
+                *argv,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+                env=env,
+            )
+        except Exception as e:
+            # This is a serious failure — we couldn't even launch the child.
+            raise SimCrashedError(f"Failed to spawn process: {argv[0]} ... : {e}") from e
 
 
 # ---------- module-level helpers -----------------------------------------
@@ -695,7 +773,7 @@ def _resolve_sim_gpu_env(
     (with a reason) otherwise, so the choice is observable in the event log.
     """
     if not _auto_gpu_enabled():
-        on_event.emit("sim.gpu_autopick_skipped", reason="disabled")
+        on_event.debug("sim.gpu_autopick_skipped", reason="disabled")
         return None
     try:
         min_free_mib = int(
@@ -706,11 +784,11 @@ def _resolve_sim_gpu_env(
     try:
         csv_text = query()
         if not csv_text:
-            on_event.emit("sim.gpu_autopick_skipped", reason="query_failed")
+            on_event.debug("sim.gpu_autopick_skipped", reason="query_failed")
             return None
         index = pick_free_gpu(csv_text, min_free_mib)
         if index is None:
-            on_event.emit(
+            on_event.info(
                 "sim.gpu_autopick_skipped",
                 reason="no_gpu_qualified",
                 min_free_mib=min_free_mib,
@@ -718,7 +796,7 @@ def _resolve_sim_gpu_env(
             return None
         # Best-effort enrich the event with the picked GPU's stats.
         util, free_mib = _gpu_stats_for_index(csv_text, index)
-        on_event.emit(
+        on_event.info(
             "sim.gpu_autopicked",
             gpu_index=index,
             util=util,
@@ -727,7 +805,7 @@ def _resolve_sim_gpu_env(
         )
         return {"CUDA_VISIBLE_DEVICES": str(index)}
     except Exception as exc:  # noqa: BLE001 — selection must never crash a run
-        on_event.emit("sim.gpu_autopick_skipped", reason=f"error:{exc!r}")
+        on_event.error("sim.gpu_autopick_skipped", reason=f"error:{exc!r}")
         return None
 
 
@@ -824,12 +902,14 @@ def _read_pid_starttime(pid: int) -> float | None:
     """
     try:
         raw = Path(f"/proc/{pid}/stat").read_text()
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError, OSError):
         return None
     try:
         rest = raw.rsplit(")", 1)[-1].split()
         return float(rest[19])
     except (IndexError, ValueError):
+        return None
+    except Exception:
         return None
 
 
