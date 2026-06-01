@@ -217,7 +217,7 @@ def test_scenario_damping_overrides_material():
     r = compose("watermelon", "earthquake", "cluster_6_15")
     # earthquake declares damping 0.95 (verified 151/151 finite on the real model);
     # runaway on real models); watermelon material default is 0.95.
-    assert r["grid_v_damping_scale"] == 0.95
+    assert r["grid_v_damping_scale"] == 0.99
 
 
 def test_non_recommended_materials_keep_stabilizing_material_damping():

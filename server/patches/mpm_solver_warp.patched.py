@@ -8,6 +8,28 @@ from mpm_utils import *
 import warp.utils  # [Phase C.2.a Pass 2] for radix_sort_pairs
 
 
+# [boundary clamp] Pin every particle inside the grid after advection.
+# Confirmed root cause of the earthquake/burst "scatter then die at frame N":
+# violent debris flies past the [0,grid_lim] domain, and ONE out-of-bounds
+# particle scatters (P2G) into an out-of-range grid cell, NaN-corrupting the
+# whole grid so every particle goes NaN the next step. Clamping the escapers
+# to the wall keeps the sim finite while the rest of the explosion proceeds —
+# unlike global damping, this does NOT suppress the motion, so the building
+# still destructs. lo/hi are precomputed Python-side (margin = 3*dx covers the
+# quadratic P2G stencil reach) and passed as floats, so the kernel never has to
+# read model struct fields. Pair with an enlarged sim_area so the wall sits
+# off-camera and the debris appears to fly freely.
+@wp.kernel
+def clamp_particle_x_to_grid(state: MPMStateStruct, lo: float, hi: float):
+    p = wp.tid()
+    x = state.particle_x[p]
+    state.particle_x[p] = wp.vec3(
+        wp.clamp(x[0], lo, hi),
+        wp.clamp(x[1], lo, hi),
+        wp.clamp(x[2], lo, hi),
+    )
+
+
 class MPM_Simulator_WARP:
     def __init__(self, n_particles, n_grid=100, grid_lim=1.0, device="cuda:0",
                  mixed_precision: bool = False):
@@ -577,6 +599,12 @@ class MPM_Simulator_WARP:
             else:
                 wp.launch(kernel=g2p, dim=self.n_particles,
                           inputs=[self.mpm_state, self.mpm_model, dt], device=device)
+        # [boundary clamp] keep particles in-grid after advection so the next
+        # substep's P2G can't scatter out-of-bounds (whole-grid NaN).
+        _clamp_margin = 3.0 * self.mpm_model.dx
+        wp.launch(kernel=clamp_particle_x_to_grid, dim=self.n_particles,
+                  inputs=[self.mpm_state, _clamp_margin,
+                          self.mpm_model.grid_lim - _clamp_margin], device=device)
         self.time = self.time + dt
 
     def p2g2p(self, step, dt, device="cuda:0" , flip_pic_ratio: float = 0.80, flip_pic: bool =True):
@@ -764,6 +792,12 @@ class MPM_Simulator_WARP:
                         inputs=[self.mpm_state, self.mpm_model, dt],
                         device=device,
                     )  # x, v, C, F_trial are updated
+
+        # [boundary clamp] mirror of the capture-safe path (see clamp kernel).
+        _clamp_margin = 3.0 * self.mpm_model.dx
+        wp.launch(kernel=clamp_particle_x_to_grid, dim=self.n_particles,
+                  inputs=[self.mpm_state, _clamp_margin,
+                          self.mpm_model.grid_lim - _clamp_margin], device=device)
 
         #### CFL check ####
         # particle_v = self.mpm_state.particle_v.numpy()
