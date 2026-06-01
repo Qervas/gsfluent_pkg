@@ -54,11 +54,17 @@ GSFLUENT_BACKEND_URL=http://your.host:port npm start
 | `burst`      | 核心四块向外炸开 → 结构爆裂             |
 | `demolish`   | 两侧对撞切断底部 → 直接砸塌并碎裂       |
 
-每个场景带 `recommended_material`;剧烈场景对刚性材料(jelly/plasticine)
-会数值爆掉(出网格 → CUDA 崩溃,这是物理本身,不是 bug),所以都推荐软的
-`watermelon`。换场景时 UI 会自动把材料切到推荐值,不匹配时给提示。原来的
-扁平参数面板(Material / Solver / Forces / …)还在,作为合成配方之上的
-折叠「高级覆盖」。
+每个场景带 `recommended_material`;软材料 `watermelon` 才有明显塌陷,刚性
+材料(jelly/plasticine)偏脆弹、塌不动,所以都推荐 `watermelon`。换场景时
+UI 会自动把材料切到推荐值,不匹配时给提示。原来的扁平参数面板
+(Material / Solver / Forces / …)还在,作为合成配方之上的折叠「高级覆盖」。
+
+**模型朝向**:导入的扫描若是躺倒或上下颠倒,用 viewport 右上角的
+**Y-up→Z-up** / **Flip 180°** 按钮原地转正(可反复点,直到立正)。
+
+**边界模式**(Solver 面板 `Boundary mode`,默认 `drop`):剧烈场景里飞出
+仿真盒的碎片以前会让整个仿真出网格 NaN;现在求解器会兜住 —— `drop` 把
+越界粒子失活(碎片自由飞散),`clamp` 把它们钉在盒壁。所以「楼炸开」不再崩。
 
 > 合成的配方只存在内存里(带 `_composed_from` 溯源块),**不是**已保存的
 > 服务端配方。已保存的配方是扁平材料 demo + `★` 用户预设。完整 HTTP

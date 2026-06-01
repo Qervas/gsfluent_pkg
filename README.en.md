@@ -59,13 +59,22 @@ dramatic "the building collapses" moment on the recommended soft material,
 | `burst`      | Four core slabs shove outward → the structure explodes   |
 | `demolish`   | Two opposing base-cut impacts → it crashes down + breaks |
 
-Each scenario carries a `recommended_material`. The violent scenarios
-numerically eject *stiff* materials (jelly/plasticine) — a grid-escape
-crash that's physics, not a bug — so they recommend the soft `watermelon`.
-The UI snaps material to the recommendation on scenario change and warns on
-a mismatch. The old flat parameter panels (Material / Solver / Forces / …)
-are still there as collapsed *advanced overrides* on top of the composed
-recipe.
+Each scenario carries a `recommended_material`. Only the soft `watermelon`
+collapses convincingly; stiff materials (jelly/plasticine) stay brittle and
+barely deform — so they recommend `watermelon`. The UI snaps material to the
+recommendation on scenario change and warns on a mismatch. The old flat
+parameter panels (Material / Solver / Forces / …) are still there as
+collapsed *advanced overrides* on top of the composed recipe.
+
+**Model orientation:** if an imported scan loads lying down or upside-down,
+use the **Y-up→Z-up** / **Flip 180°** buttons (top-right of the viewport) to
+rotate it upright in place — repeatable, click until it stands up.
+
+**Boundary mode** (Solver panel `Boundary mode`, default `drop`): in violent
+scenarios, debris that flew out of the sim box used to NaN the whole sim
+(grid escape). The solver now contains it — `drop` deactivates out-of-box
+particles (debris flies out freely), `clamp` pins them at the wall — so the
+"building explodes" no longer crashes the run.
 
 > Composed recipes are in-memory only (they carry a `_composed_from` block)
 > — they are **not** saved server recipes. Saved recipes are the flat
