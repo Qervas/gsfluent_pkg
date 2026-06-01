@@ -28,12 +28,12 @@ def clamp_particle_x_to_grid(state: MPMStateStruct, lo: float, hi: float, drop: 
     cz = wp.clamp(x[2], lo, hi)
     state.particle_x[p] = wp.vec3(cx, cy, cz)
     # Two boundary modes (GSFLUENT_BOUNDARY_MODE):
-    #   clamp (drop=0, default): particle stays active, pinned at the wall —
-    #     debris piles at the boundary but keeps interacting.
-    #   drop  (drop=1): a particle that had to be clamped LEFT the box, so
-    #     deactivate it — zero mass so it stops contributing to the grid, and
-    #     zero velocity so it stops driving. It goes inert at the wall instead
-    #     of piling/bouncing ("we don't care about out-of-bounds particles").
+    #   drop  (drop=1, DEFAULT): a particle that had to be clamped LEFT the box,
+    #     so deactivate it — zero mass so it stops contributing to the grid, and
+    #     zero velocity so it stops driving. It goes inert instead of piling /
+    #     bouncing; debris flies out freely ("don't care about out-of-bounds").
+    #   clamp (drop=0): particle stays active, pinned at the wall — debris piles
+    #     at the boundary but keeps interacting. Opt in with mode=clamp.
     # Either way position is clamped first, so the P2G index is always valid
     # and the grid can never be NaN-corrupted by an out-of-range write.
     if drop == 1:
@@ -59,11 +59,12 @@ class MPM_Simulator_WARP:
         self.sort_p2g = False
         self.initialize(n_particles, n_grid, grid_lim, device=device)
         self.time_profile = {}
-        # Boundary-particle handling: "clamp" (default — pin escapers at the
-        # wall, still active) or "drop" (deactivate escapers: zero mass+v).
+        # Boundary-particle handling: "drop" (DEFAULT — deactivate escapers:
+        # zero mass+v, debris flies out freely) or "clamp" (pin escapers at the
+        # wall, still active). Set GSFLUENT_BOUNDARY_MODE=clamp to opt into clamp.
         # Inherited from the backend env by the sim subprocess.
         self.boundary_drop = (
-            1 if os.environ.get("GSFLUENT_BOUNDARY_MODE", "clamp").lower() == "drop" else 0
+            0 if os.environ.get("GSFLUENT_BOUNDARY_MODE", "drop").lower() == "clamp" else 1
         )
 
     def initialize(self, n_particles, n_grid=100, grid_lim=1.0, device="cuda:0"):
