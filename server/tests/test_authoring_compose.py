@@ -215,8 +215,9 @@ def test_scenario_damping_overrides_material():
     """A scenario's `damping` field wins over the material default — damping is
     scenario-dependent for its verified recommended material."""
     r = compose("watermelon", "earthquake", "cluster_6_15")
-    # earthquake declares damping 1.1 (OFF); watermelon material default is 0.95
-    assert r["grid_v_damping_scale"] == 1.1
+    # earthquake declares damping 0.99 (lightly damped <1.0 — prevents NaN
+    # runaway on real models); watermelon material default is 0.95.
+    assert r["grid_v_damping_scale"] == 0.99
 
 
 def test_non_recommended_materials_keep_stabilizing_material_damping():
