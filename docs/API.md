@@ -194,6 +194,12 @@ Compose a flat recipe from the three picks.
 (`{material, scenario, building, base_regime}`) and a model-local `sim_area`
 (`sim_area_frame: "model"`) the runner translates against the chosen model.
 
+It also carries `boundary_mode` (`"drop"` by default, or `"clamp"`): how the
+solver handles particles that fly out of the sim box. `drop` deactivates them
+(escaped debris flies out freely); `clamp` pins them at the wall (debris piles).
+Both keep the grid finite — out-of-box particles otherwise NaN the whole sim.
+It is an ordinary `recipe_data` field, so you can override it per-run.
+
 **Composed recipes are in-memory only — NOT saved server recipes.** Don't
 `GET /api/recipes/<composed name>` (it 422s). Composed names use a `·`
 separator (`earthquake·watermelon`); sanitize them to `[A-Za-z0-9_.\-]`
@@ -686,6 +692,48 @@ orphans.
 
 ```bash
 curl -X DELETE ${BACKEND_URL}/api/models/scene_a1b2c3d4
+```
+
+### POST /api/models/{name}/reorient
+
+Apply an in-place orientation transform to a stored model's `.ply` — positions,
+gaussian quaternions, and normals are all rotated. Use it to stand up a
+lying-down scan (`y_up_to_z_up`) or right an upside-down one (`flip_180`).
+**Repeatable** — there is no "already converted" lock, so apply, look, and apply
+again until it is upright (`y_up_to_z_up` ×4 and `flip_180` ×2 are identities).
+The model bytes change at the same path, so the response carries a fresh
+`sha256` the client uses to cache-bust its splat fetch.
+
+**Path params**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `name` | string | Model name. |
+
+**Body**
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `transform` | string | `"y_up_to_z_up"` (rotate Y-up → Z-up, stand it up) or `"flip_180"` (180° about X, fix upside-down). |
+
+**Response**
+
+Same shape as one entry from `GET /api/models`, with updated `bbox`, `n_splats`,
+and `sha256`.
+
+**Status codes**
+
+| Code | Cause |
+| --- | --- |
+| 404 | Model not found, or it has no `point_cloud.ply`. |
+| 422 | Unknown `transform` (not `y_up_to_z_up` / `flip_180`). |
+
+**curl**
+
+```bash
+curl -X POST ${BACKEND_URL}/api/models/scene_a1b2c3d4/reorient \
+  -H 'Content-Type: application/json' \
+  -d '{"transform": "y_up_to_z_up"}'
 ```
 
 ---

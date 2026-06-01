@@ -165,6 +165,11 @@ curl ${BACKEND_URL}/api/health
 以及一个 model-local 的 `sim_area`(`sim_area_frame: "model"`),由 runner
 在提交时按所选 model 平移到世界坐标。
 
+它还带一个 `boundary_mode`(默认 `"drop"`,或 `"clamp"`):求解器如何处理飞出
+仿真盒的粒子。`drop` 把它们失活(飞出去的碎片自由飞散);`clamp` 把它们钉在
+盒壁上(碎片堆积)。两者都能保持网格有限 —— 否则越界粒子会让整个仿真 NaN。
+它是普通的 `recipe_data` 字段,可以按单次运行覆盖。
+
 **合成的 recipe 只在内存里 —— 不是已保存的服务端 recipe。** 别去
 `GET /api/recipes/<合成名>`(会 422)。合成名用 `·` 分隔
 (`earthquake·watermelon`);拿来当 `run_name` 之前要清洗成
@@ -627,6 +632,45 @@ curl -OJ "${BACKEND_URL}/api/models/file/scene.ply?path=/data/scans/my_scene"
 
 ```bash
 curl -X DELETE ${BACKEND_URL}/api/models/scene_a1b2c3d4
+```
+
+### POST /api/models/{name}/reorient
+
+对已存储 model 的 `.ply` 做原地朝向变换 —— 位置、高斯四元数、法线全部一起旋转。
+用来把躺倒的扫描立起来(`y_up_to_z_up`),或把上下颠倒的翻正(`flip_180`)。
+**可重复** —— 没有"已转换"锁,所以可以转一下、看一眼、再转,直到立正
+(`y_up_to_z_up` 转 4 次、`flip_180` 转 2 次都回到原样)。model 字节在原路径
+被改写,所以响应里带一个新的 `sha256`,前端用它给 splat 拉取做缓存失效。
+
+**路径参数**
+
+| 名称 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | model 名。 |
+
+**请求体**
+
+| 名称 | 类型 | 说明 |
+| --- | --- | --- |
+| `transform` | string | `"y_up_to_z_up"`(Y-up → Z-up,立起来)或 `"flip_180"`(绕 X 轴 180°,翻正上下颠倒)。 |
+
+**响应**
+
+与 `GET /api/models` 的单条目同构,`bbox`、`n_splats`、`sha256` 已更新。
+
+**状态码**
+
+| 状态码 | 触发原因 |
+| --- | --- |
+| 404 | model 不存在,或没有 `point_cloud.ply`。 |
+| 422 | `transform` 未知(不是 `y_up_to_z_up` / `flip_180`)。 |
+
+**curl**
+
+```bash
+curl -X POST ${BACKEND_URL}/api/models/scene_a1b2c3d4/reorient \
+  -H 'Content-Type: application/json' \
+  -d '{"transform": "y_up_to_z_up"}'
 ```
 
 ---
