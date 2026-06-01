@@ -19,6 +19,12 @@ import type { ComposeLibrary } from "@/lib/types";
 export function ComposerPanel() {
   const loadActiveRecipe = useStore((s) => s.loadActiveRecipe);
   const activeRecipeName = useStore((s) => s.activeRecipeName);
+  // Read here, at the top, NOT inline in the JSX below: the `if (!lib)` early
+  // return makes any hook after it conditional, and a conditional store
+  // selector changes the hook count between the loading and loaded renders →
+  // React #310 "Rendered more hooks than during the previous render".
+  const simOverrides = useStore((s) => s.simOverrides);
+  const simRecipeBaseline = useStore((s) => s.simRecipeBaseline);
 
   const { data: lib } = useQuery<ComposeLibrary>({
     queryKey: ["compose-library"],
@@ -134,8 +140,8 @@ export function ComposerPanel() {
       <NumberInput
         label="Total frames"
         value={Number(
-          (useStore((s) => s.simOverrides) as Record<string, unknown>)?.frame_num ??
-            (useStore((s) => s.simRecipeBaseline) as Record<string, unknown>)?.frame_num ??
+          simOverrides?.frame_num ??
+            simRecipeBaseline?.frame_num ??
             150,
         )}
         onChange={(n) => {
