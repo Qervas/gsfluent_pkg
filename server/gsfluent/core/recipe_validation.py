@@ -61,6 +61,7 @@ def translate_sim_area_if_local(recipe_data: dict, model_dir: Path) -> dict:
         sim_area[2] + cy, sim_area[3] + cy,
         sim_area[4] + cz, sim_area[5] + cz,
     ]
+    out["sim_area_frame"] = "world"
     _log.info(
         "translated sim_area model-local %s -> world %s (model center %s)",
         sim_area, out["sim_area"], center,

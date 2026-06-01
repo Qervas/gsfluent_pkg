@@ -381,10 +381,23 @@ def compose(material_name: str, scenario_name: str, building_name: str) -> dict:
             f"unknown base regime {base!r} (pinned|driven|free)"
         )
 
+    stability_notes: list[str] = []
     for ev in scenario["events"]:
+        if (
+            scenario_name == "burst"
+            and material_name != scenario.get("recommended_material")
+            and ev.get("kind") == "burst"
+        ):
+            stability_notes.append(
+                "burst event disabled for non-recommended material; internal "
+                "burst cuboids grid-escape on this material family"
+            )
+            continue
         bcs.extend(_event_to_bcs(ev, bbox, scenario))
 
     substep_dt = _cfl_substep_dt(material)
+    if "substep_dt_max" in scenario:
+        substep_dt = min(substep_dt, float(scenario["substep_dt_max"]))
 
     recipe: dict = {
         # --- provenance: how this artifact was generated ---
@@ -423,13 +436,14 @@ def compose(material_name: str, scenario_name: str, building_name: str) -> dict:
             "visualize": False,
         },
     }
-    # Scenario-level damping override. Damping is SCENARIO-dependent, not a
-    # material constant (verified 2026-05-29): resonant scenarios (earthquake)
-    # need it OFF so shake energy accumulates to failure; single-impact
-    # scenarios keep the material default. When a scenario sets `damping`, it
-    # wins over the material's grid_v_damping_scale.
-    if "damping" in scenario:
+    # Scenario-level damping override. Damping is SCENARIO-dependent, but the
+    # undamped values were only verified on each scenario's recommended
+    # material. Non-recommended materials keep their damped material default so
+    # the full material x scenario grid favors numerical stability over drama.
+    if "damping" in scenario and material_name == scenario.get("recommended_material"):
         recipe["grid_v_damping_scale"] = float(scenario["damping"])
+    if stability_notes:
+        recipe["_stability_notes"] = stability_notes
 
     # Camera block (native-render verify-to-video). Spread last so it can't
     # collide with physics keys.

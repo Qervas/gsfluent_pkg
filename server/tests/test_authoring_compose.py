@@ -48,6 +48,21 @@ def test_substep_dt_is_cfl_safe():
     )
 
 
+def test_earthquake_caps_substep_dt_to_official_r10_value():
+    r = compose("watermelon", "earthquake", "cluster_6_15")
+    assert r["substep_dt"] == pytest.approx(0.0001)
+    assert r["substep_dt"] < recipe_lint._cfl_dt(r)
+
+
+def test_curated_soft_scenarios_cap_substep_dt_to_stable_value():
+    from gsfluent.authoring.scenarios import SCENARIOS
+
+    for scenario in SCENARIOS:
+        r = compose("watermelon", scenario, "cluster_6_15")
+        assert r["substep_dt"] == pytest.approx(0.0001)
+        assert r["substep_dt"] < recipe_lint._cfl_dt(r)
+
+
 def test_fixed_base_pin_always_present_and_zero_velocity():
     r = _compose()
     pins = [
@@ -198,10 +213,26 @@ def test_earthquake_shake_expands_to_alternating_plates():
 
 def test_scenario_damping_overrides_material():
     """A scenario's `damping` field wins over the material default — damping is
-    scenario-dependent (resonant earthquake needs it OFF)."""
+    scenario-dependent for its verified recommended material."""
     r = compose("watermelon", "earthquake", "cluster_6_15")
     # earthquake declares damping 1.1 (OFF); watermelon material default is 0.95
     assert r["grid_v_damping_scale"] == 1.1
+
+
+def test_non_recommended_materials_keep_stabilizing_material_damping():
+    """Undamped scenario dynamics are only verified on the recommended soft
+    material. Other material x scenario combinations keep material damping on
+    to avoid NaN/grid-escape failures."""
+    from gsfluent.authoring.scenarios import SCENARIOS
+    from gsfluent.authoring.materials import MATERIALS
+
+    for scenario, data in SCENARIOS.items():
+        recommended = data["recommended_material"]
+        for material in MATERIALS:
+            if material == recommended:
+                continue
+            r = compose(material, scenario, "cluster_6_15")
+            assert r["grid_v_damping_scale"] < 1.0
 
 
 def test_earthquake_and_wrecking_recommend_watermelon():
@@ -260,6 +291,25 @@ def test_demolish_recommends_watermelon():
     assert get_scenario("demolish")["recommended_material"] == "watermelon"
 
 
+def test_burst_keeps_internal_cuboids_for_recommended_material_only():
+    recommended = compose("watermelon", "burst", "cluster_6_15")
+    assert len([
+        b for b in recommended["boundary_conditions"]
+        if b["type"] == "cuboid"
+    ]) == 4
+    assert "_stability_notes" not in recommended
+
+    fallback = compose("jelly", "burst", "cluster_6_15")
+    assert [
+        b for b in fallback["boundary_conditions"]
+        if b["type"] == "cuboid"
+    ] == []
+    assert fallback["_stability_notes"] == [
+        "burst event disabled for non-recommended material; internal "
+        "burst cuboids grid-escape on this material family"
+    ]
+
+
 def test_all_five_scenarios_compose_clean_across_materials():
     """The curated set is exactly five; every one composes on every shipped
     material without raising (the render gate further filters stiff-material
@@ -273,6 +323,7 @@ def test_all_five_scenarios_compose_clean_across_materials():
         for m in MATERIALS:
             r = compose(m, s, "cluster_6_15")  # must not raise
             assert r["boundary_conditions"][0] == {"type": "bounding_box"}
+            assert r["substep_dt"] < recipe_lint._cfl_dt(r)
 
 
 def test_shake_plates_stay_under_imposed_speed_ceiling():
