@@ -42,7 +42,11 @@ export function ReorientControls() {
     "disabled:opacity-50 disabled:cursor-not-allowed";
 
   return (
-    <div className="absolute top-3 left-3 z-10 flex flex-col gap-1.5 items-start">
+    // Anchored top-RIGHT, below the header: the fixed TopBar (z-30) covers the
+    // top strip and the left sidebar (collapsible) overlays the left of the
+    // full-width viewport, so top-left is hidden. The right side below the
+    // header is the reliably-clear zone. z-20 sits above the splat canvas.
+    <div className="absolute top-16 right-4 z-20 flex flex-col gap-1.5 items-end">
       <div className="flex gap-2">
         <button
           type="button"

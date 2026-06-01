@@ -410,6 +410,10 @@ def compose(material_name: str, scenario_name: str, building_name: str) -> dict:
         # --- spatial (building) ---
         "sim_area": building["sim_area"],
         "sim_area_frame": building["sim_area_frame"],
+        # Out-of-bounds particle handling (solver boundary clamp). "drop"
+        # deactivates escapers (debris flies out freely); "clamp" pins them at
+        # the wall (debris piles). Both keep the grid finite (no escape NaN).
+        "boundary_mode": "drop",
         # --- grid + time ---
         "n_grid": _N_GRID,
         "grid_lim": _GRID_LIM,

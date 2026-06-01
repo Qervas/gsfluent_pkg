@@ -8,6 +8,40 @@ from mpm_utils import *
 import warp.utils  # [Phase C.2.a Pass 2] for radix_sort_pairs
 
 
+# [boundary clamp] Pin every particle inside the grid after advection.
+# Confirmed root cause of the earthquake/burst "scatter then die at frame N":
+# violent debris flies past the [0,grid_lim] domain, and ONE out-of-bounds
+# particle scatters (P2G) into an out-of-range grid cell, NaN-corrupting the
+# whole grid so every particle goes NaN the next step. Clamping the escapers
+# to the wall keeps the sim finite while the rest of the explosion proceeds —
+# unlike global damping, this does NOT suppress the motion, so the building
+# still destructs. lo/hi are precomputed Python-side (margin = 3*dx covers the
+# quadratic P2G stencil reach) and passed as floats, so the kernel never has to
+# read model struct fields. Pair with an enlarged sim_area so the wall sits
+# off-camera and the debris appears to fly freely.
+@wp.kernel
+def clamp_particle_x_to_grid(state: MPMStateStruct, lo: float, hi: float, drop: int):
+    p = wp.tid()
+    x = state.particle_x[p]
+    cx = wp.clamp(x[0], lo, hi)
+    cy = wp.clamp(x[1], lo, hi)
+    cz = wp.clamp(x[2], lo, hi)
+    state.particle_x[p] = wp.vec3(cx, cy, cz)
+    # Two boundary modes (GSFLUENT_BOUNDARY_MODE):
+    #   drop  (drop=1, DEFAULT): a particle that had to be clamped LEFT the box,
+    #     so deactivate it — zero mass so it stops contributing to the grid, and
+    #     zero velocity so it stops driving. It goes inert instead of piling /
+    #     bouncing; debris flies out freely ("don't care about out-of-bounds").
+    #   clamp (drop=0): particle stays active, pinned at the wall — debris piles
+    #     at the boundary but keeps interacting. Opt in with mode=clamp.
+    # Either way position is clamped first, so the P2G index is always valid
+    # and the grid can never be NaN-corrupted by an out-of-range write.
+    if drop == 1:
+        if cx != x[0] or cy != x[1] or cz != x[2]:
+            state.particle_mass[p] = 0.0
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+
+
 class MPM_Simulator_WARP:
     def __init__(self, n_particles, n_grid=100, grid_lim=1.0, device="cuda:0",
                  mixed_precision: bool = False):
@@ -25,6 +59,13 @@ class MPM_Simulator_WARP:
         self.sort_p2g = False
         self.initialize(n_particles, n_grid, grid_lim, device=device)
         self.time_profile = {}
+        # Boundary-particle handling: "drop" (DEFAULT — deactivate escapers:
+        # zero mass+v, debris flies out freely) or "clamp" (pin escapers at the
+        # wall, still active). Set GSFLUENT_BOUNDARY_MODE=clamp to opt into clamp.
+        # Inherited from the backend env by the sim subprocess.
+        self.boundary_drop = (
+            0 if os.environ.get("GSFLUENT_BOUNDARY_MODE", "drop").lower() == "clamp" else 1
+        )
 
     def initialize(self, n_particles, n_grid=100, grid_lim=1.0, device="cuda:0"):
         self.n_particles = n_particles
@@ -577,6 +618,13 @@ class MPM_Simulator_WARP:
             else:
                 wp.launch(kernel=g2p, dim=self.n_particles,
                           inputs=[self.mpm_state, self.mpm_model, dt], device=device)
+        # [boundary clamp] keep particles in-grid after advection so the next
+        # substep's P2G can't scatter out-of-bounds (whole-grid NaN).
+        _clamp_margin = 3.0 * self.mpm_model.dx
+        wp.launch(kernel=clamp_particle_x_to_grid, dim=self.n_particles,
+                  inputs=[self.mpm_state, _clamp_margin,
+                          self.mpm_model.grid_lim - _clamp_margin,
+                          self.boundary_drop], device=device)
         self.time = self.time + dt
 
     def p2g2p(self, step, dt, device="cuda:0" , flip_pic_ratio: float = 0.80, flip_pic: bool =True):
@@ -764,6 +812,13 @@ class MPM_Simulator_WARP:
                         inputs=[self.mpm_state, self.mpm_model, dt],
                         device=device,
                     )  # x, v, C, F_trial are updated
+
+        # [boundary clamp] mirror of the capture-safe path (see clamp kernel).
+        _clamp_margin = 3.0 * self.mpm_model.dx
+        wp.launch(kernel=clamp_particle_x_to_grid, dim=self.n_particles,
+                  inputs=[self.mpm_state, _clamp_margin,
+                          self.mpm_model.grid_lim - _clamp_margin,
+                          self.boundary_drop], device=device)
 
         #### CFL check ####
         # particle_v = self.mpm_state.particle_v.numpy()
