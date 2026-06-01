@@ -58,6 +58,10 @@ from __future__ import annotations
 #       (earthquake) need damping OFF (>=1.0) so energy accumulates to failure;
 #       single-impact scenarios keep it ON for stability. When present it
 #       overrides the material's default damping in compose().
+#   substep_dt_max — optional scenario-level hard cap for recipes that are
+#       CFL-safe but still unstable near the CFL edge. The curated violent
+#       scenarios inherit the official R10 timestep cap because the composed
+#       CFL margin alone produced CUDA-700 on verified models.
 SCENARIOS: dict[str, dict] = {
     # ------------------------------------------------------------------ #
     # EARTHQUAKE — base shake -> the tower collapses into rubble in place.#
@@ -76,6 +80,7 @@ SCENARIOS: dict[str, dict] = {
         "base": "driven",
         "recommended_material": "watermelon",
         "damping": 1.1,              # OFF — resonance must accumulate
+        "substep_dt_max": 0.0001,    # official R10 cap; avoids late grid escape
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
@@ -105,6 +110,7 @@ SCENARIOS: dict[str, dict] = {
         "base": "pinned",
         "recommended_material": "watermelon",
         "damping": 1.1,              # OFF — let the struck region keep moving
+        "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
@@ -133,6 +139,7 @@ SCENARIOS: dict[str, dict] = {
         "base": "pinned",
         "recommended_material": "watermelon",
         "damping": 1.1,              # OFF — let the blown-out debris keep flying
+        "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
@@ -165,6 +172,7 @@ SCENARIOS: dict[str, dict] = {
         "base": "pinned",
         "recommended_material": "watermelon",
         "damping": 1.1,              # OFF — toppling momentum must carry
+        "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "separate", "friction": 0.6,
              "height": "base"},
@@ -196,6 +204,7 @@ SCENARIOS: dict[str, dict] = {
         "base": "pinned",            # the very foot anchors; the legs above fail
         "recommended_material": "watermelon",
         "damping": 1.1,              # OFF — let the collapsing debris keep moving
+        "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
              "height": "base"},
