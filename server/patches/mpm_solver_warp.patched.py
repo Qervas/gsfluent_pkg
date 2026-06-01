@@ -20,14 +20,26 @@ import warp.utils  # [Phase C.2.a Pass 2] for radix_sort_pairs
 # read model struct fields. Pair with an enlarged sim_area so the wall sits
 # off-camera and the debris appears to fly freely.
 @wp.kernel
-def clamp_particle_x_to_grid(state: MPMStateStruct, lo: float, hi: float):
+def clamp_particle_x_to_grid(state: MPMStateStruct, lo: float, hi: float, drop: int):
     p = wp.tid()
     x = state.particle_x[p]
-    state.particle_x[p] = wp.vec3(
-        wp.clamp(x[0], lo, hi),
-        wp.clamp(x[1], lo, hi),
-        wp.clamp(x[2], lo, hi),
-    )
+    cx = wp.clamp(x[0], lo, hi)
+    cy = wp.clamp(x[1], lo, hi)
+    cz = wp.clamp(x[2], lo, hi)
+    state.particle_x[p] = wp.vec3(cx, cy, cz)
+    # Two boundary modes (GSFLUENT_BOUNDARY_MODE):
+    #   clamp (drop=0, default): particle stays active, pinned at the wall —
+    #     debris piles at the boundary but keeps interacting.
+    #   drop  (drop=1): a particle that had to be clamped LEFT the box, so
+    #     deactivate it — zero mass so it stops contributing to the grid, and
+    #     zero velocity so it stops driving. It goes inert at the wall instead
+    #     of piling/bouncing ("we don't care about out-of-bounds particles").
+    # Either way position is clamped first, so the P2G index is always valid
+    # and the grid can never be NaN-corrupted by an out-of-range write.
+    if drop == 1:
+        if cx != x[0] or cy != x[1] or cz != x[2]:
+            state.particle_mass[p] = 0.0
+            state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
 
 
 class MPM_Simulator_WARP:
@@ -47,6 +59,12 @@ class MPM_Simulator_WARP:
         self.sort_p2g = False
         self.initialize(n_particles, n_grid, grid_lim, device=device)
         self.time_profile = {}
+        # Boundary-particle handling: "clamp" (default — pin escapers at the
+        # wall, still active) or "drop" (deactivate escapers: zero mass+v).
+        # Inherited from the backend env by the sim subprocess.
+        self.boundary_drop = (
+            1 if os.environ.get("GSFLUENT_BOUNDARY_MODE", "clamp").lower() == "drop" else 0
+        )
 
     def initialize(self, n_particles, n_grid=100, grid_lim=1.0, device="cuda:0"):
         self.n_particles = n_particles
@@ -604,7 +622,8 @@ class MPM_Simulator_WARP:
         _clamp_margin = 3.0 * self.mpm_model.dx
         wp.launch(kernel=clamp_particle_x_to_grid, dim=self.n_particles,
                   inputs=[self.mpm_state, _clamp_margin,
-                          self.mpm_model.grid_lim - _clamp_margin], device=device)
+                          self.mpm_model.grid_lim - _clamp_margin,
+                          self.boundary_drop], device=device)
         self.time = self.time + dt
 
     def p2g2p(self, step, dt, device="cuda:0" , flip_pic_ratio: float = 0.80, flip_pic: bool =True):
@@ -797,7 +816,8 @@ class MPM_Simulator_WARP:
         _clamp_margin = 3.0 * self.mpm_model.dx
         wp.launch(kernel=clamp_particle_x_to_grid, dim=self.n_particles,
                   inputs=[self.mpm_state, _clamp_margin,
-                          self.mpm_model.grid_lim - _clamp_margin], device=device)
+                          self.mpm_model.grid_lim - _clamp_margin,
+                          self.boundary_drop], device=device)
 
         #### CFL check ####
         # particle_v = self.mpm_state.particle_v.numpy()
