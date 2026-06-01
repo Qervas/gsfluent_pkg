@@ -79,7 +79,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,            # stronger g helps the soft body fall
         "base": "driven",
         "recommended_material": "watermelon",
-        "damping": 0.99,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
+        "damping": 0.95,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
         "substep_dt_max": 0.0001,    # official R10 cap; avoids late grid escape
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
@@ -109,7 +109,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 0.99,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
+        "damping": 0.95,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
         "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
@@ -138,7 +138,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 0.99,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
+        "damping": 0.95,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
         "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
@@ -171,7 +171,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -15.0,
         "base": "pinned",
         "recommended_material": "watermelon",
-        "damping": 0.99,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
+        "damping": 0.95,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
         "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "separate", "friction": 0.6,
@@ -203,7 +203,7 @@ SCENARIOS: dict[str, dict] = {
         "gravity": -20.0,            # strong g pulls the cut tower straight down
         "base": "pinned",            # the very foot anchors; the legs above fail
         "recommended_material": "watermelon",
-        "damping": 0.99,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
+        "damping": 0.95,            # damped (<1.0) prevents NaN runaway on real models; was 1.1 (OFF)
         "substep_dt_max": 0.0001,
         "events": [
             {"kind": "ground", "surface": "slip", "friction": 0.0,
