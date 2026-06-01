@@ -41,7 +41,7 @@ BUILDINGS: dict[str, dict] = {
         # variants of this scan; a symmetric cube contains the building in EITHER
         # orientation (max half-span 25.2 + margin). The model holds only the
         # building's splats, so a generous box still selects exactly them.
-        "sim_area": [-60, 60, -60, 60, -60, 60],
+        "sim_area": [-60, 60, -60, 60, -30, 30],
         "sim_area_frame": "model",
         # Camera block the native renderer (--render_img) reads. Irrelevant to
         # production in-browser playback, but required for verify-to-video.
