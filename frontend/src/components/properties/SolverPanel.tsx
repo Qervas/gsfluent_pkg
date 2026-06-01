@@ -1,6 +1,7 @@
 import { usePanelData } from "@/lib/use-overrides";
 import { SliderInput } from "./widgets/SliderInput";
 import { NumberInput } from "./widgets/NumberInput";
+import { SelectInput } from "./widgets/SelectInput";
 
 const FIELDS: Array<[string, string, [number, number, number], string?]> = [
   ["n_grid",                 "Grid resolution",         [50, 400, 10],       "MPM grid cells per side. Cubic memory cost; doubling triples runtime."],
@@ -51,6 +52,13 @@ export function SolverPanel() {
         onChange={(n) => setField("substep_dt", n)}
         step={0.00001}
         hint="Inner integration timestep. Smaller = more stable but slower (more substeps per frame). 1e-4 is typical."
+      />
+      <SelectInput
+        label="Boundary mode"
+        value={String(data.boundary_mode ?? "drop")}
+        options={["drop", "clamp"]}
+        onChange={(v) => setField("boundary_mode", v)}
+        hint="What happens to particles that fly out of the sim box. drop: deactivate them (debris flies out freely). clamp: pin them at the wall (debris piles). Both prevent the NaN that out-of-grid debris would otherwise cause."
       />
     </div>
   );

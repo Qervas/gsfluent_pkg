@@ -348,8 +348,17 @@ class MPMSimulationEngine:
             # inherit the pin unchanged (every failure / disabled path).
             on_event.debug("sim.gpu_selection.start")
             gpu_overlay = _resolve_sim_gpu_env(on_event=on_event)
-            sim_env = {**os.environ, **gpu_overlay} if gpu_overlay else None
-            on_event.debug("sim.env.resolved", has_gpu_overlay=bool(gpu_overlay))
+            # Per-run boundary mode flows recipe -> solver via env (the solver
+            # reads GSFLUENT_BOUNDARY_MODE in its __init__). Default "drop".
+            boundary_mode = str(recipe.get("boundary_mode", "drop"))
+            sim_env = {**os.environ, "GSFLUENT_BOUNDARY_MODE": boundary_mode}
+            if gpu_overlay:
+                sim_env.update(gpu_overlay)
+            on_event.debug(
+                "sim.env.resolved",
+                has_gpu_overlay=bool(gpu_overlay),
+                boundary_mode=boundary_mode,
+            )
 
             sim_proc = await self._spawn_in_new_pg(
                 argv=sim_argv,
