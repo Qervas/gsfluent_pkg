@@ -256,6 +256,125 @@ def test_check_sim_stability_partial_from_early_truncation() -> None:
     assert v.requested_frames == 90
 
 
+# ---- engine end-to-end: verdict -> manifest + SimResult ------------------
+#
+# These drive the REAL MPMSimulationEngine.run() with faked sim+fuse spawns
+# that write an exact number of sim_*.ply / frame_*.ply, so the post-fuse
+# stability classification, manifest write, and SimResult construction all
+# execute for real (no GPU). This is the seam that proves a partial run is
+# actually sent back as `done` + diverged, not raised as a failure.
+
+
+class _StubEmitter:
+    """Minimal EventEmitter for driving run() — swallows every level."""
+    def emit(self, event, **ctx): pass
+    def child(self, **ctx): return self
+    def info(self, event, **ctx): pass
+    def debug(self, event, **ctx): pass
+    def error(self, event, **ctx): pass
+
+
+async def _run_engine_with_frame_counts(
+    tmp_path, monkeypatch, *, n_sim, n_fuse, frame_num,
+):
+    """Run the engine end-to-end with sim writing ``n_sim`` sim_*.ply and
+    fuse writing ``n_fuse`` frame_*.ply. Returns (SimResult, run_name); raises
+    whatever run() raises (e.g. SimUnstableRecipeError below the floor)."""
+    import sys
+    from types import SimpleNamespace
+    import gsfluent.core.sim_engines.mpm as mpm
+    from gsfluent.protocols.sim import ModelRef
+
+    # Isolate the library dir run() writes into, and skip GPU/subprocess work.
+    monkeypatch.setattr(mpm, "PKG_ROOT", tmp_path)
+    monkeypatch.setattr(mpm, "_resolve_sim_gpu_env", lambda **k: {})
+
+    async def _fake_wait(proc, chunks, log_file=None):
+        return 0
+    monkeypatch.setattr(mpm, "_wait_capturing_stderr", _fake_wait)
+    monkeypatch.setenv("GSFLUENT_MIN_USABLE_FRAMES", "24")
+    monkeypatch.setenv("GSFLUENT_ALLOWED_NONFINITE_FRAMES", "0")
+
+    sim_home = tmp_path / "sim_home"
+    sim_home.mkdir()
+    pc = tmp_path / "model" / "point_cloud" / "iteration_30000"
+    pc.mkdir(parents=True)
+    (pc / "point_cloud.ply").write_text("ply")
+    model = ModelRef(name="m", path=tmp_path / "model")
+
+    run_name = "partialtest"
+    sim_ply_dir = sim_home / "output" / run_name / "simulation_ply"
+    fused_dir = tmp_path / "work" / "library" / "sequences" / run_name / "frames"
+
+    calls = {"n": 0}
+
+    async def _fake_spawn(*, argv, cwd, env=None):
+        calls["n"] += 1
+        if calls["n"] == 1:  # sim stage
+            sim_ply_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(n_sim):
+                (sim_ply_dir / f"sim_{i:04d}.ply").write_text("p")
+        else:  # fuse stage
+            fused_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(n_fuse):
+                (fused_dir / f"frame_{i:04d}.ply").write_text("p")
+        # Real pid so os.getpgid / _read_pid_starttime work without mocking.
+        return SimpleNamespace(pid=os.getpid())
+
+    eng = MPMSimulationEngine(
+        sim_home=sim_home, sim_python=sys.executable, sim_env=None,
+        require_gpu=False,
+    )
+    monkeypatch.setattr(eng, "_spawn_in_new_pg", _fake_spawn)
+
+    recipe = {"_run_name": run_name, "frame_num": frame_num, "particle_count": 1000}
+    result = await eng.run(recipe, model, tmp_path / "out", 60, _StubEmitter())
+    return result, run_name
+
+
+def _read_run_manifest(tmp_path, run_name):
+    import json
+    p = tmp_path / "work" / "library" / "sequences" / run_name / "manifest.json"
+    return json.loads(p.read_text())
+
+
+@pytest.mark.asyncio
+async def test_run_partial_diverged_returns_done_with_diverged(
+    tmp_path, monkeypatch,
+):
+    # 91 sim frames, 38 fused (53 NaN-dropped); 38 >= 24 floor -> partial.
+    # The engine must NOT raise: it returns a diverged SimResult and writes a
+    # `done` manifest with the accounting that /api/runs/history serves.
+    result, run_name = await _run_engine_with_frame_counts(
+        tmp_path, monkeypatch, n_sim=91, n_fuse=38, frame_num=90,
+    )
+    assert result.diverged is True
+    assert result.usable_frames == 38
+    assert result.requested_frames == 91  # frame_num + 1
+    assert result.n_frames == 38
+
+    manifest = _read_run_manifest(tmp_path, run_name)
+    assert manifest["status"] == "done"
+    assert manifest["diverged"] is True
+    assert manifest["usable_frames"] == 38
+    assert manifest["requested_frames"] == 91
+    assert "error" not in manifest
+
+
+@pytest.mark.asyncio
+async def test_run_below_floor_still_fails_loudly(tmp_path, monkeypatch):
+    # 91 sim frames, only 10 fused; 10 < 24 floor -> the guard still raises
+    # and the manifest records the failure (no silent-corruption regression).
+    with pytest.raises(SimUnstableRecipeError):
+        await _run_engine_with_frame_counts(
+            tmp_path, monkeypatch, n_sim=91, n_fuse=10, frame_num=90,
+        )
+    manifest = _read_run_manifest(tmp_path, "partialtest")
+    assert manifest["status"] == "failed"
+    assert manifest.get("error", {}).get("kind") == "sim.unstable_recipe"
+    assert not manifest.get("diverged")
+
+
 def test_expected_sim_frames_is_frame_num_plus_one() -> None:
     # A complete sim writes frame_num + 1 plys (frame 0 = initial state).
     # Empirically confirmed: frame_num=30 -> 31, 150 -> 151, 12 -> 13.
