@@ -122,64 +122,128 @@ def _kind_to_exception(kind: str, message: str) -> Exception:
     return SimCrashedError(message)
 
 
+# Minimum usable (fused) frames for a diverged run to still count as a
+# *partial* success instead of a hard failure. ~1 s at 24 fps: enough to be a
+# watchable clip. Tunable via GSFLUENT_MIN_USABLE_FRAMES. Below this a diverged
+# run is `sim.unstable_recipe` (failed), exactly as before this band existed.
+MIN_USABLE_FRAMES_DEFAULT = 24
+
+
+@dataclass(frozen=True)
+class StabilityVerdict:
+    """Outcome of the post-fuse stability check.
+
+    outcome:
+      "clean"   — every requested frame fused (within tolerance) -> done
+      "partial" — diverged late but >= min_usable frames survived; still a
+                  usable (shorter) clip -> done, with diverged=True surfaced
+      "failed"  — diverged with too few usable frames -> sim.unstable_recipe
+    """
+    outcome: str
+    message: str | None = None
+    usable_frames: int = 0
+    requested_frames: int | None = None
+    dropped_frames: int = 0
+
+    @property
+    def is_clean(self) -> bool:
+        return self.outcome == "clean"
+
+    @property
+    def is_partial(self) -> bool:
+        return self.outcome == "partial"
+
+    @property
+    def is_failed(self) -> bool:
+        return self.outcome == "failed"
+
+
 def check_sim_stability(
     *,
     n_sim: int,
     n_fused: int,
     allowed_nonfinite: int,
     expected_frames: int | None = None,
-) -> str | None:
-    """Detect a diverged simulation from a frame-count shortfall.
+    min_usable_frames: int = MIN_USABLE_FRAMES_DEFAULT,
+) -> StabilityVerdict:
+    """Classify a finished sim/fuse pass as clean / partial / failed.
 
-    Two divergence signatures are caught:
+    Two divergence signatures are detected (unchanged):
 
     1. **Fuser drop** (``n_fused < n_sim``): the fuser silently skips sim
        frames whose particle positions are non-finite (NaN/Inf), so fewer
        fused frames than sim frames means the MPM solver produced unusable
        (NaN) particles mid-run.
 
-    2. **Sim truncation** (``n_sim < expected_frames``): the MPM solver can
-       also blow up and terminate *early*, writing fewer sim frames than the
-       recipe requested. In that case ``n_sim == n_fused`` (the fuser keeps
-       every frame the sim emitted), so signature 1 misses it — yet the
-       sequence is still a silently-truncated, diverged run. ``expected_frames``
-       is the count the recipe asked for; when provided and the sim wrote
-       fewer than that, the run is flagged.
-
-    Returns a human-readable error message when either signature trips (so
-    the run fails loudly instead of being marked done with a truncated
-    sequence), else ``None``. ``n_sim <= 0`` is a different failure path
-    (no sim output at all) handled elsewhere.
+    2. **Sim truncation** (``n_sim < expected_frames``): the solver blew up
+       and terminated *early*, writing fewer sim frames than requested. Then
+       ``n_sim == n_fused`` so signature 1 misses it; ``expected_frames``
+       catches the shortfall.
 
     ``allowed_nonfinite`` tolerates up to that many dropped/missing frames
-    (applies to both signatures) before flagging.
-    """
-    if n_sim <= 0:
-        return None
+    before a run counts as diverged at all (default 0 = any drop counts).
 
-    # Signature 2: the sim itself stopped early (n_sim == n_fused but short
-    # of what the recipe requested). Checked first because a truncated sim
-    # is the more common production divergence and the more misleading
-    # "done" result. expected_frames is None for legacy callers / tests that
-    # only exercise signature 1.
+    Once diverged, the run is salvaged as a **partial** success when at least
+    ``min_usable_frames`` frames survived — MPM divergence is monotonic (NaN
+    propagates through the shared grid), so the survivors are a contiguous
+    opening clip, usable as a shorter animation. Below the threshold the run
+    is **failed** (``sim.unstable_recipe``), preserving the guard against
+    serving a near-empty, silently-truncated sequence as success. A run that
+    never diverged is **clean**. ``n_sim <= 0`` (no sim output at all) is a
+    different failure path handled elsewhere, so it is treated as clean here.
+    """
+    requested = (
+        expected_frames
+        if (expected_frames and expected_frames > 0)
+        else (n_sim if n_sim > 0 else None)
+    )
+    if n_sim <= 0:
+        return StabilityVerdict("clean", usable_frames=n_fused, requested_frames=requested)
+
+    # Detect divergence. Signature 2 (early stop) is checked first because a
+    # truncated sim is the more common and more misleading production case.
+    diverged_msg: str | None = None
     if expected_frames is not None and expected_frames > 0:
         missing = expected_frames - n_sim
         if missing > allowed_nonfinite:
-            return (
+            diverged_msg = (
                 f"simulation diverged: only {n_sim} of {expected_frames} "
                 f"requested frames were produced before the solver stopped "
-                f"({missing} missing). The recipe is numerically unstable."
+                f"({missing} missing)"
+            )
+    if diverged_msg is None:
+        dropped = n_sim - n_fused
+        if dropped > allowed_nonfinite:
+            diverged_msg = (
+                f"simulation diverged: {dropped} of {n_sim} frames had "
+                f"non-finite (NaN/Inf) positions and were dropped "
+                f"({n_fused} usable)"
             )
 
-    # Signature 1: the fuser dropped NaN/Inf frames the sim did emit.
-    dropped = n_sim - n_fused
-    if dropped > allowed_nonfinite:
-        return (
-            f"simulation diverged: {dropped} of {n_sim} frames had non-finite "
-            f"(NaN/Inf) positions and were dropped ({n_fused} usable). The "
-            f"recipe is numerically unstable."
+    if diverged_msg is None:
+        return StabilityVerdict(
+            "clean", usable_frames=n_fused, requested_frames=requested,
         )
-    return None
+
+    dropped_total = max(0, (requested - n_fused) if requested else (n_sim - n_fused))
+    if n_fused >= min_usable_frames:
+        return StabilityVerdict(
+            "partial",
+            message=f"{diverged_msg}; kept {n_fused} usable frames as a partial result.",
+            usable_frames=n_fused,
+            requested_frames=requested,
+            dropped_frames=dropped_total,
+        )
+    return StabilityVerdict(
+        "failed",
+        message=(
+            f"{diverged_msg}; only {n_fused} usable frames "
+            f"(< {min_usable_frames} minimum). The recipe is numerically unstable."
+        ),
+        usable_frames=n_fused,
+        requested_frames=requested,
+        dropped_frames=dropped_total,
+    )
 
 
 # ---------- the engine ---------------------------------------------------
@@ -330,6 +394,10 @@ class MPMSimulationEngine:
         t0 = time.monotonic()
         run_status = "running"
         run_error: dict[str, str] | None = None
+        # Set when the run finishes as a *partial* success (diverged late but
+        # kept >= min-usable frames). Merged into the final manifest so
+        # /api/runs/history surfaces the divergence without a separate status.
+        partial_meta: dict[str, object] | None = None
         try:
             on_event.info("sim.stage.start", stage="sim", run_name=run_name)
 
@@ -476,23 +544,32 @@ class MPMSimulationEngine:
                 n_frames=n_frames,
             )
 
-            # Fail loudly on a diverged sim. The fuser silently skips frames
+            # Classify the finished pass. The fuser silently skips frames
             # whose sim positions are NaN/Inf, so fewer fused frames than sim
-            # frames means the MPM solver blew up mid-run. Without this guard
-            # the run would be marked `done` with a truncated sequence — a
-            # silent corruption. Tolerance configurable via
-            # GSFLUENT_ALLOWED_NONFINITE_FRAMES (default 0 = any drop fails).
+            # frames (or fewer sim frames than requested) means the solver blew
+            # up mid-run. Three outcomes: clean -> done; partial -> done with a
+            # diverged flag (a usable shorter clip survived); failed ->
+            # sim.unstable_recipe (too few usable frames to be worth serving).
+            # Without the failed guard a near-empty truncated run would be
+            # marked `done` — a silent corruption. Tolerances configurable via
+            # GSFLUENT_ALLOWED_NONFINITE_FRAMES (default 0 = any drop counts as
+            # diverged) and GSFLUENT_MIN_USABLE_FRAMES (default 24 = partial
+            # floor).
             on_event.debug("sim.stability_check.start")
 
             n_sim_frames = sum(1 for _ in sim_ply_dir.glob("sim_*.ply"))
             allowed = int(os.environ.get("GSFLUENT_ALLOWED_NONFINITE_FRAMES", "0"))
+            min_usable = int(
+                os.environ.get("GSFLUENT_MIN_USABLE_FRAMES", str(MIN_USABLE_FRAMES_DEFAULT))
+            )
             expected_frames = _expected_sim_frames(recipe)
 
-            unstable = check_sim_stability(
+            verdict = check_sim_stability(
                 n_sim=n_sim_frames,
                 n_fused=n_frames,
                 allowed_nonfinite=allowed,
                 expected_frames=expected_frames,
+                min_usable_frames=min_usable,
             )
             on_event.debug(
                 "sim.stability_check.done",
@@ -500,19 +577,39 @@ class MPMSimulationEngine:
                 n_fused=n_frames,
                 expected=expected_frames,
                 allowed_nonfinite=allowed,
-                unstable=bool(unstable),
+                min_usable=min_usable,
+                outcome=verdict.outcome,
             )
-            if unstable:
+            if verdict.is_failed:
                 on_event.error(
                     "error.sim.unstable_recipe",
                     n_sim=n_sim_frames,
                     n_fused=n_frames,
                     dropped=n_sim_frames - n_frames,
                     allowed_nonfinite=allowed,
-                    message=unstable,
+                    message=verdict.message,
                 )
-                run_error = {"kind": "sim.unstable_recipe", "message": unstable}
-                raise SimUnstableRecipeError(unstable)
+                run_error = {"kind": "sim.unstable_recipe", "message": verdict.message}
+                raise SimUnstableRecipeError(verdict.message)
+
+            if verdict.is_partial:
+                # Usable but late-diverged. Keep it (don't raise); record the
+                # accounting so history can flag it and the consumer can decide.
+                partial_meta = {
+                    "diverged": True,
+                    "usable_frames": verdict.usable_frames,
+                    "requested_frames": verdict.requested_frames,
+                    "dropped_frames": verdict.dropped_frames,
+                }
+                on_event.info(
+                    "sim.partial_recipe",
+                    n_sim=n_sim_frames,
+                    n_fused=n_frames,
+                    usable_frames=verdict.usable_frames,
+                    requested_frames=verdict.requested_frames,
+                    dropped_frames=verdict.dropped_frames,
+                    message=verdict.message,
+                )
 
             on_event.info(
                 "sim.pipeline.complete",
@@ -520,6 +617,7 @@ class MPMSimulationEngine:
                 sim_duration_sec=round(sim_duration, 2),
                 fuse_duration_sec=round(fuse_duration, 2),
                 final_frames=n_frames,
+                diverged=bool(partial_meta),
             )
 
             run_status = "done"
@@ -527,6 +625,10 @@ class MPMSimulationEngine:
                 frames_dir=fused_dir,
                 n_frames=n_frames,
                 duration_sec=time.monotonic() - t0,
+                diverged=bool(partial_meta),
+                usable_frames=verdict.usable_frames,
+                requested_frames=verdict.requested_frames,
+                dropped_frames=verdict.dropped_frames,
             )
         except BaseException as exc:
             # Cancellation (CancelledError) + classified failures both flow
@@ -554,6 +656,8 @@ class MPMSimulationEngine:
                 fields = {"status": run_status, "finished_at": time.time()}
                 if run_error is not None:
                     fields["error"] = run_error
+                if partial_meta is not None:
+                    fields.update(partial_meta)
                 _manifest.update(library_seq_dir, **fields)
             except Exception as e:
                 on_event.error(

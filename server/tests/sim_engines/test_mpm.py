@@ -150,78 +150,110 @@ async def test_preflight_passes_with_valid_env(tmp_path: Path) -> None:
 # ---------- sim-stability guard (NaN frame-drop detection) ----------------
 
 
-def test_check_sim_stability_complete_run_is_ok() -> None:
-    # Every sim frame fused → no instability.
-    assert check_sim_stability(n_sim=31, n_fused=31, allowed_nonfinite=0) is None
+def test_check_sim_stability_complete_run_is_clean() -> None:
+    # Every sim frame fused → clean.
+    assert check_sim_stability(n_sim=31, n_fused=31, allowed_nonfinite=0).is_clean
 
 
-def test_check_sim_stability_flags_diverged_run() -> None:
-    # Sim wrote 11 frames, only 4 fused → 7 went NaN/Inf.
-    msg = check_sim_stability(n_sim=11, n_fused=4, allowed_nonfinite=0)
-    assert msg is not None
-    assert "11" in msg and "diverged" in msg.lower()
+def test_check_sim_stability_few_usable_frames_is_failed() -> None:
+    # Sim wrote 11 frames, only 4 fused → 7 went NaN/Inf; 4 < 24 min usable
+    # → hard failure (sim.unstable_recipe), not a partial result.
+    v = check_sim_stability(n_sim=11, n_fused=4, allowed_nonfinite=0)
+    assert v.is_failed
+    assert v.message is not None
+    assert "11" in v.message and "diverged" in v.message.lower()
+    assert "unstable" in v.message.lower()
 
 
 def test_check_sim_stability_respects_tolerance() -> None:
-    # One dropped frame within an explicit tolerance is allowed.
-    assert check_sim_stability(n_sim=11, n_fused=10, allowed_nonfinite=1) is None
-    # Three dropped exceeds a tolerance of one → flagged.
-    assert check_sim_stability(n_sim=11, n_fused=8, allowed_nonfinite=1) is not None
+    # One dropped frame within an explicit tolerance is clean.
+    assert check_sim_stability(n_sim=11, n_fused=10, allowed_nonfinite=1).is_clean
+    # Three dropped exceeds a tolerance of one → diverged; 8 < 24 → failed.
+    assert check_sim_stability(n_sim=11, n_fused=8, allowed_nonfinite=1).is_failed
 
 
-def test_check_sim_stability_no_sim_frames_is_noop() -> None:
+def test_check_sim_stability_no_sim_frames_is_clean() -> None:
     # Empty sim output is a different failure path (handled elsewhere).
-    assert check_sim_stability(n_sim=0, n_fused=0, allowed_nonfinite=0) is None
+    assert check_sim_stability(n_sim=0, n_fused=0, allowed_nonfinite=0).is_clean
 
 
 def test_check_sim_stability_flags_truncated_sim() -> None:
-    # The headline production bug: a diverged solver stops EARLY, so it
-    # writes fewer sim frames than the recipe requested. The fuser keeps
-    # every frame the sim emitted (n_sim == n_fused), so the NaN-drop
-    # signature alone misses it — but expected_frames catches the shortfall.
-    msg = check_sim_stability(
+    # A diverged solver stops EARLY: n_sim == n_fused but short of requested.
+    # The NaN-drop signature alone misses it; expected_frames catches it.
+    # 8 usable < 24 min → failed.
+    v = check_sim_stability(
         n_sim=8, n_fused=8, allowed_nonfinite=0, expected_frames=13
     )
-    assert msg is not None
-    assert "diverged" in msg.lower()
-    assert "8" in msg and "13" in msg
+    assert v.is_failed
+    assert v.message is not None
+    assert "diverged" in v.message.lower()
+    assert "8" in v.message and "13" in v.message
 
 
-def test_check_sim_stability_complete_run_with_expected_is_ok() -> None:
-    # A complete run: sim wrote all requested frames, all fused. No flag.
-    assert (
-        check_sim_stability(
-            n_sim=13, n_fused=13, allowed_nonfinite=0, expected_frames=13
-        )
-        is None
-    )
+def test_check_sim_stability_complete_run_with_expected_is_clean() -> None:
+    # A complete run: sim wrote all requested frames, all fused. Clean.
+    assert check_sim_stability(
+        n_sim=13, n_fused=13, allowed_nonfinite=0, expected_frames=13
+    ).is_clean
 
 
 def test_check_sim_stability_truncation_respects_tolerance() -> None:
-    # One missing frame within tolerance is allowed; two exceeds it.
-    assert (
-        check_sim_stability(
-            n_sim=12, n_fused=12, allowed_nonfinite=1, expected_frames=13
-        )
-        is None
-    )
-    assert (
-        check_sim_stability(
-            n_sim=11, n_fused=11, allowed_nonfinite=1, expected_frames=13
-        )
-        is not None
-    )
+    # One missing frame within tolerance is clean; two exceeds it → diverged
+    # (and 11 usable < 24 → failed).
+    assert check_sim_stability(
+        n_sim=12, n_fused=12, allowed_nonfinite=1, expected_frames=13
+    ).is_clean
+    assert check_sim_stability(
+        n_sim=11, n_fused=11, allowed_nonfinite=1, expected_frames=13
+    ).is_failed
 
 
 def test_check_sim_stability_expected_none_is_backward_compatible() -> None:
-    # Legacy callers pass no expected_frames: behaviour is exactly the old
-    # NaN-drop-only check.
-    assert (
-        check_sim_stability(n_sim=13, n_fused=13, allowed_nonfinite=0) is None
+    # Legacy callers pass no expected_frames: NaN-drop-only signature.
+    assert check_sim_stability(n_sim=13, n_fused=13, allowed_nonfinite=0).is_clean
+    # 5 usable < 24 → failed.
+    assert check_sim_stability(n_sim=13, n_fused=5, allowed_nonfinite=0).is_failed
+
+
+# ---- partial-success band (diverged late but >= min usable frames) -------
+
+
+def test_check_sim_stability_partial_when_enough_usable_frames() -> None:
+    # The reported case: 91 sim frames, 38 fused, 92 requested. 38 >= 24 →
+    # partial (a usable shorter clip), NOT failed.
+    v = check_sim_stability(
+        n_sim=91, n_fused=38, allowed_nonfinite=0, expected_frames=92,
+        min_usable_frames=24,
     )
-    assert (
-        check_sim_stability(n_sim=13, n_fused=5, allowed_nonfinite=0) is not None
+    assert v.is_partial
+    assert v.usable_frames == 38
+    assert v.requested_frames == 92
+    assert v.dropped_frames == 92 - 38
+    assert v.message is not None and "partial" in v.message.lower()
+
+
+def test_check_sim_stability_partial_floor_is_exclusive_below() -> None:
+    # Just below the floor → failed; exactly at the floor → partial.
+    assert check_sim_stability(
+        n_sim=100, n_fused=23, allowed_nonfinite=0, expected_frames=100,
+        min_usable_frames=24,
+    ).is_failed
+    assert check_sim_stability(
+        n_sim=100, n_fused=24, allowed_nonfinite=0, expected_frames=100,
+        min_usable_frames=24,
+    ).is_partial
+
+
+def test_check_sim_stability_partial_from_early_truncation() -> None:
+    # Early-stop divergence can also be partial: sim stopped at 40 of 90, all
+    # 40 fused; 40 >= 24 → partial.
+    v = check_sim_stability(
+        n_sim=40, n_fused=40, allowed_nonfinite=0, expected_frames=90,
+        min_usable_frames=24,
     )
+    assert v.is_partial
+    assert v.usable_frames == 40
+    assert v.requested_frames == 90
 
 
 def test_expected_sim_frames_is_frame_num_plus_one() -> None:

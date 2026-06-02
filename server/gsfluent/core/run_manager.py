@@ -428,7 +428,17 @@ class AsyncioRunManager:
                 duration_sec=round(result.duration_sec, 2),
             )
 
-            # Success path.
+            # Success path. A *partial* success (diverged late but kept a
+            # usable prefix) is still COMPLETED — we reuse the success status
+            # and carry the divergence in the manifest/history so the existing
+            # `completed` consumer contract is unchanged.
+            if getattr(result, "diverged", False):
+                run_obs.info(
+                    "run.partial",
+                    usable_frames=getattr(result, "usable_frames", None),
+                    requested_frames=getattr(result, "requested_frames", None),
+                    dropped_frames=getattr(result, "dropped_frames", 0),
+                )
             rec = self._state_store.read(run_id)
             if rec is not None:
                 self._state_store.write(rec.transition(
@@ -440,6 +450,7 @@ class AsyncioRunManager:
                 "run.completed",
                 n_frames=result.n_frames,
                 duration_sec=round(result.duration_sec, 2),
+                diverged=bool(getattr(result, "diverged", False)),
             )
             if not fut.done():
                 fut.set_result(None)

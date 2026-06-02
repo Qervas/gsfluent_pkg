@@ -267,3 +267,38 @@ def test_history_keeps_completed_run_done(client, tmp_path, monkeypatch):
         assert "error_kind" not in entry
     finally:
         _clear_run_state(client)
+
+
+def test_history_surfaces_partial_diverged_run(client, tmp_path, monkeypatch):
+    """A partial success (diverged late, kept a usable prefix) reports as a
+    normal `done` run WITH diverged accounting — so a `done`/`completed`
+    consumer gets the frames instead of throwing on a `failed` status, but
+    can still see it was truncated. This is the cross-team contract the
+    partial band exists for."""
+    _isolate(monkeypatch, tmp_path)
+    seq_dir = tmp_path / "library" / "sequences" / "partial_run"
+    (seq_dir / "frames").mkdir(parents=True)
+    for i in range(38):
+        (seq_dir / "frames" / f"frame_{i:04d}.ply").write_text("ply")
+    # The runner finalized the manifest as a partial success: status "done"
+    # plus the divergence accounting (no error — it's not a failure).
+    (seq_dir / "manifest.json").write_text(
+        '{"run_name":"partial_run","status":"done","started_at":42,'
+        '"diverged":true,"usable_frames":38,"requested_frames":91,'
+        '"dropped_frames":53}'
+    )
+    rr = client.get("/api/runs/history")
+    assert rr.status_code == 200
+    entry = next(
+        (x for x in rr.json() if x["run_name"] == "partial_run"), None
+    )
+    assert entry is not None
+    # Consumable as a success (not "failed"), so the teammate's poller that
+    # accepts done/success/completed gets it.
+    assert entry["status"] == "done"
+    assert "error_kind" not in entry
+    # ...but honestly flagged so it can show "N of M frames".
+    assert entry["diverged"] is True
+    assert entry["usable_frames"] == 38
+    assert entry["requested_frames"] == 91
+    assert entry["dropped_frames"] == 53
