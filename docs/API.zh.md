@@ -804,6 +804,16 @@ curl -X DELETE ${BACKEND_URL}/api/runs/1a2b3c
     "model_ref": "cluster_6_15",
     "frame_count": 151,
     "sequence_source": "sim"
+  },
+  {
+    "run_name": "cluster_6_15_earthquake_watermelon",
+    "status": "done",
+    "diverged": true,
+    "usable_frames": 38,
+    "requested_frames": 91,
+    "dropped_frames": 53,
+    "frame_count": 38,
+    "model_ref": "cluster_6_15"
   }
 ]
 ```
@@ -811,15 +821,30 @@ curl -X DELETE ${BACKEND_URL}/api/runs/1a2b3c
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `run_name` | string | sequence 名。 |
-| `status` | string | `"done"` / `"error"` / `"cancelled"` / `"running"` / `"unknown"`。 |
+| `status` | string | `"done"` / `"failed"` / `"cancelled"` / `"interrupted"` / `"running"` / `"unknown"`。 |
 | `started_at` | float | Unix epoch 秒。优先取 `manifest.json:started_at`,其次 `_meta.json:created_at` 解析,最后退化到目录 mtime。 |
 | `finished_at` | float | 可选。`manifest.json` 里有这条字段才返回。 |
 | `particles` | int | 可选,从 `manifest.json` 读。 |
 | `recipe_source` | string | 可选,从 `manifest.json` 读。 |
 | `model_ref` | string | 可选,父 model 名;来自 `_meta.json` 或 `manifest.json:model_dir` 的 basename。 |
-| `frame_count` | int | 可选,来自 `_meta.json` 或当场算的 live 计数。 |
+| `frame_count` | int | 可选,来自 `_meta.json` 或当场算的 live 计数。partial run 这里是可用(已融合)帧数。 |
 | `sequence_source` | string | 可选,来自 `_meta.json:source`。 |
+| `error_kind` | string | 可选。`status` 为 `"failed"` 时返回:失败类别,如 `"sim.unstable_recipe"`、`"sim.gpu_oom"`。 |
+| `error_message` | string | 可选。人类可读的失败详情,与 `error_kind` 一起出现。 |
+| `diverged` | bool | 可选。**部分成功**(见下)时为 `true`,否则不带这个字段。 |
+| `usable_frames` | int | 可选。仅 partial run:实际写出的可用帧数(即可播放长度)。 |
+| `requested_frames` | int | 可选。仅 partial run:一次干净运行本应产出的帧数。 |
+| `dropped_frames` | int | 可选。仅 partial run:`requested_frames − usable_frames`。 |
 | `_synthetic` | bool | 只在 legacy 目录回退分支、且没有 manifest 时带这个字段。 |
+
+**部分成功(diverged run)**
+
+MPM solver 可能后期发散:一块碎片飞出网格,NaN 通过共享网格传染到所有粒子。fuser 丢掉 NaN 帧,留下一段**连续可用的前缀**(发散是单调的,所以幸存的是开头若干帧 —— 一段更短但连贯的片段)。然后按幸存帧数分类:
+
+- **≥ `GSFLUENT_MIN_USABLE_FRAMES`**(默认 `24`,约 24fps 下 1 秒)→ 当成正常成功返回:`status: "done"` + `diverged: true` + 上面的帧数统计。序列是真实可播放的 —— 当普通完成的 run 处理即可,可用 `usable_frames` / `requested_frames` 显示"N / M 帧"。**`completed`/`done` 的消费方零改动即可使用。**
+- **低于下限** → `status: "failed"`、`error_kind: "sim.unstable_recipe"`。可用输出太少不值得交付,于是显式失败,而不是把近乎空的截断序列当成功。
+
+`GSFLUENT_ALLOWED_NONFINITE_FRAMES`(默认 `0`)决定容忍多少丢帧/缺帧才算发散;容差范围内 run 仍算干净,不带 `diverged`。
 
 **curl**
 

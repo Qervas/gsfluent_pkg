@@ -32,6 +32,18 @@ export type HistoryEntry = {
   finished_at?: number;
   particles?: number;
   recipe_source?: string;
+  frame_count?: number;
+  // Failure detail (status === "failed"): kind like "sim.unstable_recipe".
+  error_kind?: string;
+  error_message?: string;
+  // Partial success: the run is `done`/`completed` (status above) but the
+  // solver diverged late and only a usable prefix survived. Present and true
+  // only for partial runs; consumers can show "usable_frames / requested_frames"
+  // without treating it as a failure.
+  diverged?: boolean;
+  usable_frames?: number;
+  requested_frames?: number;
+  dropped_frames?: number;
 };
 
 // Library sequence — both sim-produced (source="sim") and externally

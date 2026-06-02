@@ -872,6 +872,16 @@ pre-migration data.
     "model_ref": "cluster_6_15",
     "frame_count": 151,
     "sequence_source": "sim"
+  },
+  {
+    "run_name": "cluster_6_15_earthquake_watermelon",
+    "status": "done",
+    "diverged": true,
+    "usable_frames": 38,
+    "requested_frames": 91,
+    "dropped_frames": 53,
+    "frame_count": 38,
+    "model_ref": "cluster_6_15"
   }
 ]
 ```
@@ -879,15 +889,43 @@ pre-migration data.
 | Field | Type | Description |
 | --- | --- | --- |
 | `run_name` | string | Sequence name. |
-| `status` | string | `"done"`, `"error"`, `"cancelled"`, `"running"`, or `"unknown"`. |
+| `status` | string | `"done"`, `"failed"`, `"cancelled"`, `"interrupted"`, `"running"`, or `"unknown"`. |
 | `started_at` | float | Unix epoch seconds. From `manifest.json:started_at`, or `_meta.json:created_at` parsed, or dir mtime. |
 | `finished_at` | float | Optional. Present only if `manifest.json` recorded it. |
 | `particles` | int | Optional. From `manifest.json`. |
 | `recipe_source` | string | Optional. From `manifest.json`. |
 | `model_ref` | string | Optional. Parent model name; from `_meta.json` or `manifest.json:model_dir` basename. |
-| `frame_count` | int | Optional. From `_meta.json` or live frame count. |
+| `frame_count` | int | Optional. From `_meta.json` or live frame count. For a partial run this is the usable (fused) frame count. |
 | `sequence_source` | string | Optional. From `_meta.json:source`. |
+| `error_kind` | string | Optional. Present when `status` is `"failed"`: the failure class, e.g. `"sim.unstable_recipe"`, `"sim.gpu_oom"`. |
+| `error_message` | string | Optional. Human-readable failure detail, present alongside `error_kind`. |
+| `diverged` | bool | Optional. `true` for a **partial success** (see below). Absent otherwise. |
+| `usable_frames` | int | Optional. Partial runs only: fused frames actually written (the playable length). |
+| `requested_frames` | int | Optional. Partial runs only: frames a clean run would have produced. |
+| `dropped_frames` | int | Optional. Partial runs only: `requested_frames − usable_frames`. |
 | `_synthetic` | bool | Only present on legacy-dir fallback entries that lack a manifest. |
+
+**Partial success (diverged runs)**
+
+The MPM solver can diverge late: a fragment leaves the grid and NaN then
+propagates through the shared grid to every particle. The fuser drops the
+NaN frames, leaving a contiguous **usable prefix** (divergence is monotonic,
+so the survivors are the opening frames — a shorter but coherent clip). The
+run is then classified by how many usable frames survived:
+
+- **≥ `GSFLUENT_MIN_USABLE_FRAMES`** (default `24`, ~1 s at 24 fps) → reported
+  as a normal success: `status: "done"` with `diverged: true` plus the frame
+  accounting above. The sequence is real and playable — treat it like any
+  completed run; optionally show "N of M frames" from `usable_frames` /
+  `requested_frames`. **A `completed`/`done` consumer needs no change to use
+  it.**
+- **below the floor** → `status: "failed"`, `error_kind: "sim.unstable_recipe"`.
+  Too little usable output to serve, so the run fails loudly rather than
+  present a near-empty truncated sequence as success.
+
+`GSFLUENT_ALLOWED_NONFINITE_FRAMES` (default `0`) sets how many dropped/missing
+frames are tolerated before a run counts as diverged at all; within that
+tolerance the run stays clean and `diverged` is absent.
 
 **curl**
 

@@ -559,6 +559,15 @@ def _history_entry_from_sequence(seq: Sequence) -> dict | None:
         out["frame_count"] = frame_count
     if meta.get("source"):
         out["sequence_source"] = meta["source"]
+    # Partial-success accounting: a run that diverged late but kept a usable
+    # prefix is `done`/`completed` with diverged=True so consumers can show
+    # "N of M frames" without treating it as a failure. Fields come from the
+    # manifest the runner finalized.
+    if manifest.get("diverged"):
+        out["diverged"] = True
+        for k in ("usable_frames", "requested_frames", "dropped_frames"):
+            if manifest.get(k) is not None:
+                out[k] = manifest[k]
     return out
 
 

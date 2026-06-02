@@ -60,10 +60,21 @@ class ModelRef:
 
 @dataclass(frozen=True)
 class SimResult:
-    """Returned by SimulationEngine.run() on success."""
+    """Returned by SimulationEngine.run() on success.
+
+    A run can succeed *partially*: the solver diverged late but still left a
+    usable contiguous prefix of frames (>= the min-usable threshold). Such a
+    run is reported as a normal success (`done`) with ``diverged=True`` and
+    the frame accounting below, so a fully-clean run and a usable-but-
+    truncated one are distinguishable without a separate terminal status.
+    """
     frames_dir: Path        # directory containing sim_*.ply files
     n_frames: int
     duration_sec: float
+    diverged: bool = False              # True => usable but late-diverged
+    usable_frames: int | None = None    # fused frames actually written
+    requested_frames: int | None = None  # what the recipe asked for
+    dropped_frames: int = 0             # requested - usable (NaN/early-stop)
 
 
 @runtime_checkable
