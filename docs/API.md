@@ -77,8 +77,10 @@ result to [`POST /api/runs`](#post-apiruns). The typical flow:
 1. `GET /api/compose/library` → populate the picker dropdowns.
 2. `POST /api/compose` → `recipe_data`.
 3. `POST /api/runs` with `recipe_data` + the chosen `model_path`.
-4. Poll `GET /api/runs/{name}/log` for progress; `GET /api/runs/history` for the outcome.
-5. On `done`: `POST …/cache/build` → poll `…/cache/build-status` → `GET …/cache/splats.gsq`.
+4. Poll `GET /api/runs/{name}/log` for progress; `GET /api/runs/history` for the outcome:
+   - `status: "done"` → success. It **may also carry `diverged: true`** + `usable_frames`/`requested_frames` — a usable-but-truncated run (see [Partial success](#partial-success-diverged-runs)). Handle it exactly like any `done`.
+   - `status: "failed"` → unusable; `error_kind` says why (e.g. `sim.unstable_recipe`).
+5. On `done` (**including diverged**): `POST …/cache/build` → poll `…/cache/build-status` → `GET …/cache/splats.gsq`. The `.gsq` is built on demand — a `done` run has no playable `.gsq` until you call `cache/build`.
 
 ---
 
@@ -913,12 +915,13 @@ NaN frames, leaving a contiguous **usable prefix** (divergence is monotonic,
 so the survivors are the opening frames — a shorter but coherent clip). The
 run is then classified by how many usable frames survived:
 
-- **≥ `GSFLUENT_MIN_USABLE_FRAMES`** (default `24`, ~1 s at 24 fps) → reported
-  as a normal success: `status: "done"` with `diverged: true` plus the frame
-  accounting above. The sequence is real and playable — treat it like any
-  completed run; optionally show "N of M frames" from `usable_frames` /
-  `requested_frames`. **A `completed`/`done` consumer needs no change to use
-  it.**
+- **≥ `GSFLUENT_MIN_USABLE_FRAMES`** (code default `24`; **this deployment runs `1`**,
+  so any run that keeps ≥1 usable frame qualifies) → reported as a normal success:
+  `status: "done"` with `diverged: true` plus the frame accounting above. The
+  sequence is real and playable — treat it like any completed run; optionally
+  show "N of M frames" from `usable_frames` / `requested_frames`. **A
+  `completed`/`done` consumer needs no change to use it** (then build the cache to
+  play it, step 5 of [Where to start](#where-to-start)).
 - **below the floor** → `status: "failed"`, `error_kind: "sim.unstable_recipe"`.
   Too little usable output to serve, so the run fails loudly rather than
   present a near-empty truncated sequence as success.

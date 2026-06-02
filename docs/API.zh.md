@@ -51,8 +51,10 @@ FastAPI 默认结构。任何非 2xx 响应都是:
 1. `GET /api/compose/library` → 填充下拉框
 2. `POST /api/compose` → `recipe_data`
 3. `POST /api/runs`(带 `recipe_data` + 选好的 `model_path`)
-4. 轮询 `GET /api/runs/{name}/log` 看进度;`GET /api/runs/history` 看结果
-5. `done` 后:`POST …/cache/build` → 轮询 `…/cache/build-status` → `GET …/cache/splats.gsq`
+4. 轮询 `GET /api/runs/{name}/log` 看进度;`GET /api/runs/history` 看结果:
+   - `status: "done"` → 成功。**可能同时带 `diverged: true`** + `usable_frames`/`requested_frames` —— 这是可用但被截断的 run(见[部分成功](#部分成功diverged-run)),**按普通 `done` 处理即可**。
+   - `status: "failed"` → 不可用;`error_kind` 说明原因(如 `sim.unstable_recipe`)。
+5. `done` 后(**含 diverged**):`POST …/cache/build` → 轮询 `…/cache/build-status` → `GET …/cache/splats.gsq`。`.gsq` 是按需构建的 —— `done` 的 run 在调用 `cache/build` 之前没有可播放的 `.gsq`。
 
 ---
 
@@ -841,7 +843,7 @@ curl -X DELETE ${BACKEND_URL}/api/runs/1a2b3c
 
 MPM solver 可能后期发散:一块碎片飞出网格,NaN 通过共享网格传染到所有粒子。fuser 丢掉 NaN 帧,留下一段**连续可用的前缀**(发散是单调的,所以幸存的是开头若干帧 —— 一段更短但连贯的片段)。然后按幸存帧数分类:
 
-- **≥ `GSFLUENT_MIN_USABLE_FRAMES`**(默认 `24`,约 24fps 下 1 秒)→ 当成正常成功返回:`status: "done"` + `diverged: true` + 上面的帧数统计。序列是真实可播放的 —— 当普通完成的 run 处理即可,可用 `usable_frames` / `requested_frames` 显示"N / M 帧"。**`completed`/`done` 的消费方零改动即可使用。**
+- **≥ `GSFLUENT_MIN_USABLE_FRAMES`**(代码默认 `24`;**本部署设为 `1`**,即任何保留 ≥1 帧的 run 都算)→ 当成正常成功返回:`status: "done"` + `diverged: true` + 上面的帧数统计。序列是真实可播放的 —— 当普通完成的 run 处理即可,可用 `usable_frames` / `requested_frames` 显示"N / M 帧"。**`completed`/`done` 的消费方零改动即可使用**(随后调 `cache/build` 才能播放,见[从哪开始](#从哪开始)第 5 步)。
 - **低于下限** → `status: "failed"`、`error_kind: "sim.unstable_recipe"`。可用输出太少不值得交付,于是显式失败,而不是把近乎空的截断序列当成功。
 
 `GSFLUENT_ALLOWED_NONFINITE_FRAMES`(默认 `0`)决定容忍多少丢帧/缺帧才算发散;容差范围内 run 仍算干净,不带 `diverged`。
