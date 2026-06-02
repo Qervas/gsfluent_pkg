@@ -150,3 +150,50 @@ def validate_sim_area_intersects_model(
             f"coords, or set `sim_area_frame: \"model\"` in the recipe so the "
             f"runner translates model-local bounds to world."
         )
+
+
+def validate_model_orientation(recipe_data: dict, model_dir: Path) -> None:
+    """Reject a model oriented differently from the building the recipe targets.
+
+    The composer calibrates a recipe (ground plane, base shake, anchors, and
+    gravity along ``mpm_space_vertical_upward_axis``) to a building whose
+    expected bbox it stamps into ``particle_filling.boundary``. If the
+    submitted model's LONGEST axis is a different axis than the building's, the
+    model is rotated relative to what the recipe assumes — e.g. a Y-up MeshLab
+    export fed to a Z-up sim — so it lies on its side and diverges to NaN
+    within a few frames (observed: a Y-up model yielded ~4 usable frames vs
+    ~21 for the same building Z-up). We reject it here with a reorient hint
+    instead of burning a GPU run that NaNs.
+
+    Compares only WHICH axis is longest (scale-invariant), so a raw-world
+    model (coords ~1e4) and a normalized building bbox (~1) compare correctly.
+    Fires only on a clear mismatch (longest axis >= 1.4x the axis the building
+    expects to be longest) to avoid tripping on near-cubic models where the
+    argmax is ambiguous. No-op if the expected or model bbox is unreadable
+    (fail open, like the other preflight checks)."""
+    pf = recipe_data.get("particle_filling") or {}
+    expected = pf.get("boundary")
+    if not expected or len(expected) != 6:
+        return
+    bb = _read_model_bbox(model_dir)
+    if bb is None:
+        return
+    (mx0, my0, mz0), (mx1, my1, mz1) = bb
+    model_ext = (mx1 - mx0, my1 - my0, mz1 - mz0)
+    ex0, ex1, ey0, ey1, ez0, ez1 = (float(v) for v in expected)
+    exp_ext = (ex1 - ex0, ey1 - ey0, ez1 - ez0)
+    exp_tall = max(range(3), key=lambda i: exp_ext[i])
+    model_tall = max(range(3), key=lambda i: model_ext[i])
+    if model_tall == exp_tall:
+        return
+    if model_ext[model_tall] < 1.4 * max(model_ext[exp_tall], 1e-6):
+        return  # ambiguous (near-cubic) — don't block
+    axis = "xyz"
+    raise ValueError(
+        f"model looks mis-oriented for this recipe: its longest axis is "
+        f"'{axis[model_tall]}' (extent {model_ext[model_tall]:.1f}) but the "
+        f"recipe's building is longest on '{axis[exp_tall]}' — the model is "
+        f"rotated (e.g. Y-up in a Z-up sim), so it would lie on its side and "
+        f"diverge within a few frames. Reorient it so its longest axis matches "
+        f"(POST /api/models/{{name}}/reorient, e.g. Y-up->Z-up), then re-run."
+    )
