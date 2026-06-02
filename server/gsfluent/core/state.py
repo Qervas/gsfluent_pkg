@@ -66,7 +66,13 @@ class RunStateStore:
         return self._dir / f"{run_id}.json"
 
     def write(self, record: RunStateRecord) -> None:
-        """Atomic write: temp file + rename."""
+        """Atomic write: temp file + rename.
+
+        Re-creates the store dir first so a write self-heals if the dir was
+        removed out from under a running process (e.g. a data cleanup) —
+        __init__ alone can't guarantee it still exists at write time.
+        """
+        self._dir.mkdir(parents=True, exist_ok=True)
         target = self._path(record.id)
         tmp = target.with_suffix(".json.tmp")
         tmp.write_text(record.to_json())
@@ -80,7 +86,14 @@ class RunStateStore:
         return RunStateRecord.from_json(raw)
 
     def scan(self) -> Iterator[RunStateRecord]:
-        """Yield all records in the store. Skips non-JSON files silently."""
+        """Yield all records in the store. Skips non-JSON files silently.
+
+        A missing store dir yields nothing rather than raising — the dir can
+        vanish under a running process (data cleanup), and a read should not
+        500 the callers (list_active / history / health) when it does.
+        """
+        if not self._dir.is_dir():
+            return
         for path in sorted(self._dir.iterdir()):
             if path.suffix != ".json":
                 continue

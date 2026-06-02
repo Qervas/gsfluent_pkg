@@ -39,6 +39,33 @@ def test_read_missing_returns_none(store: RunStateStore) -> None:
     assert store.read("does-not-exist") is None
 
 
+def test_scan_tolerates_missing_dir_and_write_self_heals(tmp_path: Path) -> None:
+    """The store dir can vanish under a running process (a data cleanup).
+
+    Regression: deleting work/_state/runs 500'd /api/sequences + /api/health
+    because list_active() -> scan() -> iterdir() raised FileNotFoundError. A
+    read must yield nothing instead, and a later write must re-create the dir.
+    """
+    import shutil
+
+    d = tmp_path / "_state" / "runs"
+    store = RunStateStore(state_dir=d)
+    store.write(RunStateRecord(id="r1", state=RunState.COMPLETED))
+    assert len(list(store.scan())) == 1
+
+    # Nuke the dir out from under the live store.
+    shutil.rmtree(d)
+    assert not d.exists()
+
+    # Read tolerates it: yields nothing, no FileNotFoundError.
+    assert list(store.scan()) == []
+
+    # Write self-heals: dir recreated, record persisted + scannable.
+    store.write(RunStateRecord(id="r2", state=RunState.FAILED))
+    assert d.is_dir()
+    assert {r.id for r in store.scan()} == {"r2"}
+
+
 def test_update_state_writes_through(store: RunStateStore) -> None:
     rec = RunStateRecord(id="run-abc", state=RunState.QUEUED)
     store.write(rec)
