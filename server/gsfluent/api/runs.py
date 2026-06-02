@@ -233,6 +233,9 @@ async def start(
             recipe_validation.validate_sim_area_intersects_model(
                 effective_recipe.get("sim_area", []), model_dir,
             )
+            recipe_validation.validate_model_orientation(
+                effective_recipe, model_dir,
+            )
         except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
             raise_validation_error(
                 kind="validation.recipe_data",
@@ -253,6 +256,9 @@ async def start(
         )
         recipe_validation.validate_sim_area_intersects_model(
             effective_recipe.get("sim_area", []), model_dir,
+        )
+        recipe_validation.validate_model_orientation(
+            effective_recipe, model_dir,
         )
     except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
         raise_validation_error(
