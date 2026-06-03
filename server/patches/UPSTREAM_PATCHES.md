@@ -8,7 +8,7 @@ is a separate codebase we don't fork. The patched files are:
 | Sim-host file | Repo snapshot | Patches |
 |---|---|---|
 | `gs_simulation/watermelon/gs_simulation_building.py` | `gs_simulation_building.patched.py` | 1–6 (driver/IO) |
-| `mpm_solver_warp/mpm_solver_warp.py` | `mpm_solver_warp.patched.py` | 7 (surface-collider slip/separate) |
+| `mpm_solver_warp/mpm_solver_warp.py` | `mpm_solver_warp.patched.py` | 7 (surface-collider slip/separate), 9 (boundary clamp/drop) |
 | `mpm_solver_warp/mpm_utils.py` | `mpm_utils.patched.py` | 8 (snow — documented TODO, **no physics change**) |
 
 If you redeploy GaussianFluent (fresh clone, update, etc.), the patches
@@ -34,6 +34,10 @@ grep -c "particle_F\|substep_dt clamp\|output_rot" $SIM_BUILD
 SOLVER="$GSFLUENT_SIM_HOME"/mpm_solver_warp/mpm_solver_warp.py
 grep -c "fix:collider" $SOLVER
 # Expected: 1 if Patch 7 is applied; 0 means slip/separate are still full-stick.
+
+# Patch 9 (boundary clamp/drop) — the grid-escape NaN guard, in the solver:
+grep -c "clamp_particle_x_to_grid" $SOLVER
+# Expected: 3 (1 def + 2 launch sites). 0 means grid escape is unguarded.
 ```
 
 ---
@@ -368,6 +372,76 @@ FCR stress branch). **This patch is documentation only — it changes no physics
 (the patched file is byte-equivalent to upstream except for the comment). It can
 be deployed harmlessly or skipped; it exists so the gap and its requirements are
 version-controlled.
+
+---
+
+## Patch 9 — boundary clamp / drop (grid-escape NaN guard)
+
+**File:** `mpm_solver_warp/mpm_solver_warp.py` — a new module-level
+`clamp_particle_x_to_grid` kernel, a `self.boundary_drop` flag in `__init__`,
+and a launch **after g2p** in both `p2g2p_capture_safe` (~L624) and `p2g2p`
+(~L818).
+
+**Symptom (when missing):** on real models the sim diverges to NaN a few
+frames in — only partial frames get written and the debris "scatters all
+over." One out-of-bounds particle is enough: MLS-MPM's **P2G** scatters each
+particle onto a 3×3×3 grid stencil, so a particle that advects past
+`[0, grid_lim]` writes NaN into the grid; the grid is *shared*, so the next
+**G2P** pulls that NaN back into **every** particle. The whole cloud is NaN
+within ~1 step.
+
+**The wrong fix we tried first:** raise damping (`grid_v_damping_scale < 1`)
+to bleed off velocity so nothing reaches the boundary. It stopped the NaN but
+also **killed the destruction** (the building stopped coming apart), and the
+damping value thrashed across 6 commits including a revert — the project's
+"调参谨慎 / 不回滚" lesson.
+
+**The fix:** after every g2p, clamp each particle's **position** back into the
+grid (margin `3·dx`). Position is clamped *first*, so the P2G index is always
+valid and the grid can never be NaN-corrupted:
+
+```python
+@wp.kernel
+def clamp_particle_x_to_grid(state, lo: float, hi: float, drop: int):
+    p = wp.tid()
+    x = state.particle_x[p]
+    cx = wp.clamp(x[0], lo, hi); cy = wp.clamp(x[1], lo, hi); cz = wp.clamp(x[2], lo, hi)
+    state.particle_x[p] = wp.vec3(cx, cy, cz)
+    if drop == 1 and (cx != x[0] or cy != x[1] or cz != x[2]):
+        state.particle_mass[p] = 0.0                 # deactivate the escaper
+        state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+```
+
+```python
+# launched after g2p in p2g2p_capture_safe and p2g2p:
+_clamp_margin = 3.0 * self.mpm_model.dx
+wp.launch(clamp_particle_x_to_grid, dim=self.n_particles,
+          inputs=[self.mpm_state, _clamp_margin,
+                  self.mpm_model.grid_lim - _clamp_margin, self.boundary_drop])
+```
+
+**Two modes** via `GSFLUENT_BOUNDARY_MODE` (read in `__init__`, inherited from
+the backend env):
+- **drop** (default): a clamped particle *left the box*, so deactivate it —
+  zero mass (stops scattering onto the grid) + zero velocity (stops driving).
+  Debris flies out freely; the wall is invisible.
+- **clamp**: pin the escaper at the wall, still active (debris piles at the
+  boundary). Opt in with `GSFLUENT_BOUNDARY_MODE=clamp`.
+
+**Why this beats damping:** it bounds only *position*, never *motion* — so the
+destruction survives. Damping treated the symptom (suppress velocity); this
+treats the cause (an out-of-range P2G write).
+
+**Result** (verified on real models, frame_num=150): **151 / 151 frames
+finite, 0 bad frames**, and the building still comes apart (scatter ≈ 3.2× the
+frame-0 bbox). All 5 curated scenarios now run with `damping = OFF`, stability
+coming entirely from this clamp.
+
+**Deploying it requires:** drop `mpm_solver_warp.patched.py` over the sim
+host's solver (back up the original), then a **fresh sim process** — the clamp
+launch is baked into the captured CUDA graph, so a cached capture won't pick
+it up. Solver-physics change → human review before deploy. Pairs with an
+enlarged horizontal `sim_area` so the wall sits off-camera.
 
 ---
 
