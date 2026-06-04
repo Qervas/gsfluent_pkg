@@ -38,6 +38,11 @@ grep -c "fix:collider" $SOLVER
 # Patch 9 (boundary clamp/drop) — the grid-escape NaN guard, in the solver:
 grep -c "clamp_particle_x_to_grid" $SOLVER
 # Expected: 3 (1 def + 2 launch sites). 0 means grid escape is unguarded.
+
+# Patch 10 (boundary value sanitize) — the late-divergence NaN guard, in the solver:
+grep -c "Patch 10" $SOLVER
+# Expected: 1 (the sanitize block inside clamp_particle_x_to_grid). 0 means
+# boundary-born non-finite F is unguarded (~21/31 late frames diverge).
 ```
 
 ---
@@ -442,6 +447,71 @@ host's solver (back up the original), then a **fresh sim process** — the clamp
 launch is baked into the captured CUDA graph, so a cached capture won't pick
 it up. Solver-physics change → human review before deploy. Pairs with an
 enlarged horizontal `sim_area` so the wall sits off-camera.
+
+---
+
+## Patch 10 — boundary value sanitize (late-divergence NaN guard)
+
+**File:** `mpm_solver_warp/mpm_solver_warp.py` — extends the **Patch 9**
+`clamp_particle_x_to_grid` kernel body (same kernel, same two launch sites after
+g2p; no signature change). The companion to Patch 9: P9 bounds the grid *index*,
+P10 bounds the *value*.
+
+**Symptom (when missing):** on boundary-heavy scenes (earthquake / watermelon),
+even with Patch 9 the sim still flags **~21/31** late frames as diverged. The
+opening frames are clean; the late frames carry a small, bounded population of
+non-finite particles (~0.2–0.5%), so the fuser drops those frames.
+
+**Root cause (diagnosed 2026-06-04, three instrumented runs).** *Not* `J→0`,
+*not* CFL, *not* the constitutive model — all three were refuted by per-frame
+readback (`minJ` floors ~0.05, `maxV` ~2–7, the Cam-Clay apex `sqrt` is gated
+out by `p_trial ≤ kappa/2`). A per-substep birth-probe showed **100% of the
+first non-finite F is born in G2P** (`F_trial` already NaN, 0 in the return
+map), at the grid-edge corner **`|x| = grid_lim − 3·dx`**, with **`v = C = 0`**.
+So a particle shaken to the domain margin gathers a non-finite velocity gradient
+`new_F` from zero-mass boundary nodes, and `F_trial = (I + new_F·dt)·F` goes NaN
+*before* the constitutive update. Full write-up: `docs/proposals/late-divergence-fix.md`.
+
+**The fix:** in the same post-g2p slot as the position clamp, reset any particle
+whose `F`/`F_trial` is non-finite to an inert resting state:
+
+```python
+# appended to clamp_particle_x_to_grid, after the drop block:
+F = state.particle_F[p]; Ft = state.particle_F_trial[p]
+nonfinite = int(0)
+for i in range(3):
+    for j in range(3):
+        a = F[i, j]; b = Ft[i, j]
+        if (a != a) or (wp.abs(a) > 1.0e30) or (b != b) or (wp.abs(b) > 1.0e30):
+            nonfinite = 1
+if nonfinite == 1:
+    state.particle_F[p]       = wp.mat33(1.0,0,0, 0,1.0,0, 0,0,1.0)
+    state.particle_F_trial[p] = wp.mat33(1.0,0,0, 0,1.0,0, 0,0,1.0)
+    state.particle_v[p]       = wp.vec3(0.0, 0.0, 0.0)
+    state.particle_C[p]       = wp.mat33(0.0)
+    state.particle_stress[p]  = wp.mat33(0.0)
+```
+
+**Why this is safe:** it fires *only* on an already-non-finite particle, so a
+clean run is byte-unchanged. The reset particles were already `v = C = 0`
+(dynamically dead against the wall), so resetting `F → I` is physically inert.
+Bounds the *value* the way Patch 9 bounds the *index* — neither touches the bulk
+dynamics, so the destruction survives.
+
+**Why not fix the constitutive model:** the original plan targeted Cam-Clay /
+`neoHookeanBoarden` / a `J→0` floor. The diagnostics proved that would have been
+the wrong, riskier lever — the NaN is on the *grid* side, not the material side.
+
+**Result** (verified on the production `graph_capture` path, `b5036643 ·
+earthquake · watermelon`, frame_num=150): **0 / 150 non-finite frames** (was
+~130 bad), 0 non-finite positions, `minJ` finite through heavy compaction,
+collapse renders cleanly with no visible boundary artifact.
+
+**Deploying it requires:** drop `mpm_solver_warp.patched.py` over the sim host's
+solver (back up the original) + a **fresh sim process** — like Patch 9 the
+sanitize is baked into the captured CUDA graph, so a cached capture won't pick
+it up (each sim subprocess re-imports the solver, so new runs get it without an
+API restart). Solver-physics change → human review before deploy.
 
 ---
 
