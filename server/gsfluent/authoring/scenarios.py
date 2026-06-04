@@ -74,7 +74,13 @@ SCENARIOS: dict[str, dict] = {
     # reference; this reproduces it through the composer.                 #
     # ------------------------------------------------------------------ #
     "earthquake": {
-        "frame_num": 150,            # 5.0 s @ 0.03 — full collapse window
+        "frame_num": 60,             # 1.8 s @ 0.03 — clean-collapse window. The
+                                     # bulk stays compact through ~frame 60
+                                     # (p99 spread ~[67,36,27]); past ~frame 80
+                                     # the debris blows out to fill the domain and
+                                     # piles on the walls. Cut here until the
+                                     # boundary is made open/free-flight. (150 was
+                                     # the full window; see docs/proposals/late-divergence-fix.md)
         "frame_dt": 0.03,
         "gravity": -15.0,            # stronger g helps the soft body fall
         "base": "driven",
