@@ -54,6 +54,12 @@ def parse_header_bytes(buf: bytes) -> dict:
     bbox_min = np.frombuffer(buf[20:32], dtype=np.float32).copy()
     bbox_max = np.frombuffer(buf[32:44], dtype=np.float32).copy()
     static_offset, static_size = struct.unpack_from("<QI", buf, 44)
+    # Reserved region (56..80). First 12 bytes are an OPTIONAL death-channel
+    # pointer: death_offset (Q@56) + death_size (I@64). death_size == 0 means
+    # "no death channel" (older files wrote \x00*24 here, so this is backward
+    # compatible — they parse as absent). See encode_sequence_dir / the
+    # `death_frame[]` block for the monotonic per-splat visibility cutoff.
+    death_offset, death_size = struct.unpack_from("<QI", buf, 56)
     frame_index = []
     frame_flags: list[int] = []
     for i in range(n_frames):
@@ -64,8 +70,54 @@ def parse_header_bytes(buf: bytes) -> dict:
         "version": version, "n_splats": n_splats, "n_frames": n_frames,
         "fps_hint": fps_hint, "bbox_min": bbox_min, "bbox_max": bbox_max,
         "static_offset": static_offset, "static_size": static_size,
+        "death_offset": death_offset, "death_size": death_size,
         "frame_index": frame_index, "frame_flags": frame_flags,
     }
+
+
+# Sentinel death-frame value: a splat with this value never dies (stays visible
+# for the whole clip). uint16 max; n_frames is always far below this.
+DEATH_NEVER = 0xFFFF
+
+
+def compute_death_frames(
+    xyz_all: np.ndarray, kill_radius: float,
+) -> np.ndarray | None:
+    """Per-splat monotonic visibility cutoff for "debris dies at the boundary".
+
+    A splat dies at the first frame `t` where its distance from the frame-0
+    centroid exceeds `kill_radius * R0`, where R0 is a robust frame-0 radius
+    (95th percentile of ‖pos − centroid₀‖ at frame 0). Debris that flies more
+    than `kill_radius` building-radii away is treated as having left the scene.
+
+    Args:
+        xyz_all: (n_frames, n_splats, 3) float positions (already sanitized).
+        kill_radius: K multiple. <= 0 disables the channel (returns None).
+
+    Returns:
+        (n_splats,) uint16 death frame per splat (DEATH_NEVER = never), or None
+        when disabled. The cutoff is the FIRST exceedance along time, so it is
+        monotonic: once dead, the frontend keeps the splat hidden.
+    """
+    if kill_radius <= 0.0:
+        return None
+    n_frames, n_splats, _ = xyz_all.shape
+    centroid0 = xyz_all[0].mean(axis=0)
+    r0 = np.linalg.norm(xyz_all[0] - centroid0, axis=1)
+    radius0 = float(np.percentile(r0, 95.0))
+    if not np.isfinite(radius0) or radius0 <= 0.0:
+        return None
+    threshold = kill_radius * radius0
+    # (n_frames, n_splats) distance from the frame-0 centroid each frame.
+    dist = np.linalg.norm(xyz_all - centroid0[None, None, :], axis=2)
+    exceeded = dist > threshold                       # (n_frames, n_splats)
+    ever = exceeded.any(axis=0)                        # (n_splats,)
+    # argmax returns the FIRST True index along time (0 when none, so gate on
+    # `ever`). Splats that never exceed get the never-dies sentinel.
+    first = exceeded.argmax(axis=0).astype(np.int64)   # (n_splats,)
+    death = np.where(ever, first, DEATH_NEVER)
+    death = np.clip(death, 0, DEATH_NEVER).astype(np.uint16)
+    return death
 
 
 def read_frame_payload_raw_i16(
@@ -341,6 +393,25 @@ class GSQCodec:
 
         frame_chunks, frame_flags = _v2_frame_payloads(xyz_q, quat_q, cctx)
 
+        # Optional death channel ("debris dies at the boundary"). Disabled by
+        # default (kill_radius=0) -> no block, byte-identical to prior output.
+        import os
+        try:
+            kill_radius = float(os.environ.get("GSFLUENT_GSQ_KILL_RADIUS", "0"))
+        except ValueError:
+            kill_radius = 0.0
+        death = compute_death_frames(xyz_all, kill_radius)
+        death_compressed = b""
+        if death is not None:
+            death_compressed = cctx.compress(death.tobytes())
+            n_dead = int((death != DEATH_NEVER).sum())
+            on_event.emit(
+                "encode.death_channel",
+                kill_radius=kill_radius,
+                n_dead=n_dead,
+                n_splats=n_splats,
+            )
+
         static_offset = HEADER_SIZE + n_frames * INDEX_ENTRY_SIZE
         static_size = len(static_compressed)
         frame0_offset = static_offset + static_size
@@ -350,6 +421,10 @@ class GSQCodec:
         for c, fl in zip(frame_chunks, frame_flags):
             index_entries.append((off, len(c), fl))
             off += len(c)
+        # Death block (if any) lands at EOF, after all frame chunks, so every
+        # existing offset above is unchanged -> backward compatible.
+        death_offset = off if death_compressed else 0
+        death_size = len(death_compressed)
 
         # Atomic write via tmp + replace.
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,7 +437,9 @@ class GSQCodec:
                 f.write(bbox_min.tobytes())
                 f.write(bbox_max.tobytes())
                 f.write(struct.pack("<QI", static_offset, static_size))
-                f.write(b"\x00" * 24)
+                # Reserved region (24B): death-channel pointer (12B) + pad (12B).
+                f.write(struct.pack("<QI", death_offset, death_size))
+                f.write(b"\x00" * 12)
                 assert f.tell() == HEADER_SIZE, f"header drift: {f.tell()}"
                 for off, sz, fl in index_entries:
                     f.write(struct.pack("<QII", off, sz, fl))
@@ -370,6 +447,9 @@ class GSQCodec:
                 f.write(static_compressed)
                 for c in frame_chunks:
                     f.write(c)
+                if death_compressed:
+                    assert f.tell() == death_offset, "death offset drift"
+                    f.write(death_compressed)
             import os
             os.replace(str(tmp_path), str(out_path))
         except Exception:
@@ -452,9 +532,26 @@ class GSQCodec:
 
         frame_chunks, frame_flags = _v2_frame_payloads(xyz_q, quat_q, cctx)
 
+        # Optional death channel (see encode_sequence_dir). Disabled by default.
+        import os
+        try:
+            kill_radius = float(os.environ.get("GSFLUENT_GSQ_KILL_RADIUS", "0"))
+        except ValueError:
+            kill_radius = 0.0
+        death = compute_death_frames(xyz_all, kill_radius)
+        death_compressed = cctx.compress(death.tobytes()) if death is not None else b""
+
         static_offset = HEADER_SIZE + n_frames * INDEX_ENTRY_SIZE
         static_size = len(static_compressed)
         frame0_offset = static_offset + static_size
+
+        off = frame0_offset
+        index_blob = b""
+        for c, fl in zip(frame_chunks, frame_flags):
+            index_blob += struct.pack("<QII", off, len(c), fl)
+            off += len(c)
+        death_offset = off if death_compressed else 0
+        death_size = len(death_compressed)
 
         out.write(MAGIC)
         out.write(struct.pack("<III", VERSION, n_splats, n_frames))
@@ -462,15 +559,15 @@ class GSQCodec:
         out.write(bbox_min.tobytes())
         out.write(bbox_max.tobytes())
         out.write(struct.pack("<QI", static_offset, static_size))
-        out.write(b"\x00" * 24)
+        out.write(struct.pack("<QI", death_offset, death_size))
+        out.write(b"\x00" * 12)
 
-        off = frame0_offset
-        for c, fl in zip(frame_chunks, frame_flags):
-            out.write(struct.pack("<QII", off, len(c), fl))
-            off += len(c)
+        out.write(index_blob)
         out.write(static_compressed)
         for c in frame_chunks:
             out.write(c)
+        if death_compressed:
+            out.write(death_compressed)
 
         on_event.emit("encode.completed", n_frames=n_frames, n_splats=n_splats)
         return CacheMetadata(

@@ -8,6 +8,7 @@ const st: GsqStatic = {
   rgb: new Float32Array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
   opacity: new Float32Array([0.7, 0.8]),
   scales: new Float32Array([0.01, 0.02, 0.03, 0.04, 0.05, 0.06]),
+  deathFrame: null,
 };
 const frame: GsqFrame = {
   positions: new Float32Array([1, 2, 3, 4, 5, 6]),
@@ -49,5 +50,22 @@ describe("splatArgs", () => {
     const out = makeSplatArgs();
     const r = splatArgs(frame, st, 0, out);
     expect(r).toBe(out);
+  });
+
+  it("culls a splat at/after its death frame (opacity -> 0)", () => {
+    // splat 1 dies at frame 3; splat 0 immortal (sentinel).
+    const stD: GsqStatic = { ...st, deathFrame: new Uint16Array([0xffff, 3]) };
+    // before death: full opacity.
+    expect(splatArgs(frame, stD, 1, makeSplatArgs(), 2).opacity).toBeCloseTo(0.8);
+    // at and after death: hidden.
+    expect(splatArgs(frame, stD, 1, makeSplatArgs(), 3).opacity).toBe(0);
+    expect(splatArgs(frame, stD, 1, makeSplatArgs(), 9).opacity).toBe(0);
+    // the immortal splat is never culled.
+    expect(splatArgs(frame, stD, 0, makeSplatArgs(), 9).opacity).toBeCloseTo(0.7);
+  });
+
+  it("defaults to visible when no frame index / no death channel", () => {
+    // frameIdx defaults to 0, deathFrame null -> static opacity unchanged.
+    expect(splatArgs(frame, st, 1, makeSplatArgs()).opacity).toBeCloseTo(0.8);
   });
 });

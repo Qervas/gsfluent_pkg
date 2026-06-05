@@ -20,7 +20,7 @@ export function makeSplatArgs(): SplatArgs {
 }
 
 export function splatArgs(
-  frame: GsqFrame, st: GsqStatic, i: number, out: SplatArgs,
+  frame: GsqFrame, st: GsqStatic, i: number, out: SplatArgs, frameIdx = 0,
 ): SplatArgs {
   const p3 = i * 3;
   const q4 = i * 4;
@@ -35,7 +35,11 @@ export function splatArgs(
   out.quat[1] = frame.quats[q4 + 2];
   out.quat[2] = frame.quats[q4 + 3];
   out.quat[3] = frame.quats[q4 + 0];
-  out.opacity = st.opacity[i];
+  // Debris dies at the boundary: once the playhead reaches a splat's death
+  // frame it's been flung off-screen, so render it fully transparent. Cheap
+  // monotone lookup; no death channel -> every splat stays visible.
+  out.opacity =
+    st.deathFrame !== null && frameIdx >= st.deathFrame[i] ? 0 : st.opacity[i];
   out.color[0] = st.rgb[p3];
   out.color[1] = st.rgb[p3 + 1];
   out.color[2] = st.rgb[p3 + 2];

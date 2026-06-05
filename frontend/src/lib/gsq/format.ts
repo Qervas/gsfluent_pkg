@@ -11,7 +11,9 @@
  *    32  3xf32 bboxMax
  *    44  u64 staticOffset
  *    52  u32 staticSize
- *    56  24 bytes reserved
+ *    56  u64 deathOffset   (optional death channel; 0 = absent)
+ *    64  u32 deathSize     (0 = absent)
+ *    68  12 bytes reserved
  *    80  frame index: nFrames x <QII> = (offset u64, size u32, flags u32)
  */
 export const MAGIC = "GSQ1";
@@ -33,6 +35,11 @@ export interface GsqHeader {
   bboxMax: Float32Array; // length 3
   staticOffset: number;
   staticSize: number;
+  /** Optional death channel: per-splat monotonic visibility cutoff
+   *  (zstd'd uint16[nSplats]). deathSize === 0 means absent (older files /
+   *  kill-radius disabled) — the decoder then treats every splat as immortal. */
+  deathOffset: number;
+  deathSize: number;
   frames: FrameEntry[];
 }
 
@@ -62,6 +69,10 @@ export function parseHeader(u8: Uint8Array): GsqHeader {
   }
   const staticOffset = Number(dv.getBigUint64(44, true));
   const staticSize = dv.getUint32(52, true);
+  // Reserved region (56..80). First 12 bytes = optional death-channel pointer.
+  // Older files wrote zeros here, so deathSize === 0 reads as "absent".
+  const deathOffset = Number(dv.getBigUint64(56, true));
+  const deathSize = dv.getUint32(64, true);
 
   const indexEnd = HEADER_SIZE + nFrames * INDEX_ENTRY_SIZE;
   if (u8.byteLength < indexEnd) {
@@ -78,6 +89,6 @@ export function parseHeader(u8: Uint8Array): GsqHeader {
   }
   return {
     version, nSplats, nFrames, fpsHint, bboxMin, bboxMax,
-    staticOffset, staticSize, frames,
+    staticOffset, staticSize, deathOffset, deathSize, frames,
   };
 }
