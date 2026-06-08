@@ -34,6 +34,24 @@ def test_wall_time_cap_rejects_too_long() -> None:
     assert "wall" in str(ei.value).lower()
 
 
+def test_wall_time_rejects_non_integer() -> None:
+    cfg = CapConfig(max_wall_time_sec=3600)
+    recipe = {"particle_count": 100_000, "wall_time_sec": "soon"}
+    with pytest.raises(CapExceededError) as ei:
+        check_recipe_caps(recipe, cfg)
+    assert "wall" in str(ei.value).lower()
+    assert "integer" in str(ei.value).lower()
+
+
+def test_wall_time_rejects_non_positive() -> None:
+    cfg = CapConfig(max_wall_time_sec=3600)
+    recipe = {"particle_count": 100_000, "wall_time_sec": 0}
+    with pytest.raises(CapExceededError) as ei:
+        check_recipe_caps(recipe, cfg)
+    assert "wall" in str(ei.value).lower()
+    assert "> 0" in str(ei.value)
+
+
 def test_recipe_size_cap_rejects_huge() -> None:
     cfg = CapConfig(max_recipe_bytes=1024)
     recipe = {"particle_count": 100, "wall_time_sec": 60, "noise": "x" * 5000}
@@ -74,3 +92,9 @@ def test_cap_config_from_env_reads_overrides(monkeypatch) -> None:
     assert cfg.max_particle_count == 1_000_000
     assert cfg.max_wall_time_sec == 7200
     assert cfg.max_recipe_bytes == 65536
+
+
+def test_cap_config_from_env_rejects_invalid_int(monkeypatch) -> None:
+    monkeypatch.setenv("GSFLUENT_MAX_WALL_TIME_SEC", "soon")
+    with pytest.raises(ValueError, match="GSFLUENT_MAX_WALL_TIME_SEC"):
+        CapConfig.from_env()

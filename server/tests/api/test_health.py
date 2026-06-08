@@ -2,8 +2,8 @@
 
 The endpoint reports five derived signals plus a top-level status discriminator.
 Tests cover: (1) Pydantic contract shape, (2) status derivation matrix,
-(3) graceful degradation when nvidia-smi is absent, (4) RunStateStore
-integration for last_successful_run_at, (5) disk_free_pct math.
+(3) graceful degradation when nvidia-smi is absent or disk is low,
+(4) RunStateStore integration for last_successful_run_at, (5) disk_free_pct math.
 """
 from __future__ import annotations
 
@@ -104,13 +104,18 @@ def test_status_down_when_sim_home_missing(client: TestClient, cfg: AppConfig) -
     assert body["sim_home_exists"] is False
 
 
-def test_status_down_when_disk_below_5_pct(client: TestClient) -> None:
-    """disk_free_pct < 5 -> down (operator alert)."""
-    with patch("gsfluent.api.health._disk_free_pct", return_value=2.0):
-        r = client.get("/api/health")
-        body = r.json()
-        assert body["status"] == "down"
-        assert body["disk_free_pct"] == 2.0
+def test_status_degraded_when_disk_below_5_pct(client: TestClient) -> None:
+    """disk_free_pct < 5 -> degraded, not down.
+
+    Low disk is an operator issue, but restarting the API will not free disk.
+    Keep the watchdog alive and let monitoring surface the degraded state.
+    """
+    with patch("gsfluent.api.health._gpu_reachable", return_value=True):
+        with patch("gsfluent.api.health._disk_free_pct", return_value=2.0):
+            r = client.get("/api/health")
+            body = r.json()
+            assert body["status"] == "degraded"
+            assert body["disk_free_pct"] == 2.0
 
 
 def test_status_degraded_when_gpu_unreachable(client: TestClient) -> None:

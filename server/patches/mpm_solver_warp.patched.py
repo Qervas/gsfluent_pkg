@@ -40,6 +40,34 @@ def clamp_particle_x_to_grid(state: MPMStateStruct, lo: float, hi: float, drop: 
         if cx != x[0] or cy != x[1] or cz != x[2]:
             state.particle_mass[p] = 0.0
             state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+    # [Patch 10] Value-domain sanitize (companion to the position clamp above).
+    # Diagnosed root cause of late-frame divergence on boundary-heavy scenes
+    # (e.g. earthquake/watermelon, 2026-06-04): a particle shaken to the grid-
+    # edge margin gathers a velocity gradient from zero-mass boundary nodes in
+    # G2P, so F_trial = (I + grad_v*dt)*F goes non-finite -- born on the GRID
+    # side, BEFORE any constitutive update (J does NOT reach 0; v/C ~ 0 there).
+    # The position clamp above bounds the grid INDEX; this bounds the VALUE.
+    # Reset such a particle to an inert resting state so the NaN cannot enter
+    # the next P2G / compute_stress / output. Same post-g2p slot, so it is
+    # baked into the captured CUDA graph just like the clamp. Only fires on an
+    # already-non-finite particle, so a clean run is byte-unchanged.
+    F = state.particle_F[p]
+    Ft = state.particle_F_trial[p]
+    nonfinite = int(0)
+    for i in range(3):
+        for j in range(3):
+            a = F[i, j]
+            b = Ft[i, j]
+            if (a != a) or (wp.abs(a) > 1.0e30) or (b != b) or (wp.abs(b) > 1.0e30):
+                nonfinite = 1
+    if nonfinite == 1:
+        I3 = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        Z3 = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        state.particle_F[p] = I3
+        state.particle_F_trial[p] = I3
+        state.particle_v[p] = wp.vec3(0.0, 0.0, 0.0)
+        state.particle_C[p] = Z3
+        state.particle_stress[p] = Z3
 
 
 class MPM_Simulator_WARP:

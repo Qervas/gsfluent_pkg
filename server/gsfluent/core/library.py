@@ -34,11 +34,10 @@ from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
-from ..server import PKG_ROOT
+from .._paths import LIBRARY as LIBRARY_ROOT
 
 _log = logging.getLogger(__name__)
 
-LIBRARY_ROOT = PKG_ROOT / "work" / "library"
 MODELS_DIR = LIBRARY_ROOT / "models"
 SEQUENCES_DIR = LIBRARY_ROOT / "sequences"
 

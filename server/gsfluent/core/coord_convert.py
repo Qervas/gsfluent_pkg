@@ -18,36 +18,49 @@ Rx(+pi/2) maps:
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 
 
-def rotate_positions_y_up_to_z_up(xyz: np.ndarray) -> np.ndarray:
-    """Apply Rx(+pi/2) to an (N, 3) positions array. Returns a NEW array.
+def _axis_rotation_matrix(axis: str, degrees: float) -> np.ndarray:
+    rad = np.deg2rad(degrees)
+    c = float(np.cos(rad))
+    s = float(np.sin(rad))
+    if axis == "x":
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float64)
+    if axis == "y":
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float64)
+    if axis == "z":
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float64)
+    raise ValueError(f"unknown rotation axis {axis!r}")
 
-    Math: (x, y, z) -> (x, -z, y). dtype preserved.
-    +Y (sky in Y-up) -> +Z (sky in Z-up).
-    """
-    out = np.empty_like(xyz)
-    out[:, 0] = xyz[:, 0]
-    out[:, 1] = -xyz[:, 2]
-    out[:, 2] = xyz[:, 1]
-    return out
+
+def _axis_quaternion(axis: str, degrees: float) -> tuple[float, float, float, float]:
+    rad = np.deg2rad(degrees)
+    c = float(np.cos(rad / 2.0))
+    s = float(np.sin(rad / 2.0))
+    if axis == "x":
+        return c, s, 0.0, 0.0
+    if axis == "y":
+        return c, 0.0, s, 0.0
+    if axis == "z":
+        return c, 0.0, 0.0, s
+    raise ValueError(f"unknown rotation axis {axis!r}")
 
 
-def rotate_quaternions_y_up_to_z_up(quats_wxyz: np.ndarray) -> np.ndarray:
-    """Compose each quaternion with the Rx(+pi/2) axis rotation.
+def rotate_positions_axis(xyz: np.ndarray, axis: str, degrees: float) -> np.ndarray:
+    """Apply a right-handed axis rotation to an (N, 3) positions array."""
+    r = _axis_rotation_matrix(axis, degrees)
+    return (xyz.astype(np.float64) @ r.T).astype(xyz.dtype, copy=False)
 
-    Input/output are (N, 4) arrays in (w, x, y, z) order -- matching the
-    3DGS .ply convention (rot_0=w, rot_1=x, rot_2=y, rot_3=z).
 
-    Hamilton product: q_new = q_axis * q_old, where
-      q_axis = (cos(+pi/4), sin(+pi/4)*1, 0, 0) = (sqrt(2)/2, sqrt(2)/2, 0, 0)
-    """
-    c = float(np.cos(np.pi / 4))
-    s = float(np.sin(np.pi / 4))
-    wA, xA, yA, zA = c, s, 0.0, 0.0
+def rotate_quaternions_axis(
+    quats_wxyz: np.ndarray, axis: str, degrees: float,
+) -> np.ndarray:
+    """Compose each (w, x, y, z) quaternion with an axis rotation."""
+    wA, xA, yA, zA = _axis_quaternion(axis, degrees)
     wB = quats_wxyz[:, 0]
     xB = quats_wxyz[:, 1]
     yB = quats_wxyz[:, 2]
@@ -59,8 +72,37 @@ def rotate_quaternions_y_up_to_z_up(quats_wxyz: np.ndarray) -> np.ndarray:
     return np.stack([new_w, new_x, new_y, new_z], axis=1).astype(quats_wxyz.dtype)
 
 
+def _pos(axis: str, degrees: float) -> Callable[[np.ndarray], np.ndarray]:
+    return lambda xyz: rotate_positions_axis(xyz, axis, degrees)
+
+
+def _quat(axis: str, degrees: float) -> Callable[[np.ndarray], np.ndarray]:
+    return lambda q: rotate_quaternions_axis(q, axis, degrees)
+
+
+def rotate_positions_y_up_to_z_up(xyz: np.ndarray) -> np.ndarray:
+    """Apply Rx(+pi/2) to an (N, 3) positions array. Returns a NEW array.
+
+    Math: (x, y, z) -> (x, -z, y). dtype preserved.
+    +Y (sky in Y-up) -> +Z (sky in Z-up).
+    """
+    return rotate_positions_axis(xyz, "x", 90)
+
+
+def rotate_quaternions_y_up_to_z_up(quats_wxyz: np.ndarray) -> np.ndarray:
+    """Compose each quaternion with the Rx(+pi/2) axis rotation.
+
+    Input/output are (N, 4) arrays in (w, x, y, z) order -- matching the
+    3DGS .ply convention (rot_0=w, rot_1=x, rot_2=y, rot_3=z).
+
+    Hamilton product: q_new = q_axis * q_old, where
+      q_axis = (cos(+pi/4), sin(+pi/4)*1, 0, 0) = (sqrt(2)/2, sqrt(2)/2, 0, 0)
+    """
+    return rotate_quaternions_axis(quats_wxyz, "x", 90)
+
+
 def rotate_normals_y_up_to_z_up(nxyz: np.ndarray) -> np.ndarray:
-    """Apply Rx(-pi/2) to (N, 3) normals -- same math as positions.
+    """Apply Rx(+pi/2) to (N, 3) normals -- same math as positions.
     3DGS plys carry zero normals in practice; defensive but cheap."""
     return rotate_positions_y_up_to_z_up(nxyz)
 
@@ -70,11 +112,7 @@ def flip_180_positions(xyz: np.ndarray) -> np.ndarray:
 
     Use to right an upside-down model (top/bottom + front/back swap), e.g.
     after a Y-up -> Z-up convert landed the model head-down."""
-    out = np.empty_like(xyz)
-    out[:, 0] = xyz[:, 0]
-    out[:, 1] = -xyz[:, 1]
-    out[:, 2] = -xyz[:, 2]
-    return out
+    return rotate_positions_axis(xyz, "x", 180)
 
 
 def flip_180_quaternions(quats_wxyz: np.ndarray) -> np.ndarray:
@@ -82,17 +120,23 @@ def flip_180_quaternions(quats_wxyz: np.ndarray) -> np.ndarray:
 
     q_new = q_axis * q_old, q_axis = (cos(pi/2), sin(pi/2), 0, 0) = (0, 1, 0, 0).
     Reduces to: (w, x, y, z) -> (-x, w, -z, y)."""
-    wB = quats_wxyz[:, 0]
-    xB = quats_wxyz[:, 1]
-    yB = quats_wxyz[:, 2]
-    zB = quats_wxyz[:, 3]
-    return np.stack([-xB, wB, -zB, yB], axis=1).astype(quats_wxyz.dtype)
+    return rotate_quaternions_axis(quats_wxyz, "x", 180)
 
 
 # Named orientation transforms the reorient API exposes. Each pairs a
 # position/normal rotation with its matching quaternion composition — keep
 # the two in lockstep, or every splat ends up tilted relative to its center.
 _TRANSFORMS = {
+    "rotate_x_pos_90": (_pos("x", 90), _quat("x", 90)),
+    "rotate_x_neg_90": (_pos("x", -90), _quat("x", -90)),
+    "rotate_y_pos_90": (_pos("y", 90), _quat("y", 90)),
+    "rotate_y_neg_90": (_pos("y", -90), _quat("y", -90)),
+    "rotate_z_pos_90": (_pos("z", 90), _quat("z", 90)),
+    "rotate_z_neg_90": (_pos("z", -90), _quat("z", -90)),
+    "rotate_x_180": (_pos("x", 180), _quat("x", 180)),
+    "rotate_y_180": (_pos("y", 180), _quat("y", 180)),
+    "rotate_z_180": (_pos("z", 180), _quat("z", 180)),
+    # Back-compatible aliases used by the import path and older frontend.
     "y_up_to_z_up": (rotate_positions_y_up_to_z_up, rotate_quaternions_y_up_to_z_up),
     "flip_180": (flip_180_positions, flip_180_quaternions),
 }

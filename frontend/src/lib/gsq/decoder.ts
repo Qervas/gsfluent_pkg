@@ -16,6 +16,10 @@ export interface GsqStatic {
   rgb: Float32Array; // n*3, 0..1
   opacity: Float32Array; // n, 0..1
   scales: Float32Array; // n*3, stddev
+  /** Per-splat monotonic visibility cutoff: splat i is hidden once the playhead
+   *  reaches frame deathFrame[i] (debris that flew off-screen). null when the
+   *  .gsq carries no death channel — every splat is then immortal. */
+  deathFrame: Uint16Array | null;
 }
 
 export interface GsqFrame {
@@ -72,7 +76,23 @@ export class GsqDecoder {
       bboxMin: this.header.bboxMin,
       bboxMax: this.header.bboxMax,
       rgb, opacity, scales,
+      deathFrame: this.decodeDeath(),
     };
+  }
+
+  /** Decompress the optional death channel into uint16[nSplats], or null when
+   *  absent (deathSize === 0). The block is a separate zstd chunk at EOF. */
+  private decodeDeath(): Uint16Array | null {
+    const { deathOffset, deathSize, nSplats } = this.header;
+    if (!deathSize) return null;
+    const raw = this.chunk(deathOffset, deathSize);
+    // raw is a uint8 view; reinterpret as little-endian uint16[nSplats]. Copy
+    // through a fresh buffer so alignment is guaranteed regardless of subarray
+    // byteOffset.
+    const u16 = new Uint16Array(nSplats);
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    for (let i = 0; i < nSplats; i++) u16[i] = dv.getUint16(i * 2, true);
+    return u16;
   }
 
   /** Decompress one stored chunk into its (xyz, quat) int16 arrays. Absolute

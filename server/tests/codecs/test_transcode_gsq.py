@@ -25,7 +25,6 @@ from gsfluent.core.codecs.gsq import (
 )
 from tools.transcode_gsq import transcode_to_v2
 
-
 # ---------------------------------------------------------------------------
 # V1 fixture builder
 # ---------------------------------------------------------------------------

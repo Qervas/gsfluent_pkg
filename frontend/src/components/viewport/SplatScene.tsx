@@ -102,7 +102,7 @@ export function SplatScene() {
       const f = decoder.decodeFrame(idx);
       const a = argRef.current;
       for (let i = 0; i < st.nSplats; i++) {
-        splatArgs(f, st, i, a);
+        splatArgs(f, st, i, a, idx);
         vC.current.set(a.center[0], a.center[1], a.center[2]);
         vS.current.set(a.scales[0], a.scales[1], a.scales[2]);
         vQ.current.set(a.quat[0], a.quat[1], a.quat[2], a.quat[3]);

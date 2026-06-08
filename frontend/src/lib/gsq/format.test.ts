@@ -40,4 +40,15 @@ describe("parseHeader", () => {
   it("rejects a bad magic", () => {
     expect(() => parseHeader(new Uint8Array(80))).toThrow(/not a \.gsq/);
   });
+
+  it("reads the death-channel pointer (death fixture) and absence (drift)", () => {
+    const d = parseHeader(fixtureBytes("death"));
+    expect(d.deathSize).toBeGreaterThan(0);
+    expect(d.deathOffset).toBeGreaterThan(0);
+    expect(d.deathOffset + d.deathSize).toBeLessThanOrEqual(
+      fixtureBytes("death").byteLength,
+    );
+    // legacy fixtures carry no death channel.
+    expect(parseHeader(fixtureBytes("drift")).deathSize).toBe(0);
+  });
 });

@@ -22,10 +22,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from .._paths import CACHE_SPLATS, PKG_ROOT
 from ..core import library as lib
 from ..core.library import Sequence, import_sequence
 from ..protocols.runs import RunManager
-from ..server import PKG_ROOT
 
 # Frame-serving handler is shared with /api/runs/{name}/frame/{idx}.ply
 # so the two URL shapes return the exact same bytes for the same args.
@@ -40,7 +40,7 @@ router = APIRouter(prefix="/api/sequences", tags=["sequences"])
 # `server/tools/pack_splats.py`. The server holds the canonical copy and the
 # in-browser SPA renderer downloads it on demand (GET .../cache/splats.gsq,
 # Range-resumable) and plays it back locally.
-_SPLAT_CACHE = PKG_ROOT / "work" / "cache" / "splats"
+_SPLAT_CACHE = CACHE_SPLATS
 
 
 def _sequence_dict(seq: Sequence, *, active_names: set[str] | None = None) -> dict:

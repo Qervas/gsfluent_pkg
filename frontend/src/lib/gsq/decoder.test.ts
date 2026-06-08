@@ -73,4 +73,15 @@ describe("GsqDecoder", () => {
     const d = new GsqDecoder(bytes("wrap"));
     expect(() => d.decodeFrame(99)).toThrow(/range/i);
   });
+
+  it("decodes the death channel to match the manifest (death)", () => {
+    const d = new GsqDecoder(bytes("death"));
+    const m = manifest("death");
+    expect(d.static.deathFrame).not.toBeNull();
+    expect(Array.from(d.static.deathFrame!)).toEqual(m.deathFrame);
+  });
+
+  it("has a null death channel when absent (drift)", () => {
+    expect(new GsqDecoder(bytes("drift")).static.deathFrame).toBeNull();
+  });
 });

@@ -9,11 +9,14 @@ import pytest
 from plyfile import PlyData, PlyElement
 
 from gsfluent.core.codecs.gsq import (
+    DEATH_NEVER,
     HEADER_SIZE,
     INDEX_ENTRY_SIZE,
     MAGIC,
     GSQCodec,
+    compute_death_frames,
     decode_frame_raw_i16,
+    parse_header_bytes,
 )
 from gsfluent.protocols.cache import (
     CacheCodec,
@@ -208,3 +211,91 @@ def test_encode_emits_progress_events(tmp_path: Path) -> None:
     names = {e for e, _ in events}
     assert "encode.started" in names
     assert "encode.completed" in names
+
+
+# ---- death channel ("debris dies at the boundary") -------------------------
+
+def _write_flyaway_frame(
+    path: Path, *, n: int, frame: int, fly_idx: int, step: float,
+) -> None:
+    """A frame where splat `fly_idx` drifts +step per frame on +x; the rest sit
+    in a tight unit cube around the origin. By a late frame the flyaway splat is
+    far outside the frame-0 radius."""
+    fields = [
+        ("x", "f4"), ("y", "f4"), ("z", "f4"),
+        ("f_dc_0", "f4"), ("f_dc_1", "f4"), ("f_dc_2", "f4"),
+        ("opacity", "f4"),
+        ("scale_0", "f4"), ("scale_1", "f4"), ("scale_2", "f4"),
+        ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
+    ]
+    verts = np.zeros(n, dtype=fields)
+    rng = np.random.default_rng(0)
+    base = rng.uniform(-0.5, 0.5, (n, 3)).astype(np.float32)
+    verts["x"] = base[:, 0]
+    verts["y"] = base[:, 1]
+    verts["z"] = base[:, 2]
+    verts["x"][fly_idx] = base[fly_idx, 0] + step * frame
+    verts["opacity"] = 1.0
+    verts["scale_0"] = verts["scale_1"] = verts["scale_2"] = -1.0
+    verts["rot_0"] = 1.0
+    PlyData([PlyElement.describe(verts, "vertex")], text=False).write(path)
+
+
+def test_compute_death_frames_disabled_by_default() -> None:
+    xyz = np.random.default_rng(0).uniform(-1, 1, (5, 8, 3)).astype(np.float32)
+    assert compute_death_frames(xyz, 0.0) is None
+    assert compute_death_frames(xyz, -1.0) is None
+
+
+def test_compute_death_frames_flags_flyaway_monotonically() -> None:
+    n, n_frames, fly = 8, 12, 3
+    xyz = np.zeros((n_frames, n, 3), dtype=np.float32)
+    rng = np.random.default_rng(0)
+    base = rng.uniform(-0.5, 0.5, (n, 3)).astype(np.float32)
+    for t in range(n_frames):
+        xyz[t] = base
+        xyz[t, fly, 0] = base[fly, 0] + 0.5 * t  # drifts far on +x
+    death = compute_death_frames(xyz, kill_radius=2.0)
+    assert death is not None and death.dtype == np.uint16
+    # only the flyaway splat dies; it dies once it crosses the threshold, and
+    # every other splat stays alive forever.
+    dead = np.where(death != DEATH_NEVER)[0]
+    assert dead.tolist() == [fly]
+    assert 0 < int(death[fly]) < n_frames
+
+
+def test_encode_embeds_death_block_when_enabled(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    seq_dir = tmp_path / "demo" / "frames"
+    seq_dir.mkdir(parents=True)
+    n, n_frames = 12, 16
+    for i in range(n_frames):
+        _write_flyaway_frame(
+            seq_dir / f"frame_{i:04d}.ply", n=n, frame=i, fly_idx=2, step=0.6,
+        )
+    out = tmp_path / "demo.gsq"
+
+    # Disabled -> no death block.
+    monkeypatch.delenv("GSFLUENT_GSQ_KILL_RADIUS", raising=False)
+    GSQCodec().encode_sequence_dir(seq_dir, out, on_event=_NullEmitter())
+    h = parse_header_bytes(out.read_bytes())
+    assert h["death_size"] == 0 and h["death_offset"] == 0
+
+    # Enabled -> death block present, pointer valid, decodes to uint16[n].
+    monkeypatch.setenv("GSFLUENT_GSQ_KILL_RADIUS", "2.0")
+    GSQCodec().encode_sequence_dir(seq_dir, out, on_event=_NullEmitter())
+    buf = out.read_bytes()
+    h = parse_header_bytes(buf)
+    assert h["death_size"] > 0
+    assert h["death_offset"] + h["death_size"] <= len(buf)
+    import zstandard as zstd
+    raw = zstd.ZstdDecompressor().decompress(
+        buf[h["death_offset"]: h["death_offset"] + h["death_size"]]
+    )
+    death = np.frombuffer(raw, dtype=np.uint16)
+    assert death.shape == (n,)
+    # exactly the flyaway splat dies, before the last frame.
+    dead = np.where(death != DEATH_NEVER)[0]
+    assert dead.tolist() == [2]
+    assert 0 < int(death[2]) < n_frames

@@ -23,8 +23,10 @@ from gsfluent.core.codecs.gsq import parse_header_bytes  # noqa: E402
 
 
 def _make_tiny_gsq(n_splats: int, n_frames: int) -> bytes:
-    MAGIC = b"GSQ1"; VERSION = 1
-    HEADER_SIZE = 80; INDEX_ENTRY = 16
+    MAGIC = b"GSQ1"
+    VERSION = 1
+    HEADER_SIZE = 80
+    INDEX_ENTRY = 16
     cctx = zstd.ZstdCompressor(level=1)
     rng = np.random.default_rng(0)
     rgb = rng.random((n_splats, 3)).astype(np.float16)
@@ -48,7 +50,8 @@ def _make_tiny_gsq(n_splats: int, n_frames: int) -> bytes:
     out += b"\x00" * 24
     off = static_off + len(static_c)
     for c in frames_c:
-        out += struct.pack("<QII", off, len(c), 0); off += len(c)
+        out += struct.pack("<QII", off, len(c), 0)
+        off += len(c)
     out += static_c
     for c in frames_c:
         out += c
@@ -92,5 +95,4 @@ def test_prune_in_place_overwrites_and_shrinks(tmp_path) -> None:
     assert h["n_frames"] == 4
     assert pruned[:4] == b"GSQ1"
     assert len(pruned) < len(raw)
-
 

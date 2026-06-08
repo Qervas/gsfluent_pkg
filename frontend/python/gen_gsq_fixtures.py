@@ -55,6 +55,25 @@ def make_drift(n_splats=8, n_frames=35):
     return frames
 
 
+def make_death(n_splats=8, n_frames=20, fly_idx=3, step=0.5):
+    """One splat drifts far on +x each frame; with GSFLUENT_GSQ_KILL_RADIUS set
+    it crosses the kill radius and gets a finite death_frame, the rest stay
+    immortal. Exercises the death-channel parse + cull path."""
+    rng = np.random.default_rng(11)
+    base = rng.uniform(-0.5, 0.5, (n_splats, 3)).astype(np.float32)
+    frames = []
+    for t in range(n_frames):
+        xyz = base.copy()
+        xyz[fly_idx, 0] = base[fly_idx, 0] + step * t
+        f = {"xyz": xyz}
+        if t == 0:
+            f["rgb"] = np.tile(np.array([0.3, 0.6, 0.9], np.float32), (n_splats, 1))
+            f["opacity"] = np.full((n_splats,), 0.85, dtype=np.float32)
+            f["scales"] = np.full((n_splats, 3), 0.01, dtype=np.float32)
+        frames.append(f)
+    return frames
+
+
 def make_wrap(n_splats=8):
     lo = np.full((n_splats, 3), -10.0, dtype=np.float32)
     hi = np.full((n_splats, 3), 10.0, dtype=np.float32)
@@ -95,16 +114,31 @@ def emit(name, frames):
     ring.close()
 
     h = parse_header_bytes(gsq)
+    # Optional death channel: decode the expected per-splat death frames so the
+    # TS decoder test can assert parity. null when absent.
+    death = None
+    if h.get("death_size"):
+        import zstandard as _zstd
+        raw = _zstd.ZstdDecompressor().decompress(
+            gsq[h["death_offset"]: h["death_offset"] + h["death_size"]]
+        )
+        death = np.frombuffer(raw, dtype=np.uint16).tolist()
     (out_dir / "manifest.json").write_text(json.dumps({
         "name": name, "nSplats": n, "nFrames": nf,
         "fpsHint": float(st["fps_hint"]),
         "bboxMin": st["bbox_min"].tolist(), "bboxMax": st["bbox_max"].tolist(),
         "frameFlags": h["frame_flags"],
+        "deathFrame": death,
     }, indent=2))
     print(f"  {name}: {n} splats x {nf} frames -> {out_dir}")
 
 
 if __name__ == "__main__":
+    import os
     print("writing fixtures to", OUT)
     emit("drift", make_drift())
     emit("wrap", make_wrap())
+    # death fixture needs the kill radius enabled at encode time.
+    os.environ["GSFLUENT_GSQ_KILL_RADIUS"] = "2.0"
+    emit("death", make_death())
+    os.environ.pop("GSFLUENT_GSQ_KILL_RADIUS", None)

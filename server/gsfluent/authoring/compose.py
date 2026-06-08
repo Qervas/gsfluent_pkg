@@ -328,10 +328,14 @@ def _event_to_bcs(ev: dict, bbox: list[float], scenario: dict) -> list[dict]:
             cx = xc + dx * off_frac * hx
             cy = yc + dy * off_frac * hy
             # clamp duration so this slab's leading wall stays in-grid
-            if dx > 0:   room = (_GRID_LIM - 0.02) - (cx + sx_)
-            elif dx < 0: room = (cx - sx_) - 0.02
-            elif dy > 0: room = (_GRID_LIM - 0.02) - (cy + sy_)
-            else:        room = (cy - sy_) - 0.02
+            if dx > 0:
+                room = (_GRID_LIM - 0.02) - (cx + sx_)
+            elif dx < 0:
+                room = (cx - sx_) - 0.02
+            elif dy > 0:
+                room = (_GRID_LIM - 0.02) - (cy + sy_)
+            else:
+                room = (cy - sy_) - 0.02
             dur = min(float(ev.get("duration", 0.3)), max(room / speed if speed > 0 else 0.0, 0.0))
             if dur <= 0:
                 raise ComposeError("burst slab already at grid edge")

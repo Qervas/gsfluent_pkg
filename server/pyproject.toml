@@ -8,6 +8,9 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.110",
+  # Starlette 1.0.1 TestClient hangs under the current AnyIO/httpx stack.
+  # Keep FastAPI on the pre-1.0 Starlette line until that combo is verified.
+  "starlette>=0.46,<1.0",
   "uvicorn[standard]>=0.30",
   "websockets>=12",
   "watchfiles>=0.21",

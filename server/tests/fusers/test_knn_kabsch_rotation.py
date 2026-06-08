@@ -20,15 +20,14 @@ from plyfile import PlyData, PlyElement
 from scipy.spatial.transform import Rotation as Rot
 
 from gsfluent.core.fusers.knn_kabsch import (
+    _R_ZUP,
     KNNKabschFuser,
     _matrices_to_quats_wxyz,
     _quat_mul_wxyz,
     _quats_wxyz_to_matrices,
-    _R_ZUP,
     _read_sim_rot_quats,
     _weighted_kabsch,
 )
-
 
 # --- helpers ----------------------------------------------------------------
 

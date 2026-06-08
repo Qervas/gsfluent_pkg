@@ -196,7 +196,7 @@ export const api = {
       ),
     /** Apply an in-place orientation transform to a stored model. Returns the
      *  updated model meta (new sha256 → cache-bust the splat fetch). */
-    reorient: (n: string, transform: "y_up_to_z_up" | "flip_180") =>
+    reorient: (n: string, transform: string) =>
       f(`/api/models/${encodeURIComponent(n)}/reorient`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

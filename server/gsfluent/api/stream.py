@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import re
 from pathlib import Path
@@ -42,6 +43,7 @@ from ..core.frame_stream import (
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
+MAX_LOG_REPLAY_BYTES = 1 * 1024 * 1024
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
@@ -137,6 +139,32 @@ def _resolve_run_dir(run_name: str) -> Path | None:
     return None
 
 
+def _manifest_terminal_status(manifest_path: Path) -> str | None:
+    if not manifest_path.is_file():
+        return None
+    with manifest_path.open() as fh:
+        manifest = json.load(fh)
+    status = manifest.get("status") if isinstance(manifest, dict) else None
+    if status == "error":
+        return "failed"
+    if status in {"done", "failed", "cancelled"}:
+        return status
+    return None
+
+
+def _recent_log_lines(
+    log_path: Path,
+    *,
+    max_bytes: int = MAX_LOG_REPLAY_BYTES,
+) -> tuple[list[str], int]:
+    size = log_path.stat().st_size
+    start = max(0, size - max_bytes)
+    with log_path.open("rb") as fh:
+        fh.seek(start)
+        chunk = fh.read(max_bytes)
+    return chunk.decode("utf-8", errors="replace").splitlines(), size
+
+
 async def _pump(ws: WebSocket, run_name: str) -> None:
     """Tail `run_name`'s sequence dir, sending each new frame_*.ply as
     it appears. Canonical layout is `<seq>/frames/frame_*.ply` (Phase 1
@@ -167,13 +195,12 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
     log_path = run_dir / "run.log"
     if log_path.is_file():
         try:
-            with log_path.open() as fh:
-                for line in fh:
-                    await ws.send_json({
-                        "type": "log",
-                        "run_name": run_name,
-                        "line": line.rstrip("\n"),
-                    })
+            for line in _recent_log_lines(log_path)[0]:
+                await ws.send_json({
+                    "type": "log",
+                    "run_name": run_name,
+                    "line": line,
+                })
         except WebSocketDisconnect:
             return
         except Exception as e:
@@ -184,11 +211,8 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
     manifest_path = run_dir / "manifest.json"
     if manifest_path.is_file():
         try:
-            import json as _json
-            with manifest_path.open() as fh:
-                m = _json.load(fh)
-            status = m.get("status")
-            if status in ("done", "error", "cancelled"):
+            status = _manifest_terminal_status(manifest_path)
+            if status is not None:
                 await ws.send_json({
                     "type": "status",
                     "run_name": run_name,
@@ -294,11 +318,8 @@ async def _pump(ws: WebSocket, run_name: str) -> None:
                 elif p.name == "manifest.json":
                     # Manifest update — re-read status and emit if terminal.
                     try:
-                        import json as _json
-                        with manifest_path.open() as fh:
-                            m = _json.load(fh)
-                        status = m.get("status")
-                        if status in ("done", "error", "cancelled"):
+                        status = _manifest_terminal_status(manifest_path)
+                        if status is not None:
                             await ws.send_json({
                                 "type": "status",
                                 "run_name": run_name,

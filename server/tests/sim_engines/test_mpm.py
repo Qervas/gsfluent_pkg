@@ -282,6 +282,7 @@ async def _run_engine_with_frame_counts(
     whatever run() raises (e.g. SimUnstableRecipeError below the floor)."""
     import sys
     from types import SimpleNamespace
+
     import gsfluent.core.sim_engines.mpm as mpm
     from gsfluent.protocols.sim import ModelRef
 
@@ -304,7 +305,8 @@ async def _run_engine_with_frame_counts(
 
     run_name = "partialtest"
     sim_ply_dir = sim_home / "output" / run_name / "simulation_ply"
-    fused_dir = tmp_path / "work" / "library" / "sequences" / run_name / "frames"
+    output_dir = tmp_path / "work" / "library" / "sequences" / run_name
+    fused_dir = output_dir / "frames"
 
     calls = {"n": 0}
 
@@ -328,7 +330,7 @@ async def _run_engine_with_frame_counts(
     monkeypatch.setattr(eng, "_spawn_in_new_pg", _fake_spawn)
 
     recipe = {"_run_name": run_name, "frame_num": frame_num, "particle_count": 1000}
-    result = await eng.run(recipe, model, tmp_path / "out", 60, _StubEmitter())
+    result = await eng.run(recipe, model, output_dir, 60, _StubEmitter())
     return result, run_name
 
 
