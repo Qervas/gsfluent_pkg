@@ -418,7 +418,7 @@ class GSQCodec:
 
         index_entries = []
         off = frame0_offset
-        for c, fl in zip(frame_chunks, frame_flags):
+        for c, fl in zip(frame_chunks, frame_flags, strict=True):
             index_entries.append((off, len(c), fl))
             off += len(c)
         # Death block (if any) lands at EOF, after all frame chunks, so every
@@ -547,7 +547,7 @@ class GSQCodec:
 
         off = frame0_offset
         index_blob = b""
-        for c, fl in zip(frame_chunks, frame_flags):
+        for c, fl in zip(frame_chunks, frame_flags, strict=True):
             index_blob += struct.pack("<QII", off, len(c), fl)
             off += len(c)
         death_offset = off if death_compressed else 0

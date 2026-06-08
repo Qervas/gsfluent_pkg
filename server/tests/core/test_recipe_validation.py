@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import pytest
 from plyfile import PlyData, PlyElement
 
 from gsfluent.core.recipe_validation import (
@@ -50,13 +49,11 @@ def test_translate_sim_area_leaves_world_recipe_unchanged(tmp_path: Path) -> Non
     assert out == recipe
 
 
-# ---- model orientation guard --------------------------------------------
+# ---- model orientation hook ---------------------------------------------
 #
-# The composer stamps the building's expected bbox into
-# particle_filling.boundary. A submitted model whose LONGEST axis differs
-# from the building's longest axis is rotated (e.g. Y-up MeshLab export in a
-# Z-up sim) → it lies on its side and diverges. Confirmed live: a Y-up model
-# gave ~4 usable frames, the same building Z-up gave ~21.
+# Orientation used to be auto-rejected when the submitted model's longest axis
+# differed from the building's longest axis. That was too brittle for varied
+# buildings/objects, so orientation is now a user-controlled reorient operation.
 
 # Building longest on z (like cluster_6_15): extents x0.6 y0.4 z1.0.
 _BUILDING_Z_TALL = {"particle_filling": {"boundary": [0.7, 1.3, 0.8, 1.2, 0.5, 1.5]}}
@@ -74,12 +71,11 @@ def _write_model_ext(root: Path, xe: float, ye: float, ze: float) -> Path:
     return model
 
 
-def test_orientation_rejects_lying_model(tmp_path: Path) -> None:
-    # The reported bug: model longest on y (a3596c6b: ext 30/50/18) while the
-    # building is longest on z → lying down → reject.
+def test_orientation_no_longer_rejects_lying_model(tmp_path: Path) -> None:
+    # The model may be lying down relative to the curated tower recipe, but
+    # shape-based inference is not reliable enough to block the run.
     model = _write_model_ext(tmp_path, 30.0, 50.0, 18.0)
-    with pytest.raises(ValueError, match="mis-oriented"):
-        validate_model_orientation(_BUILDING_Z_TALL, model)
+    validate_model_orientation(_BUILDING_Z_TALL, model)
 
 
 def test_orientation_accepts_upright_model(tmp_path: Path) -> None:

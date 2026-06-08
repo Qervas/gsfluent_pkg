@@ -1,4 +1,7 @@
 """Tests for AppConfig — single source of truth for backend config."""
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,28 @@ def test_work_dir_defaults_when_unset(monkeypatch) -> None:
     cfg = AppConfig.from_env()
     # Default points at the repo's work/ directory (PKG_ROOT/work).
     assert cfg.work_dir.name == "work"
+
+
+def test_paths_honor_work_dir_env_in_fresh_process(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["GSFLUENT_WORK_DIR"] = str(tmp_path / "custom_work")
+    out = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from gsfluent._paths import WORK, LIBRARY, CACHE_SPLATS; "
+                "print(WORK); print(LIBRARY); print(CACHE_SPLATS)"
+            ),
+        ],
+        env=env,
+        text=True,
+    ).splitlines()
+    assert out == [
+        str(tmp_path / "custom_work"),
+        str(tmp_path / "custom_work" / "library"),
+        str(tmp_path / "custom_work" / "cache" / "splats"),
+    ]
 
 
 def test_cap_config_is_loaded(monkeypatch) -> None:

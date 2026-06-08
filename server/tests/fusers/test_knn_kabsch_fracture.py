@@ -29,7 +29,6 @@ from gsfluent.core.fusers.knn_kabsch import (
     _pairwise_rest_dists,
 )
 
-
 # --- helpers ----------------------------------------------------------------
 
 

@@ -11,7 +11,12 @@ and the bbox stays valid (kept splats are a subset of the original).
 """
 from __future__ import annotations
 
+import struct
+
 import numpy as np
+import zstandard as zstd
+
+from gsfluent.core.codecs.gsq import parse_header_bytes, read_frame_payload_raw_i16
 
 
 def compute_significance(opacity: np.ndarray, scales: np.ndarray) -> np.ndarray:
@@ -77,12 +82,6 @@ def retention_curve(
         })
     return out
 
-
-import struct
-import zstandard as zstd
-
-from gsfluent.core.codecs.gsq import parse_header_bytes, read_frame_payload_raw_i16
-
 _HEADER_SIZE = 80
 _INDEX_ENTRY = 16
 _ZSTD_LEVEL = 9
@@ -137,7 +136,7 @@ def prune_gsq_bytes(raw: bytes, keep: np.ndarray) -> bytes:
     out += b"\x00" * 24
     assert len(out) == _HEADER_SIZE
     off = static_offset + len(new_static_c)
-    for c, flag in zip(new_frames_c, new_frame_flags):
+    for c, flag in zip(new_frames_c, new_frame_flags, strict=True):
         out += struct.pack("<QII", off, len(c), flag)
         off += len(c)
     assert len(out) == static_offset

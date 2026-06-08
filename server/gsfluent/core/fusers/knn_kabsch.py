@@ -803,7 +803,7 @@ class KNNKabschFuser:
 
     @staticmethod
     def _sim_r_cube(
-        state: "_KNNCorrespondence",
+        state: _KNNCorrespondence,
         rot_quats: np.ndarray,
         eff_idx: np.ndarray,
         eff_weights: np.ndarray,
@@ -868,7 +868,7 @@ class KNNKabschFuser:
 
     def _update_fracture_binding(
         self,
-        state: "_KNNCorrespondence",
+        state: _KNNCorrespondence,
         particle_frame: np.ndarray,
     ) -> None:
         """Per-frame fracture detection + monotone-latched re-binding (Phase 1).

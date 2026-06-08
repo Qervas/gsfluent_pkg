@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import TypeVar
 
 from gsfluent.core.recovery import RecoveryDecision, classify_recovery
-from gsfluent.observability.jsonlog import EmitLevelMethods
 from gsfluent.core.state import (
     RunStateRecord,
     RunStateStore,
 )
+from gsfluent.observability.jsonlog import EmitLevelMethods
 from gsfluent.protocols.cache import CacheCodec
 from gsfluent.protocols.fuse import Fuser
 from gsfluent.protocols.observability import EventEmitter
@@ -52,6 +52,15 @@ from gsfluent.protocols.sim import (
 from gsfluent.protocols.storage import Storage
 
 _T = TypeVar("_T")
+
+
+def _kill_grace_sec() -> float:
+    raw = os.environ.get("GSFLUENT_KILL_GRACE_SEC", "30.0")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 30.0
+    return max(0.0, value)
 
 
 # ---------- process-group lifecycle helpers (Phase 3) --------------------
@@ -221,6 +230,30 @@ class AsyncioRunManager:
         # shim's submit/cancel/status/recover_on_boot bodies below.
         self._state_store = state_store
 
+    async def _kill_captured_process_group(
+        self,
+        *,
+        proc: asyncio.subprocess.Process | None,
+        pgid: int | None,
+    ) -> None:
+        if pgid is None:
+            return
+        if proc is not None:
+            await escalate_kill_pg(proc, pgid=pgid, grace_sec=_kill_grace_sec())
+            return
+
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+        grace = _kill_grace_sec()
+        if grace > 0:
+            await asyncio.sleep(grace)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+
     async def submit(
         self, recipe: ValidatedRecipe, *, model: ModelRef
     ) -> RunId:
@@ -341,15 +374,24 @@ class AsyncioRunManager:
                 self._inner = inner
 
             def emit(self, event: str, **context):
-                self._inner.emit(event, **context)
+                log_context = dict(context)
+                proc = log_context.pop("process", None)
+                if proc is None:
+                    proc = log_context.pop("proc", None)
+                self._inner.emit(event, **log_context)
                 if event.startswith("error."):
                     engine_error_emitted.add(event)
-                if event == "sim.spawned":
+                if event in {"sim.spawned", "fuse.spawned"}:
                     pid = context.get("pid")
                     pgid = context.get("pgid")
                     pid_starttime = context.get("pid_starttime")
                     if pid is not None:
                         mgr._pgids[run_id] = pgid if pgid is not None else pid
+                        if isinstance(proc, asyncio.subprocess.Process):
+                            mgr._procs[run_id] = proc
+                    if event != "sim.spawned":
+                        return
+                    if pid is not None:
                         rec = mgr._state_store.read(run_id)
                         if rec is not None:
                             mgr._state_store.write(rec.transition(
@@ -367,31 +409,27 @@ class AsyncioRunManager:
 
         spying = _PidCapturingEmitter(run_obs)
 
-        # Preflight: catch env-missing errors early so the lifecycle event
-        # chain reflects whether the engine ever got to run. preflight() is
-        # best-effort here — engines that defer all checks to run() can
-        # no-op it.
         try:
+            # Preflight: catch env-missing errors early so the lifecycle
+            # event chain reflects whether the engine ever got to run.
+            # This must stay inside the unified lifecycle guard: submit()
+            # has already returned a run id, so even preflight failures need
+            # to resolve wait_for() and persist a terminal FAILED record.
             await self._sim.preflight()
             run_obs.info("run.preflight_ok")
-        except Exception:
-            # Re-raise so the unified except below records the failure with
-            # the right error.kind mapping.
-            raise
 
-        # Mark STARTED before the engine fires up.
-        rec = self._state_store.read(run_id)
-        if rec is not None:
-            self._state_store.write(rec.transition(state=RunState.STARTED))
-        started_at = time.time()
-        run_obs.info(
-            "run.started",
-            started_at=started_at,
-            wall_time_sec=wall_time,
-            particles=recipe.get("particle_count"),
-        )
+            # Mark STARTED before the engine fires up.
+            rec = self._state_store.read(run_id)
+            if rec is not None:
+                self._state_store.write(rec.transition(state=RunState.STARTED))
+            started_at = time.time()
+            run_obs.info(
+                "run.started",
+                started_at=started_at,
+                wall_time_sec=wall_time,
+                particles=recipe.get("particle_count"),
+            )
 
-        try:
             # Wall-time cap: on timeout we issue escalate_kill_pg against the
             # captured pgid (if any). The engine's run() returns a SimResult
             # on success or raises a typed SimError on failure.
@@ -455,6 +493,9 @@ class AsyncioRunManager:
             if not fut.done():
                 fut.set_result(None)
         except SimWallTimeExceededError as e:
+            proc = self._procs.get(run_id)
+            pgid = self._pgids.get(run_id)
+            await self._kill_captured_process_group(proc=proc, pgid=pgid)
             rec = self._state_store.read(run_id)
             if rec is not None:
                 self._state_store.write(rec.transition(
@@ -559,6 +600,7 @@ class AsyncioRunManager:
         finally:
             # Clean up internal handles regardless of outcome.
             self._tasks.pop(run_id, None)
+            self._procs.pop(run_id, None)
             self._pgids.pop(run_id, None)
 
     async def cancel(self, run_id: RunId) -> None:
@@ -589,20 +631,9 @@ class AsyncioRunManager:
         proc = self._procs.get(run_id)
         pgid = self._pgids.get(run_id)
 
-        # If we have a live Process handle, use escalate_kill_pg for the
-        # full SIGTERM->grace->SIGKILL ladder. Otherwise fall back to a
-        # direct killpg call against the captured pgid.
-        if proc is not None and pgid is not None:
-            try:
-                await escalate_kill_pg(proc, pgid=pgid)
-            except Exception:
-                # Best-effort - the engine might have torn down already.
-                pass
-        elif pgid is not None:
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+        kill_task = asyncio.create_task(
+            self._kill_captured_process_group(proc=proc, pgid=pgid)
+        )
         # Cancel the supervising task so _run_to_completion records
         # CANCELLED on disk.
         if task is not None and not task.done():
@@ -611,6 +642,10 @@ class AsyncioRunManager:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        try:
+            await kill_task
+        except Exception:
+            pass
 
     async def status(self, run_id: RunId) -> RunStatus:
         """Snapshot the run's current state. Raises KeyError if unknown."""

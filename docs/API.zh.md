@@ -639,10 +639,9 @@ curl -X DELETE ${BACKEND_URL}/api/models/scene_a1b2c3d4
 ### POST /api/models/{name}/reorient
 
 对已存储 model 的 `.ply` 做原地朝向变换 —— 位置、高斯四元数、法线全部一起旋转。
-用来把躺倒的扫描立起来(`y_up_to_z_up`),或把上下颠倒的翻正(`flip_180`)。
-**可重复** —— 没有"已转换"锁,所以可以转一下、看一眼、再转,直到立正
-(`y_up_to_z_up` 转 4 次、`flip_180` 转 2 次都回到原样)。model 字节在原路径
-被改写,所以响应里带一个新的 `sha256`,前端用它给 splat 拉取做缓存失效。
+这个接口用于让用户目测调整朝向,而不是依赖自动"up"推断。**可重复** ——
+没有"已转换"锁,所以可以转一下、看一眼、再转,直到立正。model 字节在原路径被改写,
+所以响应里带一个新的 `sha256`,前端用它给 splat 拉取做缓存失效。
 
 **路径参数**
 
@@ -654,7 +653,7 @@ curl -X DELETE ${BACKEND_URL}/api/models/scene_a1b2c3d4
 
 | 名称 | 类型 | 说明 |
 | --- | --- | --- |
-| `transform` | string | `"y_up_to_z_up"`(Y-up → Z-up,立起来)或 `"flip_180"`(绕 X 轴 180°,翻正上下颠倒)。 |
+| `transform` | string | 可选: `rotate_x_pos_90`, `rotate_x_neg_90`, `rotate_y_pos_90`, `rotate_y_neg_90`, `rotate_z_pos_90`, `rotate_z_neg_90`, `rotate_x_180`, `rotate_y_180`, `rotate_z_180`; 兼容别名: `y_up_to_z_up`, `flip_180`。 |
 
 **响应**
 

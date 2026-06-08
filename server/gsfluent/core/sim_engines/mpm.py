@@ -32,14 +32,13 @@ import shutil
 import subprocess
 import time
 from asyncio.subprocess import create_subprocess_exec as _spawn  # alias for grep-safety
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from collections.abc import Callable
-
 import yaml
 
-from gsfluent._paths import PKG_ROOT
+from gsfluent._paths import PKG_ROOT, SERVER_TOOLS
 from gsfluent.core import manifest as _manifest
 from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.sim import (
@@ -340,7 +339,7 @@ class MPMSimulationEngine:
         run_name = recipe.get("_run_name") or output_dir.name
         sim_output_dir = self._sim_home / "output" / run_name
         sim_ply_dir = sim_output_dir / "simulation_ply"
-        library_seq_dir = PKG_ROOT / "work" / "library" / "sequences" / run_name
+        library_seq_dir = output_dir
         fused_dir = library_seq_dir / "frames"
 
         on_event.debug("sim.dirs.ensure", paths=[str(sim_output_dir), str(library_seq_dir), str(fused_dir)])
@@ -440,6 +439,7 @@ class MPMSimulationEngine:
                 pid=sim_proc.pid,
                 pgid=pgid,
                 pid_starttime=pid_starttime,
+                process=sim_proc,
                 argv=sim_argv,
             )
 
@@ -507,7 +507,13 @@ class MPMSimulationEngine:
                 raise
 
             fuse_pgid = os.getpgid(fuse_proc.pid)
-            on_event.info("fuse.spawned", pid=fuse_proc.pid, pgid=fuse_pgid, argv=fuse_argv)
+            on_event.info(
+                "fuse.spawned",
+                pid=fuse_proc.pid,
+                pgid=fuse_pgid,
+                process=fuse_proc,
+                argv=fuse_argv,
+            )
             on_event.info("fuse.waiting_for_process", pid=fuse_proc.pid)
 
             fuse_stderr_chunks: list[str] = []
@@ -720,7 +726,7 @@ class MPMSimulationEngine:
         # This is the heavy post-processing step (KNN skinning + Kabsch rotation)
         return [
             self._sim_python,
-            str(PKG_ROOT / "server" / "tools" / "fuse_to_full_ply.py"),
+            str(SERVER_TOOLS / "fuse_to_full_ply.py"),
             "--reference_ply", str(reference_ply),
             "--sim_dir", str(sim_ply_dir),
             "--out_dir", str(fused_dir),

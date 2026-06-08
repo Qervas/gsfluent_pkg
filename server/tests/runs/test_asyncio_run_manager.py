@@ -7,11 +7,15 @@ tests/integration/ — those use the SubprocessMockSimulationEngine to
 spawn an actual PG and verify signal delivery.
 """
 import asyncio
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from gsfluent.core.run_manager import AsyncioRunManager
+from gsfluent.core.run_manager import AsyncioRunManager, spawn_in_new_pg
 from gsfluent.core.sim_engines.mock import MockSimulationEngine
 from gsfluent.core.state import RunStateStore
 from gsfluent.observability.jsonlog import EmitLevelMethods
@@ -21,7 +25,7 @@ from gsfluent.protocols.runs import (
     RunManager,
     RunState,
 )
-from gsfluent.protocols.sim import ModelRef
+from gsfluent.protocols.sim import ModelRef, SimEnvMissingError, SimResult
 
 
 class _NullEmitter(EmitLevelMethods):
@@ -46,6 +50,48 @@ class _StubStorage:
     """Placeholder Storage — never invoked by AsyncioRunManager today."""
     async def put(self, *a, **kw):  # pragma: no cover
         raise NotImplementedError
+
+
+class _SigtermIgnoringSim:
+    def __init__(self, script: Path) -> None:
+        self.script = script
+        self.proc: asyncio.subprocess.Process | None = None
+
+    async def preflight(self) -> None:
+        return None
+
+    async def run(self, recipe, model, output_dir, wall_time_sec, on_event) -> SimResult:
+        self.proc = await spawn_in_new_pg([sys.executable, str(self.script)], cwd="/tmp")
+        pgid = os.getpgid(self.proc.pid)
+        on_event.emit("sim.spawned", pid=self.proc.pid, pgid=pgid, process=self.proc)
+        await self.proc.wait()
+        return SimResult(frames_dir=output_dir, n_frames=0, duration_sec=0.0)
+
+
+class _PreflightFailingSim:
+    async def preflight(self) -> None:
+        raise SimEnvMissingError("sim home missing")
+
+    async def run(self, *args, **kwargs) -> SimResult:  # pragma: no cover
+        raise AssertionError("run() must not be called after preflight failure")
+
+
+def _write_sigterm_ignoring_script(path: Path) -> None:
+    path.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: None)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+
+
+async def _wait_for_proc(sim: _SigtermIgnoringSim) -> asyncio.subprocess.Process:
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if sim.proc is not None:
+            return sim.proc
+        await asyncio.sleep(0.02)
+    raise AssertionError("sim subprocess was not spawned")
 
 
 @pytest.fixture
@@ -115,10 +161,112 @@ async def test_status_unknown_run_raises_keyerror(run_mgr: AsyncioRunManager) ->
 
 
 @pytest.mark.asyncio
+async def test_preflight_failure_marks_run_failed_and_unblocks_wait_for(
+    tmp_path: Path, state_store: RunStateStore,
+) -> None:
+    mgr = AsyncioRunManager(
+        sim_engine=_PreflightFailingSim(),
+        fuser=_StubFuser(),
+        cache_codec=_StubCodec(),
+        storage=_StubStorage(),
+        obs=_NullEmitter(),
+        state_store=state_store,
+        wall_time_cap_sec=3600,
+        particle_count_cap=500_000,
+    )
+    rid = await mgr.submit(
+        {
+            "_run_name": "preflight_fail",
+            "_particles": 1,
+            "_output_dir": str(tmp_path / "out"),
+        },
+        model=ModelRef(name="fake", path=tmp_path),
+    )
+
+    status = await asyncio.wait_for(mgr.wait_for(rid), timeout=1.0)
+
+    assert status.state == RunState.FAILED
+    assert status.error == {
+        "kind": "sim.env_missing",
+        "message": "sim home missing",
+    }
+
+
+@pytest.mark.asyncio
 async def test_cancel_is_idempotent_on_unknown_run(run_mgr: AsyncioRunManager) -> None:
     """cancel() on an unknown run is a no-op (idempotent per the Protocol)."""
     # Should not raise.
     await run_mgr.cancel(RunId("never-existed"))
+
+
+@pytest.mark.asyncio
+async def test_cancel_escalates_sigterm_ignoring_subprocess_to_sigkill(
+    tmp_path: Path, state_store: RunStateStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GSFLUENT_KILL_GRACE_SEC", "0.2")
+    script = tmp_path / "ignore_sigterm.py"
+    _write_sigterm_ignoring_script(script)
+    sim = _SigtermIgnoringSim(script)
+    mgr = AsyncioRunManager(
+        sim_engine=sim,
+        fuser=_StubFuser(),
+        cache_codec=_StubCodec(),
+        storage=_StubStorage(),
+        obs=_NullEmitter(),
+        state_store=state_store,
+        wall_time_cap_sec=3600,
+        particle_count_cap=500_000,
+    )
+    rid = await mgr.submit(
+        {"_run_name": "cancel_kill", "_particles": 1, "_output_dir": str(tmp_path / "out")},
+        model=ModelRef(name="fake", path=tmp_path),
+    )
+    proc = await _wait_for_proc(sim)
+    await asyncio.sleep(0.2)
+    try:
+        await mgr.cancel(rid)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc.returncode is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_wall_time_escalates_sigterm_ignoring_subprocess_to_sigkill(
+    tmp_path: Path, state_store: RunStateStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GSFLUENT_KILL_GRACE_SEC", "0.2")
+    script = tmp_path / "ignore_sigterm.py"
+    _write_sigterm_ignoring_script(script)
+    sim = _SigtermIgnoringSim(script)
+    mgr = AsyncioRunManager(
+        sim_engine=sim,
+        fuser=_StubFuser(),
+        cache_codec=_StubCodec(),
+        storage=_StubStorage(),
+        obs=_NullEmitter(),
+        state_store=state_store,
+        wall_time_cap_sec=1,
+        particle_count_cap=500_000,
+    )
+    rid = await mgr.submit(
+        {
+            "_run_name": "timeout_kill",
+            "_particles": 1,
+            "_output_dir": str(tmp_path / "out"),
+            "wall_time_sec": 1,
+        },
+        model=ModelRef(name="fake", path=tmp_path),
+    )
+    proc = await _wait_for_proc(sim)
+    try:
+        await mgr.wait_for(rid)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc.returncode is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            await proc.wait()
 
 
 @pytest.mark.asyncio

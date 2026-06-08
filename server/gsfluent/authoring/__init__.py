@@ -10,6 +10,6 @@ this is a layer *above* the flat format.
 
 See docs/slides/2026-05-29-gsfluent-recipe-authoring (local) for the design.
 """
-from gsfluent.authoring.compose import compose, ComposeError
+from gsfluent.authoring.compose import ComposeError, compose
 
 __all__ = ["compose", "ComposeError"]

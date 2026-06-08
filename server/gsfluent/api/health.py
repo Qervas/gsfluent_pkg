@@ -4,14 +4,15 @@ Replaces the trivial /api/health stub in composition.py. The response
 shape is contract-stable: SPA, systemd watchdog, and external monitoring
 all rely on the keys + types defined by HealthResponse.
 
-Status derivation matrix (spec Section 3 Flow C):
-    down     := sim_home missing OR disk_free_pct < 5
-    degraded := gpu_reachable False OR last_successful_run > 24h ago
+Status derivation matrix:
+    down     := sim_home missing
+    degraded := disk_free_pct < 5 OR gpu_reachable False OR last_successful_run > 24h ago
     ok       := otherwise
 
 The systemd watchdog reads this endpoint and only sends WATCHDOG=1 when
-status != "down". When status == "down" the watchdog timer fires and
-systemd restarts the unit.
+status != "down". Keep "down" limited to process-restartable failures;
+operator conditions like low disk should be "degraded" so they alert
+without causing a restart loop.
 """
 from __future__ import annotations
 
@@ -67,7 +68,7 @@ class HealthResponse(BaseModel):
 
 _GPU_PROBE_TIMEOUT_SEC = 2.0
 _STALE_RUN_THRESHOLD_SEC = 24 * 3600
-_DISK_LOW_THRESHOLD_PCT = 5.0
+_DISK_DEGRADED_THRESHOLD_PCT = 5.0
 
 
 def _gpu_reachable() -> bool:
@@ -127,9 +128,11 @@ def _derive_status(
     last_successful_run_at: float | None,
     now: float,
 ) -> HealthStatus:
-    """Spec Section 3 Flow C status derivation."""
-    if not sim_home_exists or disk_free_pct < _DISK_LOW_THRESHOLD_PCT:
+    """Derive liveness/readiness status from independently measured signals."""
+    if not sim_home_exists:
         return HealthStatus.DOWN
+    if disk_free_pct < _DISK_DEGRADED_THRESHOLD_PCT:
+        return HealthStatus.DEGRADED
     if not gpu_reachable:
         return HealthStatus.DEGRADED
     if (last_successful_run_at is not None

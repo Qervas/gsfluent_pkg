@@ -1,6 +1,6 @@
 """Tests for the Phase 4 coord_convert module.
 
-The math is the single canonical Y-up -> Z-up rotation Rx(-pi/2)
+The math is the single canonical Y-up -> Z-up rotation Rx(+pi/2)
 applied at IMPORT time. We pin behaviour at three layers:
 
   1. Pure-array math: positions and quaternions match the spec
@@ -61,6 +61,21 @@ def test_rotate_positions_preserves_x_axis_and_dtype():
     np.testing.assert_array_almost_equal(out[0], [7.0, -5.0, 2.0])
 
 
+def test_generic_axis_position_rotations():
+    from gsfluent.core.coord_convert import rotate_positions_axis
+
+    p = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    np.testing.assert_array_almost_equal(
+        rotate_positions_axis(p, "x", 90)[0], [1.0, -3.0, 2.0],
+    )
+    np.testing.assert_array_almost_equal(
+        rotate_positions_axis(p, "y", 90)[0], [3.0, 2.0, -1.0],
+    )
+    np.testing.assert_array_almost_equal(
+        rotate_positions_axis(p, "z", 90)[0], [-2.0, 1.0, 3.0],
+    )
+
+
 def test_rotate_quaternions_identity_to_axis_quat():
     """Identity quaternion (1, 0, 0, 0) composed with Rx(+pi/2) yields
     the axis quaternion (cos(+pi/4), sin(+pi/4), 0, 0)."""
@@ -80,6 +95,16 @@ def test_rotate_quaternions_identity_to_axis_quat():
         dtype=np.float32,
     )
     np.testing.assert_array_almost_equal(out, expected)
+
+
+def test_generic_axis_quaternion_identity_rotations():
+    from gsfluent.core.coord_convert import rotate_quaternions_axis
+
+    q = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    expected = np.array([[np.sqrt(0.5), 0.0, np.sqrt(0.5), 0.0]], dtype=np.float32)
+    np.testing.assert_array_almost_equal(
+        rotate_quaternions_axis(q, "y", 90), expected,
+    )
 
 
 def test_rotate_quaternions_preserves_dtype():

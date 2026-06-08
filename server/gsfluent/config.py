@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from gsfluent._paths import PKG_ROOT
+from gsfluent._paths import WORK
 from gsfluent.core.limits import CapConfig
 
 
@@ -34,7 +34,7 @@ class AppConfig:
         sim_home_str = os.environ.get("GSFLUENT_SIM_HOME", "")
         sim_python = os.environ.get("GSFLUENT_SIM_PYTHON", "python")
         sim_env = os.environ.get("GSFLUENT_SIM_ENV") or None
-        work_dir_str = os.environ.get("GSFLUENT_WORK_DIR", str(PKG_ROOT / "work"))
+        work_dir_str = os.environ.get("GSFLUENT_WORK_DIR", str(WORK))
 
         return cls(
             sim_home=Path(sim_home_str),

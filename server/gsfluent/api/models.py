@@ -1,5 +1,6 @@
 import gzip as _gz
 import hashlib
+import io
 import json
 import logging
 import re
@@ -15,6 +16,52 @@ from ..core.library import Model
 router = APIRouter(prefix="/api/models", tags=["models"])
 
 _log = logging.getLogger(__name__)
+MAX_UPLOAD_BYTES = 8 * 1024 ** 3
+UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+async def _read_upload_capped(
+    upload,
+    *,
+    max_bytes: int = MAX_UPLOAD_BYTES,
+    chunk_size: int = UPLOAD_CHUNK_BYTES,
+) -> bytes:
+    buf = bytearray()
+    while True:
+        chunk = await upload.read(chunk_size)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise HTTPException(413, f"upload too large: {len(buf)} > {max_bytes}")
+    return bytes(buf)
+
+
+def _gunzip_capped(
+    content: bytes,
+    *,
+    max_bytes: int = MAX_UPLOAD_BYTES,
+    chunk_size: int = UPLOAD_CHUNK_BYTES,
+) -> bytes:
+    try:
+        with _gz.GzipFile(fileobj=io.BytesIO(content)) as gz:
+            buf = bytearray()
+            while True:
+                chunk = gz.read(chunk_size)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    raise HTTPException(
+                        413,
+                        f"gunzipped ply exceeds {max_bytes} bytes; "
+                        "looks like a gzip bomb",
+                    )
+            return bytes(buf)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(422, f"failed to gunzip uploaded ply: {e}") from e
 
 
 @router.get("")
@@ -64,10 +111,7 @@ async def upload(
     # Cap upload size in line with /upload-npz (8 GiB). Without a cap
     # `await ply.read()` will happily slurp a 100 GB body and OOM the
     # server before we can reject it.
-    MAX_UPLOAD = 8 * 1024 ** 3
-    content = await ply.read()  # TODO Phase 4: stream to disk for production-sized plys (>1GB)
-    if len(content) > MAX_UPLOAD:
-        raise HTTPException(413, f"ply too large: {len(content)} > {MAX_UPLOAD}")
+    content = await _read_upload_capped(ply)
 
     # Decompress before validation. We signal via a Form field rather
     # than HTTP Content-Encoding because FastAPI / Starlette doesn't
@@ -78,26 +122,7 @@ async def upload(
     # Decompress via GzipFile with an output cap so a malicious gzip
     # bomb (a few-MB body that expands to many GB) can't OOM the server.
     if ply_encoding == "gzip":
-        try:
-            import io
-            with _gz.GzipFile(fileobj=io.BytesIO(content)) as gz:
-                buf = bytearray()
-                while True:
-                    chunk = gz.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    buf.extend(chunk)
-                    if len(buf) > MAX_UPLOAD:
-                        raise HTTPException(
-                            413,
-                            f"gunzipped ply exceeds {MAX_UPLOAD} bytes — "
-                            "looks like a gzip bomb",
-                        )
-                content = bytes(buf)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(422, f"failed to gunzip uploaded ply: {e}") from e
+        content = _gunzip_capped(content)
     elif ply_encoding != "identity":
         raise HTTPException(422, f"unsupported ply_encoding: {ply_encoding!r}")
 
@@ -153,6 +178,8 @@ async def register(req: RegisterRequest):
             Path(req.path), convert_y_up=req.convert_y_up,
         )
     except FileNotFoundError as e:
+        raise HTTPException(422, str(e)) from e
+    except ValueError as e:
         raise HTTPException(422, str(e)) from e
     except FileExistsError as e:
         raise HTTPException(409, str(e)) from e
@@ -238,19 +265,20 @@ def delete_endpoint(name: str):
 
 
 class ReorientRequest(BaseModel):
-    transform: str  # "y_up_to_z_up" | "flip_180"
+    transform: str
 
 
 @router.post("/{name}/reorient")
 def reorient_endpoint(name: str, req: ReorientRequest):
     """Apply an in-place orientation transform to a stored model's .ply.
 
-    `transform` is "y_up_to_z_up" (stand a lying-down Y-up model up) or
-    "flip_180" (right an upside-down one). Rewrites positions + gaussian
-    quaternions + normals; everything else passes through. Repeatable — no
-    lock — so apply, eyeball, apply again until it's upright. The response is
-    the updated model meta, including a fresh `sha256` the client uses to
-    cache-bust the splat fetch (the .ply is overwritten at the same path)."""
+    `transform` is one of coord_convert.TRANSFORM_NAMES: axis rotations in
+    Blender-style 90/180 degree steps, plus back-compatible shortcuts such as
+    "y_up_to_z_up". Rewrites positions + gaussian quaternions + normals;
+    everything else passes through. Repeatable — no lock — so apply, eyeball,
+    apply again until it is upright. The response is the updated model meta,
+    including a fresh `sha256` the client uses to cache-bust the splat fetch
+    (the .ply is overwritten at the same path)."""
     if not Model.exists(name):
         raise HTTPException(404, f"model not found: {name}")
     try:

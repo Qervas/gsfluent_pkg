@@ -4,9 +4,9 @@ import pytest
 
 from gsfluent.core.codecs.gsq_prune import (
     compute_significance,
-    select_keep_indices,
-    retention_curve,
     prune_to_count,
+    retention_curve,
+    select_keep_indices,
 )
 
 
@@ -58,14 +58,17 @@ def test_keep_count_clamped_to_n() -> None:
 
 import io
 import struct
+
 import zstandard as zstd
 
 
 def _make_tiny_gsq(n_splats: int, n_frames: int) -> bytes:
     """Build a minimal valid GSQ1 file in memory for tests. Mirrors
     server/gsfluent/core/codecs/gsq.py layout exactly."""
-    MAGIC = b"GSQ1"; VERSION = 1
-    HEADER_SIZE = 80; INDEX_ENTRY = 16
+    MAGIC = b"GSQ1"
+    VERSION = 1
+    HEADER_SIZE = 80
+    INDEX_ENTRY = 16
     cctx = zstd.ZstdCompressor(level=1)
     rng = np.random.default_rng(0)
     rgb = rng.random((n_splats, 3)).astype(np.float16)
@@ -89,7 +92,8 @@ def _make_tiny_gsq(n_splats: int, n_frames: int) -> bytes:
     out.write(b"\x00" * 24)
     off = static_off + len(static_c)
     for c in frames_c:
-        out.write(struct.pack("<QII", off, len(c), 0)); off += len(c)
+        out.write(struct.pack("<QII", off, len(c), 0))
+        off += len(c)
     out.write(static_c)
     for c in frames_c:
         out.write(c)
@@ -97,8 +101,8 @@ def _make_tiny_gsq(n_splats: int, n_frames: int) -> bytes:
 
 
 def test_prune_reduces_n_splats_and_stays_valid() -> None:
-    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
     from gsfluent.core.codecs.gsq import parse_header_bytes  # see Task 3 note
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
 
     raw = _make_tiny_gsq(n_splats=100, n_frames=5)
     keep = np.sort(np.random.default_rng(1).choice(100, 40, replace=False))
@@ -113,8 +117,8 @@ def test_prune_reduces_n_splats_and_stays_valid() -> None:
 
 def test_prune_preserves_kept_frame_data_losslessly() -> None:
     """Raw int16 slicing must keep the exact bytes of kept splats."""
-    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
     from gsfluent.core.codecs.gsq import decode_frame_raw_i16  # see Task 3 note
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
 
     raw = _make_tiny_gsq(n_splats=50, n_frames=3)
     keep = np.array([0, 7, 49], dtype=np.int64)
@@ -141,8 +145,8 @@ def test_prune_is_smaller() -> None:
 def test_prune_to_retention_reduces_splats_and_stays_valid() -> None:
     """Pruning at a sub-1.0 retention must drop splat count and keep the
     file a valid, parseable GSQ1."""
-    from gsfluent.core.codecs.gsq_prune import prune_to_retention
     from gsfluent.core.codecs.gsq import parse_header_bytes
+    from gsfluent.core.codecs.gsq_prune import prune_to_retention
 
     raw = _make_tiny_gsq(n_splats=500, n_frames=4)
     n_before = parse_header_bytes(raw)["n_splats"]
@@ -158,12 +162,16 @@ def test_prune_to_retention_reduces_splats_and_stays_valid() -> None:
 def test_prune_to_retention_matches_manual_pipeline() -> None:
     """The helper must produce exactly what compute→curve→select→prune does
     by hand, so the CLI and pack pipeline can't drift from each other."""
-    from gsfluent.core.codecs.gsq_prune import (
-        prune_to_retention, prune_gsq_bytes, select_keep_indices,
-        retention_curve, compute_significance,
-    )
-    from gsfluent.core.codecs.gsq import parse_header_bytes
     import zstandard as zstd
+
+    from gsfluent.core.codecs.gsq import parse_header_bytes
+    from gsfluent.core.codecs.gsq_prune import (
+        compute_significance,
+        prune_gsq_bytes,
+        prune_to_retention,
+        retention_curve,
+        select_keep_indices,
+    )
 
     raw = _make_tiny_gsq(n_splats=300, n_frames=3)
     h = parse_header_bytes(raw)
@@ -242,6 +250,7 @@ class _NullEmitter:
 def _make_v2_gsq(n_splats: int = 100, n_frames: int = 40) -> bytes:
     """Encode a minimal v2 .gsq buffer using GSQCodec().encode."""
     import io as _io
+
     from gsfluent.core.codecs.gsq import GSQCodec
 
     rng = np.random.default_rng(42)
@@ -262,8 +271,8 @@ def _make_v2_gsq(n_splats: int = 100, n_frames: int = 40) -> bytes:
 
 def test_prune_v2_output_version_is_2() -> None:
     """Pruning a v2 buffer must produce a v2 output (version field preserved)."""
-    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
     from gsfluent.core.codecs.gsq import parse_header_bytes
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
 
     v2 = _make_v2_gsq(n_splats=100, n_frames=40)
     keep = np.arange(0, 100, 2)  # 50 even indices
@@ -274,8 +283,8 @@ def test_prune_v2_output_version_is_2() -> None:
 
 def test_prune_v2_preserves_keyframe_flags() -> None:
     """Keyframe flags (bit0) must be set at indices 0 and 30 (K=30), clear elsewhere."""
+    from gsfluent.core.codecs.gsq import GSQ_KEYFRAME_INTERVAL, parse_header_bytes
     from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
-    from gsfluent.core.codecs.gsq import parse_header_bytes, GSQ_KEYFRAME_INTERVAL
 
     v2 = _make_v2_gsq(n_splats=100, n_frames=40)
     keep = np.arange(0, 100, 2)
@@ -292,8 +301,8 @@ def test_prune_v2_decode_matches_sliced_original() -> None:
     """decode_frame_raw_i16 on the pruned v2 buffer must equal the original
     absolute frame sliced by keep — for several frames spanning both keyframe
     boundaries and delta frames."""
-    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
     from gsfluent.core.codecs.gsq import decode_frame_raw_i16
+    from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
 
     v2 = _make_v2_gsq(n_splats=100, n_frames=40)
     keep = np.arange(0, 100, 2)
@@ -314,8 +323,8 @@ def test_prune_v2_decode_matches_sliced_original() -> None:
 
 def test_prune_v1_still_works_after_v2_change() -> None:
     """Existing v1 prune behavior is unchanged: version==1, lossless slice."""
+    from gsfluent.core.codecs.gsq import decode_frame_raw_i16, parse_header_bytes
     from gsfluent.core.codecs.gsq_prune import prune_gsq_bytes
-    from gsfluent.core.codecs.gsq import parse_header_bytes, decode_frame_raw_i16
 
     raw = _make_tiny_gsq(n_splats=80, n_frames=5)
     keep = np.array([0, 10, 20, 30, 40, 50, 60, 70], dtype=np.int64)

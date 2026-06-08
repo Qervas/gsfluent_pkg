@@ -43,6 +43,7 @@ from ..api.errors import (
     raise_validation_error,
 )
 from ..core import library as lib
+from ..core import models as m
 from ..core import recipe_validation
 from ..core.library import Sequence
 from ..core.limits import CapConfig, check_recipe_caps
@@ -114,6 +115,22 @@ def _get_run_mgr(request: Request) -> RunManager:
     before issuing the request.
     """
     return request.app.state.run_mgr
+
+
+def _require_registered_model_path(path: str) -> Path:
+    model_dir = Path(path).resolve()
+    if not model_dir.exists():
+        raise FileNotFoundError(f"model_path does not exist: {path}")
+    if not model_dir.is_dir():
+        raise NotADirectoryError(f"model_path is not a directory: {path}")
+    known_paths = {
+        Path(entry["path"]).resolve()
+        for entry in m.list_models()
+        if entry.get("path")
+    }
+    if model_dir not in known_paths:
+        raise ValueError(f"model_path is not registered: {path}")
+    return model_dir
 
 
 @router.get("")
@@ -211,17 +228,24 @@ async def start(
         )
 
     # ---- 3. model_path existence check -------------------------------
-    model_dir = Path(req.model_path)
-    if not model_dir.exists():
+    try:
+        model_dir = _require_registered_model_path(req.model_path)
+    except FileNotFoundError:
         raise_validation_error(
             kind="validation.model_path",
             message=f"model_path does not exist: {req.model_path}",
             details={"got": req.model_path},
         )
-    if not model_dir.is_dir():
+    except NotADirectoryError:
         raise_validation_error(
             kind="validation.model_path",
             message=f"model_path is not a directory: {req.model_path}",
+            details={"got": req.model_path},
+        )
+    except ValueError as e:
+        raise_validation_error(
+            kind="validation.model_path",
+            message=str(e),
             details={"got": req.model_path},
         )
 
@@ -271,6 +295,7 @@ async def start(
         **effective_recipe,
         "_run_name": req.run_name,
         "_recipe_source_name": req.recipe_source,
+        "_output_dir": str(lib.SEQUENCES_DIR / req.run_name),
         "_particles": req.particles,
         "particle_count": req.particles,
     }

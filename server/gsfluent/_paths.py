@@ -7,12 +7,19 @@ the moment a file moves, and it has bitten us before.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # server/gsfluent/_paths.py -> server/gsfluent -> server -> repo root
 PKG_ROOT = Path(__file__).resolve().parents[2]
 
-WORK = PKG_ROOT / "work"
+
+def _configured_work_root() -> Path:
+    raw = os.environ.get("GSFLUENT_WORK_DIR")
+    return Path(raw) if raw else PKG_ROOT / "work"
+
+
+WORK = _configured_work_root()
 CACHE_SPLATS = WORK / "cache" / "splats"
 LIBRARY = WORK / "library"
 SEQUENCES = LIBRARY / "sequences"

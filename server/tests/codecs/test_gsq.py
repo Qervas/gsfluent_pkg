@@ -231,7 +231,9 @@ def _write_flyaway_frame(
     verts = np.zeros(n, dtype=fields)
     rng = np.random.default_rng(0)
     base = rng.uniform(-0.5, 0.5, (n, 3)).astype(np.float32)
-    verts["x"] = base[:, 0]; verts["y"] = base[:, 1]; verts["z"] = base[:, 2]
+    verts["x"] = base[:, 0]
+    verts["y"] = base[:, 1]
+    verts["z"] = base[:, 2]
     verts["x"][fly_idx] = base[fly_idx, 0] + step * frame
     verts["opacity"] = 1.0
     verts["scale_0"] = verts["scale_1"] = verts["scale_2"] = -1.0

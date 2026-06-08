@@ -67,14 +67,15 @@ def list_models() -> list[dict]:
 def reorient_model(name: str, transform: str) -> dict:
     """Apply an in-place orientation transform to a stored model's .ply(s).
 
-    `transform` is one of `coord_convert.TRANSFORM_NAMES` (y_up_to_z_up /
-    flip_180). Rewrites EVERY `iteration_*/point_cloud.ply` under the model so
-    the displayed highest-iteration ply and any siblings stay consistent, then
-    recomputes bbox / n_splats / sha256 and rewrites `_meta.json` preserving
-    the model's other fields. Repeatable by design — no convention lock — so
-    the caller can apply, eyeball, and apply again (y_up_to_z_up x4 and
-    flip_180 x2 are identities). The new sha256 lets the frontend cache-bust
-    the splat fetch. Returns the fresh `meta_dict()`.
+    `transform` is one of `coord_convert.TRANSFORM_NAMES`: Blender-style axis
+    rotations in 90/180 degree steps, plus legacy aliases (`y_up_to_z_up`,
+    `flip_180`). Rewrites EVERY `iteration_*/point_cloud.ply` under the model
+    so the displayed highest-iteration ply and any siblings stay consistent,
+    then recomputes bbox / n_splats / sha256 and rewrites `_meta.json`
+    preserving the model's other fields. Repeatable by design — no convention
+    lock — so the caller can apply, eyeball, and apply again. The new sha256
+    lets the frontend cache-bust the splat fetch. Returns the fresh
+    `meta_dict()`.
 
     Raises KeyError if the model (or its ply) is unknown; ValueError on a bad
     transform.

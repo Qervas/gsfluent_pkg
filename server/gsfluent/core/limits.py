@@ -33,22 +33,42 @@ class CapConfig:
 
     @classmethod
     def from_env(cls) -> CapConfig:
+        def _env_int(name: str, default: int) -> int:
+            raw = os.environ.get(name)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except ValueError as e:
+                raise ValueError(f"{name} must be an integer; got {raw!r}") from e
+
         return cls(
-            max_particle_count=int(
-                os.environ.get("GSFLUENT_MAX_PARTICLE_COUNT", DEFAULT_MAX_PARTICLE_COUNT)
+            max_particle_count=_env_int(
+                "GSFLUENT_MAX_PARTICLE_COUNT", DEFAULT_MAX_PARTICLE_COUNT
             ),
-            max_wall_time_sec=int(
-                os.environ.get("GSFLUENT_MAX_WALL_TIME_SEC", DEFAULT_MAX_WALL_TIME_SEC)
+            max_wall_time_sec=_env_int(
+                "GSFLUENT_MAX_WALL_TIME_SEC", DEFAULT_MAX_WALL_TIME_SEC
             ),
-            max_recipe_bytes=int(
-                os.environ.get("GSFLUENT_MAX_RECIPE_BYTES", DEFAULT_MAX_RECIPE_BYTES)
+            max_recipe_bytes=_env_int(
+                "GSFLUENT_MAX_RECIPE_BYTES", DEFAULT_MAX_RECIPE_BYTES
             ),
         )
 
 
 def check_recipe_caps(recipe: dict[str, Any], cfg: CapConfig) -> None:
     """Validate recipe against caps. Raises CapExceededError on first violation."""
-    particle_count = int(recipe.get("particle_count", 0))
+    def _recipe_int(field: str, default: int) -> int:
+        raw = recipe.get(field, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as e:
+            label = "Wall-time hint" if field == "wall_time_sec" else field
+            raise CapExceededError(f"{label} must be an integer; got {raw!r}") from e
+        return value
+
+    particle_count = _recipe_int("particle_count", 0)
+    if particle_count < 0:
+        raise CapExceededError(f"Particle count must be >= 0; got {particle_count}")
     if particle_count > cfg.max_particle_count:
         raise CapExceededError(
             f"Particle count {particle_count} exceeds limit {cfg.max_particle_count} "
@@ -56,7 +76,9 @@ def check_recipe_caps(recipe: dict[str, Any], cfg: CapConfig) -> None:
         )
 
     # Missing wall_time_sec means "use the backend max", not "unbounded".
-    wall_time_sec = int(recipe.get("wall_time_sec", cfg.max_wall_time_sec))
+    wall_time_sec = _recipe_int("wall_time_sec", cfg.max_wall_time_sec)
+    if wall_time_sec <= 0:
+        raise CapExceededError(f"Wall-time hint must be > 0; got {wall_time_sec}")
     if wall_time_sec > cfg.max_wall_time_sec:
         raise CapExceededError(
             f"Wall-time hint {wall_time_sec}s exceeds backend max {cfg.max_wall_time_sec}s "

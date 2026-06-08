@@ -162,6 +162,42 @@ def test_wall_time_over_cap_returns_422_cap_exceeded(
     _assert_envelope_shape(body, expected_kind="cap_exceeded.wall_time")
 
 
+def test_wall_time_wrong_type_returns_422_cap_exceeded(
+    client: TestClient, tmp_path: Path
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    resp = client.post("/api/runs", json={
+        "run_name": "test",
+        "model_path": str(model_dir),
+        "recipe_data": {"particle_count": 100, "wall_time_sec": "soon"},
+        "recipe_source": "manual",
+    })
+    assert resp.status_code == 422
+    body = resp.json()
+    if "detail" in body and isinstance(body["detail"], dict) and "error" in body["detail"]:
+        body = body["detail"]
+    _assert_envelope_shape(body, expected_kind="cap_exceeded.wall_time")
+
+
+def test_wall_time_non_positive_returns_422_cap_exceeded(
+    client: TestClient, tmp_path: Path
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    resp = client.post("/api/runs", json={
+        "run_name": "test",
+        "model_path": str(model_dir),
+        "recipe_data": {"particle_count": 100, "wall_time_sec": 0},
+        "recipe_source": "manual",
+    })
+    assert resp.status_code == 422
+    body = resp.json()
+    if "detail" in body and isinstance(body["detail"], dict) and "error" in body["detail"]:
+        body = body["detail"]
+    _assert_envelope_shape(body, expected_kind="cap_exceeded.wall_time")
+
+
 def test_recipe_size_over_cap_returns_422_cap_exceeded(
     client: TestClient, tmp_path: Path
 ) -> None:

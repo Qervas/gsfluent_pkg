@@ -10,10 +10,10 @@ import re
 import time
 from pathlib import Path
 
-from ..server import PKG_ROOT
+from .._paths import SERVER_RECIPES, WORK
 
-RECIPES_DIR = PKG_ROOT / "server" / "recipes"
-USER_RECIPES_DIR = PKG_ROOT / "work" / "_user_recipes"
+RECIPES_DIR = SERVER_RECIPES
+USER_RECIPES_DIR = WORK / "_user_recipes"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 

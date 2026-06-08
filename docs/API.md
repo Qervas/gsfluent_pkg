@@ -699,10 +699,10 @@ curl -X DELETE ${BACKEND_URL}/api/models/scene_a1b2c3d4
 ### POST /api/models/{name}/reorient
 
 Apply an in-place orientation transform to a stored model's `.ply` — positions,
-gaussian quaternions, and normals are all rotated. Use it to stand up a
-lying-down scan (`y_up_to_z_up`) or right an upside-down one (`flip_180`).
-**Repeatable** — there is no "already converted" lock, so apply, look, and apply
-again until it is upright (`y_up_to_z_up` ×4 and `flip_180` ×2 are identities).
+gaussian quaternions, and normals are all rotated. Use it to correct orientation
+visually instead of relying on automatic "up" inference. **Repeatable** — there
+is no "already converted" lock, so apply, look, and apply again until it is
+upright.
 The model bytes change at the same path, so the response carries a fresh
 `sha256` the client uses to cache-bust its splat fetch.
 
@@ -716,7 +716,7 @@ The model bytes change at the same path, so the response carries a fresh
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `transform` | string | `"y_up_to_z_up"` (rotate Y-up → Z-up, stand it up) or `"flip_180"` (180° about X, fix upside-down). |
+| `transform` | string | One of: `rotate_x_pos_90`, `rotate_x_neg_90`, `rotate_y_pos_90`, `rotate_y_neg_90`, `rotate_z_pos_90`, `rotate_z_neg_90`, `rotate_x_180`, `rotate_y_180`, `rotate_z_180`, plus compatibility aliases `y_up_to_z_up` and `flip_180`. |
 
 **Response**
 

@@ -13,7 +13,7 @@ import math
 
 import pytest
 
-from gsfluent.authoring import compose, ComposeError
+from gsfluent.authoring import ComposeError, compose
 from gsfluent.authoring.buildings import get_building
 from gsfluent.core import recipe_lint
 
@@ -93,7 +93,6 @@ def test_base_pin_sits_at_bottom_of_bbox():
 def test_impact_comes_from_plus_x_moving_inward():
     r = _compose()
     bbox = get_building("cluster_6_15")["bbox"]
-    x1 = bbox[1]
     cuboid = next(bc for bc in r["boundary_conditions"] if bc["type"] == "cuboid")
     # center is on the +x side of the building center, sweeping in
     assert cuboid["point"][0] > 0.5 * (bbox[0] + bbox[1])
@@ -119,8 +118,9 @@ def test_impactor_box_stays_inside_grid():
 def test_oversized_impactor_raises_not_clips():
     # An impactor too big to fit between the building face and the grid edge
     # must raise (loud) rather than silently overlap the far wall.
-    from gsfluent.authoring.scenarios import SCENARIOS
     import copy
+
+    from gsfluent.authoring.scenarios import SCENARIOS
     huge = copy.deepcopy(SCENARIOS["wrecking"])
     for ev in huge["events"]:
         if ev["kind"] == "impact":
@@ -202,12 +202,12 @@ def test_earthquake_shake_expands_to_alternating_plates():
     assert len(cuboids) == 6, "6 half-cycles expected"
     vx = [c["velocity"][0] for c in cuboids]
     # alternating sign
-    for a, b in zip(vx, vx[1:]):
+    for a, b in zip(vx, vx[1:], strict=False):
         assert a * b < 0, f"plate velocities must alternate sign; got {vx}"
     # all under the imposed-velocity ceiling
     assert all(abs(v) <= 2.0 + 1e-9 for v in vx)
     # back-to-back time windows covering the scenario window
-    for c1, c2 in zip(cuboids, cuboids[1:]):
+    for c1, c2 in zip(cuboids, cuboids[1:], strict=False):
         assert c1["end_time"] == pytest.approx(c2["start_time"], abs=1e-3)
 
 
@@ -224,8 +224,8 @@ def test_non_recommended_materials_keep_stabilizing_material_damping():
     """Undamped scenario dynamics are only verified on the recommended soft
     material. Other material x scenario combinations keep material damping on
     to avoid NaN/grid-escape failures."""
-    from gsfluent.authoring.scenarios import SCENARIOS
     from gsfluent.authoring.materials import MATERIALS
+    from gsfluent.authoring.scenarios import SCENARIOS
 
     for scenario, data in SCENARIOS.items():
         recommended = data["recommended_material"]
@@ -315,8 +315,8 @@ def test_all_five_scenarios_compose_clean_across_materials():
     """The curated set is exactly five; every one composes on every shipped
     material without raising (the render gate further filters stiff-material
     ejects, but compose() itself must never crash)."""
-    from gsfluent.authoring.scenarios import SCENARIOS
     from gsfluent.authoring.materials import MATERIALS
+    from gsfluent.authoring.scenarios import SCENARIOS
     assert set(SCENARIOS) == {
         "earthquake", "wrecking", "topple", "burst", "demolish"
     }
@@ -335,8 +335,9 @@ def test_shake_plates_stay_under_imposed_speed_ceiling():
 
 
 def test_impact_speed_over_ceiling_raises():
-    from gsfluent.authoring.scenarios import SCENARIOS
     import copy
+
+    from gsfluent.authoring.scenarios import SCENARIOS
     hot = copy.deepcopy(SCENARIOS["wrecking"])
     for ev in hot["events"]:
         if ev["kind"] == "impact":

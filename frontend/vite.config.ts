@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
@@ -42,5 +42,8 @@ export default defineConfig({
     // server tree. .gitignore excludes dist/.
     outDir: "dist",
     emptyOutDir: true,
+  },
+  test: {
+    exclude: ["e2e/**", "node_modules/**", "dist/**"],
   },
 });
