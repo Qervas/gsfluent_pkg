@@ -29,220 +29,55 @@ import asyncio
 import os
 import re
 import shutil
-import subprocess
 import time
 from asyncio.subprocess import create_subprocess_exec as _spawn  # alias for grep-safety
-from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-
-import yaml
 
 from gsfluent._paths import PKG_ROOT, SERVER_TOOLS
 from gsfluent.core import manifest as _manifest
+from gsfluent.core.sim_engines.mpm_errors import (
+    MPMErrorPattern,
+    classify_stderr,
+    kind_to_exception,
+    load_error_patterns,
+)
+from gsfluent.core.sim_engines.mpm_gpu import (
+    _auto_gpu_enabled,
+    _gpu_reachable,
+    _resolve_sim_gpu_env,
+    pick_free_gpu,
+)
+from gsfluent.core.sim_engines.mpm_stability import (
+    MIN_USABLE_FRAMES_DEFAULT,
+    StabilityVerdict,
+    check_sim_stability,
+)
 from gsfluent.protocols.observability import EventEmitter
 from gsfluent.protocols.sim import (
     GPUUnavailableError,
     ModelRef,
     SimCrashedError,
     SimEnvMissingError,
-    SimGpuOomError,
     SimInterpreterMissingError,
     SimResult,
     SimUnstableRecipeError,
     ValidatedRecipe,
 )
 
-# ---------- stderr classifier --------------------------------------------
-
-
-@dataclass(frozen=True)
-class MPMErrorPattern:
-    """One stderr-pattern -> error_kind mapping."""
-    error_kind: str
-    regex_source: str
-    case_insensitive: bool
-    description: str
-    compiled: re.Pattern[str]
-
-
-def _default_patterns_path() -> Path:
-    return Path(__file__).parent / "mpm_error_patterns.yaml"
-
-
-def load_error_patterns(path: Path | None = None) -> list[MPMErrorPattern]:
-    """Load the operator-tunable stderr pattern file. Defaults to
-    server/gsfluent/core/sim_engines/mpm_error_patterns.yaml.
-    """
-    p = path if path is not None else _default_patterns_path()
-    try:
-        raw = yaml.safe_load(p.read_text())
-    except Exception as e:
-        # This is fatal for the engine — better to surface it loudly.
-        raise RuntimeError(f"Failed to load error patterns from {p}: {e}") from e
-
-    out: list[MPMErrorPattern] = []
-    for entry in raw.get("patterns", []):
-        flags = re.IGNORECASE if entry.get("case_insensitive", False) else 0
-        out.append(
-            MPMErrorPattern(
-                error_kind=entry["error_kind"],
-                regex_source=entry["regex"],
-                case_insensitive=entry.get("case_insensitive", False),
-                description=entry.get("description", ""),
-                compiled=re.compile(entry["regex"], flags),
-            )
-        )
-    return out
-
-
-def classify_stderr(
-    stderr: str, patterns: list[MPMErrorPattern]
-) -> str | None:
-    """Return the first matching error_kind, or None if no pattern matches.
-
-    Scans the entire stderr (not just the tail) - sim errors can fire
-    early and be followed by unrelated output.
-    """
-    if not stderr:
-        return None
-    for pat in patterns:
-        if pat.compiled.search(stderr) is not None:
-            return pat.error_kind
-    return None
-
-
-def _kind_to_exception(kind: str, message: str) -> Exception:
-    """Map a classifier kind string to its exception class."""
-    if kind == "sim.gpu_oom":
-        return SimGpuOomError(message)
-    if kind == "sim.unstable_recipe":
-        return SimUnstableRecipeError(message)
-    return SimCrashedError(message)
-
-
-# Minimum usable (fused) frames for a diverged run to still count as a
-# *partial* success instead of a hard failure. ~1 s at 24 fps: enough to be a
-# watchable clip. Tunable via GSFLUENT_MIN_USABLE_FRAMES. Below this a diverged
-# run is `sim.unstable_recipe` (failed), exactly as before this band existed.
-MIN_USABLE_FRAMES_DEFAULT = 24
-
-
-@dataclass(frozen=True)
-class StabilityVerdict:
-    """Outcome of the post-fuse stability check.
-
-    outcome:
-      "clean"   — every requested frame fused (within tolerance) -> done
-      "partial" — diverged late but >= min_usable frames survived; still a
-                  usable (shorter) clip -> done, with diverged=True surfaced
-      "failed"  — diverged with too few usable frames -> sim.unstable_recipe
-    """
-    outcome: str
-    message: str | None = None
-    usable_frames: int = 0
-    requested_frames: int | None = None
-    dropped_frames: int = 0
-
-    @property
-    def is_clean(self) -> bool:
-        return self.outcome == "clean"
-
-    @property
-    def is_partial(self) -> bool:
-        return self.outcome == "partial"
-
-    @property
-    def is_failed(self) -> bool:
-        return self.outcome == "failed"
-
-
-def check_sim_stability(
-    *,
-    n_sim: int,
-    n_fused: int,
-    allowed_nonfinite: int,
-    expected_frames: int | None = None,
-    min_usable_frames: int = MIN_USABLE_FRAMES_DEFAULT,
-) -> StabilityVerdict:
-    """Classify a finished sim/fuse pass as clean / partial / failed.
-
-    Two divergence signatures are detected (unchanged):
-
-    1. **Fuser drop** (``n_fused < n_sim``): the fuser silently skips sim
-       frames whose particle positions are non-finite (NaN/Inf), so fewer
-       fused frames than sim frames means the MPM solver produced unusable
-       (NaN) particles mid-run.
-
-    2. **Sim truncation** (``n_sim < expected_frames``): the solver blew up
-       and terminated *early*, writing fewer sim frames than requested. Then
-       ``n_sim == n_fused`` so signature 1 misses it; ``expected_frames``
-       catches the shortfall.
-
-    ``allowed_nonfinite`` tolerates up to that many dropped/missing frames
-    before a run counts as diverged at all (default 0 = any drop counts).
-
-    Once diverged, the run is salvaged as a **partial** success when at least
-    ``min_usable_frames`` frames survived — MPM divergence is monotonic (NaN
-    propagates through the shared grid), so the survivors are a contiguous
-    opening clip, usable as a shorter animation. Below the threshold the run
-    is **failed** (``sim.unstable_recipe``), preserving the guard against
-    serving a near-empty, silently-truncated sequence as success. A run that
-    never diverged is **clean**. ``n_sim <= 0`` (no sim output at all) is a
-    different failure path handled elsewhere, so it is treated as clean here.
-    """
-    requested = (
-        expected_frames
-        if (expected_frames and expected_frames > 0)
-        else (n_sim if n_sim > 0 else None)
-    )
-    if n_sim <= 0:
-        return StabilityVerdict("clean", usable_frames=n_fused, requested_frames=requested)
-
-    # Detect divergence. Signature 2 (early stop) is checked first because a
-    # truncated sim is the more common and more misleading production case.
-    diverged_msg: str | None = None
-    if expected_frames is not None and expected_frames > 0:
-        missing = expected_frames - n_sim
-        if missing > allowed_nonfinite:
-            diverged_msg = (
-                f"simulation diverged: only {n_sim} of {expected_frames} "
-                f"requested frames were produced before the solver stopped "
-                f"({missing} missing)"
-            )
-    if diverged_msg is None:
-        dropped = n_sim - n_fused
-        if dropped > allowed_nonfinite:
-            diverged_msg = (
-                f"simulation diverged: {dropped} of {n_sim} frames had "
-                f"non-finite (NaN/Inf) positions and were dropped "
-                f"({n_fused} usable)"
-            )
-
-    if diverged_msg is None:
-        return StabilityVerdict(
-            "clean", usable_frames=n_fused, requested_frames=requested,
-        )
-
-    dropped_total = max(0, (requested - n_fused) if requested else (n_sim - n_fused))
-    if n_fused >= min_usable_frames:
-        return StabilityVerdict(
-            "partial",
-            message=f"{diverged_msg}; kept {n_fused} usable frames as a partial result.",
-            usable_frames=n_fused,
-            requested_frames=requested,
-            dropped_frames=dropped_total,
-        )
-    return StabilityVerdict(
-        "failed",
-        message=(
-            f"{diverged_msg}; only {n_fused} usable frames "
-            f"(< {min_usable_frames} minimum). The recipe is numerically unstable."
-        ),
-        usable_frames=n_fused,
-        requested_frames=requested,
-        dropped_frames=dropped_total,
-    )
+__all__ = [
+    "MPMErrorPattern",
+    "MPMSimulationEngine",
+    "MIN_USABLE_FRAMES_DEFAULT",
+    "StabilityVerdict",
+    "_auto_gpu_enabled",
+    "_expected_sim_frames",
+    "_gpu_reachable",
+    "_resolve_sim_gpu_env",
+    "check_sim_stability",
+    "classify_stderr",
+    "load_error_patterns",
+    "pick_free_gpu",
+]
 
 
 # ---------- the engine ---------------------------------------------------
@@ -476,7 +311,7 @@ class MPMSimulationEngine:
                     stderr_tail=joined[-2000:],
                 )
                 run_error = {"kind": kind or "sim.crashed", "message": msg}
-                raise _kind_to_exception(kind or "sim.crashed", msg)
+                raise kind_to_exception(kind or "sim.crashed", msg)
 
             on_event.info("sim.stage.complete", stage="sim", duration_sec=round(sim_duration, 2))
 
@@ -769,205 +604,6 @@ class MPMSimulationEngine:
 
 
 # ---------- module-level helpers -----------------------------------------
-
-
-# ---------- auto-GPU selection -------------------------------------------
-#
-# On a shared multi-GPU box the backend's CUDA_VISIBLE_DEVICES is pinned
-# once in .env at startup. That repeatedly landed a fresh sim on a GPU that
-# had since gone busy, where it crawled ~10x or diverged. Instead of trusting
-# the static pin, we query nvidia-smi at *spawn* time and pick the least-busy
-# GPU that still has comfortable free memory, overriding CUDA_VISIBLE_DEVICES
-# for that one sim subprocess only. Any failure falls back to the inherited
-# pin (see _resolve_sim_gpu_env) so GPU selection can never crash a run.
-
-# Default free-memory floor. The sim itself uses ~3 GB, but on a shared box we
-# want headroom so a co-tenant's allocation spike doesn't OOM us mid-run.
-_DEFAULT_MIN_FREE_MIB = 20 * 1024  # 20 GiB
-
-
-def pick_free_gpu(nvidia_smi_csv_text: str, min_free_mib: int) -> int | None:
-    """Pick the least-busy GPU index that has >= min_free_mib free memory.
-
-    Pure function over the text of:
-
-        nvidia-smi --query-gpu=index,utilization.gpu,memory.free \\
-                   --format=csv,noheader,nounits
-
-    which yields one ``<index>, <util%>, <free_MiB>`` row per GPU, e.g.::
-
-        0, 36, 57214
-        7, 100, 47483
-
-    Selection: among GPUs whose free memory is at least ``min_free_mib``,
-    return the index with the lowest utilization. Ties on utilization break
-    toward the GPU with the most free memory, then the lowest index — fully
-    deterministic. Returns ``None`` when no GPU qualifies (all busy/full) or
-    the input is empty/malformed beyond recovery. Individual unparseable rows
-    are skipped, not fatal, so one garbled line never discards the whole query.
-    """
-    candidates: list[tuple[int, int, int]] = []  # (util, -free, index) sort key
-    for line in nvidia_smi_csv_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = [c.strip() for c in line.split(",")]
-        if len(parts) != 3:
-            continue
-        try:
-            index = int(parts[0])
-            util = int(parts[1])
-            free_mib = int(parts[2])
-        except (ValueError, TypeError):
-            continue
-        if free_mib < min_free_mib:
-            continue
-        candidates.append((util, -free_mib, index))
-    if not candidates:
-        return None
-    # Lowest util wins; ties -> most free memory; ties -> lowest index.
-    util, neg_free, index = min(candidates)
-    return index
-
-
-def _query_nvidia_smi_csv() -> str | None:
-    """Return raw index,util,free CSV from the local nvidia-smi, or None.
-
-    The sim runs on the same host as the backend, so we query locally (the
-    same way _gpu_reachable does). Conservative: returns None on any error
-    (binary missing, nonzero exit, timeout) so the caller falls back to the
-    inherited CUDA_VISIBLE_DEVICES pin.
-    """
-    nvsmi = shutil.which("nvidia-smi")
-    if nvsmi is None:
-        return None
-    try:
-        result = subprocess.run(
-            [
-                nvsmi,
-                "--query-gpu=index,utilization.gpu,memory.free",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout
-
-
-def _auto_gpu_enabled() -> bool:
-    """Whether auto-GPU selection is on. Default ON; disable-able via env.
-
-    GSFLUENT_AUTO_GPU in {0, false, no, off} (case-insensitive) turns it off,
-    restoring the static .env CUDA_VISIBLE_DEVICES pin behaviour.
-    """
-    raw = os.environ.get("GSFLUENT_AUTO_GPU")
-    if raw is None:
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
-
-
-def _resolve_sim_gpu_env(
-    *,
-    on_event: EventEmitter,
-    query: Callable[[], str | None] = _query_nvidia_smi_csv,
-) -> dict[str, str] | None:
-    """Compute the env overlay for the sim subprocess's GPU pin, or None.
-
-    Returns a dict to merge over os.environ (``{"CUDA_VISIBLE_DEVICES": "N"}``)
-    when auto-selection succeeds, or ``None`` to mean "inherit the .env pin
-    unchanged" — the fallback for every failure mode:
-
-      * GSFLUENT_AUTO_GPU disabled
-      * nvidia-smi query failed / unavailable
-      * no GPU met the free-memory floor (all busy/full)
-      * any unexpected error (defensive: GPU selection never crashes a run)
-
-    Emits ``sim.gpu_autopicked`` on success and ``sim.gpu_autopick_skipped``
-    (with a reason) otherwise, so the choice is observable in the event log.
-    """
-    if not _auto_gpu_enabled():
-        on_event.debug("sim.gpu_autopick_skipped", reason="disabled")
-        return None
-    try:
-        min_free_mib = int(
-            os.environ.get("GSFLUENT_GPU_MIN_FREE_MIB", _DEFAULT_MIN_FREE_MIB)
-        )
-    except (TypeError, ValueError):
-        min_free_mib = _DEFAULT_MIN_FREE_MIB
-    try:
-        csv_text = query()
-        if not csv_text:
-            on_event.debug("sim.gpu_autopick_skipped", reason="query_failed")
-            return None
-        index = pick_free_gpu(csv_text, min_free_mib)
-        if index is None:
-            on_event.info(
-                "sim.gpu_autopick_skipped",
-                reason="no_gpu_qualified",
-                min_free_mib=min_free_mib,
-            )
-            return None
-        # Best-effort enrich the event with the picked GPU's stats.
-        util, free_mib = _gpu_stats_for_index(csv_text, index)
-        on_event.info(
-            "sim.gpu_autopicked",
-            gpu_index=index,
-            util=util,
-            free_mib=free_mib,
-            min_free_mib=min_free_mib,
-        )
-        return {"CUDA_VISIBLE_DEVICES": str(index)}
-    except Exception as exc:  # noqa: BLE001 — selection must never crash a run
-        on_event.error("sim.gpu_autopick_skipped", reason=f"error:{exc!r}")
-        return None
-
-
-def _gpu_stats_for_index(
-    csv_text: str, index: int
-) -> tuple[int | None, int | None]:
-    """Return (util, free_mib) for `index` from the CSV, or (None, None)."""
-    for line in csv_text.splitlines():
-        parts = [c.strip() for c in line.strip().split(",")]
-        if len(parts) != 3:
-            continue
-        try:
-            if int(parts[0]) == index:
-                return int(parts[1]), int(parts[2])
-        except (ValueError, TypeError):
-            continue
-    return None, None
-
-
-def _gpu_reachable() -> bool:
-    """Return True iff nvidia-smi reports at least one CUDA-capable device.
-
-    Conservative: returns False on any error (nvidia-smi missing, no
-    devices listed, permission denied). MPMSimulationEngine treats
-    False as GPUUnavailableError when require_gpu=True.
-    """
-    nvsmi = shutil.which("nvidia-smi")
-    if nvsmi is None:
-        return False
-    try:
-        result = subprocess.run(
-            [nvsmi, "-L"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return False
-    if result.returncode != 0:
-        return False
-    # `nvidia-smi -L` prints one "GPU N: ..." line per device.
-    return any(line.startswith("GPU ") for line in result.stdout.splitlines())
 
 
 def _expected_sim_frames(recipe: ValidatedRecipe) -> int | None:

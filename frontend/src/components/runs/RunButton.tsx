@@ -2,8 +2,15 @@ import { Play, Check, X, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { CellRef, sanitizeCellName } from "@/lib/cell";
+import { CellRef } from "@/lib/cell";
 import { useOverrides } from "@/lib/use-overrides";
+import {
+  computeEta,
+  extractDetail,
+  frameCountHint,
+  isComposedRecipe,
+  makeRunName,
+} from "@/lib/run-submit";
 
 /** Run button with five visual states, consolidating what used to be
  *  split across the StatusPill + StatusStrip + console. One source of
@@ -74,9 +81,7 @@ export function RunButton() {
       // would 422 on that name, so skip the re-fetch and use the composed
       // recipe data directly. The re-fetch is only meaningful for saved
       // recipes (flat material demos + ★ user presets).
-      const isComposed = !!(
-        activeRecipeData as Record<string, unknown> | null
-      )?._composed_from;
+      const isComposed = isComposedRecipe(activeRecipeData);
       let baseToSend: Record<string, unknown> = effective;
       if (!isComposed) {
         try {
@@ -101,17 +106,14 @@ export function RunButton() {
         }
       }
 
-      const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
-      const baseName = activeRecipeName!.replace(/^★ /, "");
       // Sanitize: composed names carry "·" (earthquake·watermelon), which is
       // invalid for both CellRef and the backend run_name regex. Coerce the
       // whole run name to the allowed charset.
-      const run_name = sanitizeCellName(`${activeModel!.name}_${baseName}_${ts}`);
+      const run_name = makeRunName(activeModel!.name, activeRecipeName!);
       // Forward the recipe's frame_num so the progress denominator is
       // correct from the first render, not a stale 150. Non-numeric or
       // missing → undefined → store falls back to 0 until tqdm reports.
-      const frameNum = Number(baseToSend.frame_num);
-      resetForNewRun(run_name, Number.isFinite(frameNum) ? frameNum : undefined);
+      resetForNewRun(run_name, frameCountHint(baseToSend));
       useStore.getState().setActiveCell(new CellRef("sequence", run_name));
       await api.runs.start({
         run_name,
@@ -273,46 +275,4 @@ export function RunButton() {
       Run
     </button>
   );
-}
-
-/** Pull a human-readable cause out of an error message like
- *  `HTTP 422: {"detail":"..."}`. Falls back to the raw message when the
- *  shape isn't recognized. Returns null for empty input. */
-function extractDetail(raw: string | null): string | null {
-  if (!raw) return null;
-  // Try to find a JSON body after `HTTP NNN: `
-  const bodyIdx = raw.indexOf(": ");
-  if (bodyIdx >= 0) {
-    const body = raw.slice(bodyIdx + 2).trim();
-    if (body.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(body);
-        if (typeof parsed?.detail === "string") return parsed.detail;
-        if (Array.isArray(parsed?.detail)) {
-          // FastAPI request-validation errors are an array of issues
-          return parsed.detail.map((d: { msg?: string; loc?: unknown[] }) =>
-            d.msg ? `${(d.loc ?? []).join(".")}: ${d.msg}` : JSON.stringify(d),
-          ).join("; ");
-        }
-      } catch { /* not JSON, fall through */ }
-    }
-  }
-  return raw;
-}
-
-/** ETA from observed fps since the first frame landed. Returns null
- *  if we don't have enough data to compute. */
-function computeEta(
-  nFrames: number,
-  totalFrames: number,
-  firstFrameAt: number | null,
-): string | null {
-  if (firstFrameAt === null || nFrames === 0) return null;
-  const elapsed = Math.max((Date.now() - firstFrameAt) / 1000, 0.001);
-  const fps = nFrames / elapsed;
-  if (nFrames >= totalFrames || fps <= 0) return null;
-  const remaining = (totalFrames - nFrames) / fps;
-  const m = Math.floor(remaining / 60);
-  const s = Math.floor(remaining % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
 }

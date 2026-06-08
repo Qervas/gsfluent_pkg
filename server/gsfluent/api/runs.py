@@ -27,33 +27,26 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-)
-from pydantic import (
-    ValidationError as PydanticValidationError,
-)
 
-from ..api.errors import (
-    new_trace_id,
-    raise_cap_exceeded,
-    raise_validation_error,
+from ..api.errors import new_trace_id, raise_validation_error
+from ..api.run_submission import (
+    StartRunRequest,
+    enforce_submission_caps,
+    load_registered_model_path,
+    parse_start_request,
+    prepare_effective_recipe,
+    require_registered_model_path,
 )
 from ..core import library as lib
 from ..core import models as m
-from ..core import recipe_validation
 from ..core.library import Sequence
-from ..core.limits import CapConfig, check_recipe_caps
-from ..protocols.runs import CapExceededError, RunId, RunManager, RunState
+from ..core.limits import CapConfig
+from ..protocols.runs import RunId, RunManager, RunState
 from ..protocols.sim import ModelRef
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
-
-_SAFE_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+__all__ = ["StartRunRequest", "router"]
 
 
 # Legacy run-dir fallback for the API endpoints below. In production this
@@ -61,39 +54,6 @@ _SAFE_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 # their `<tmp>/fused/<run>/manifest.json` fixtures still exercise the
 # legacy-fallback branches in /api/runs/history and friends.
 _LEGACY_RUNS_DIR: Path = lib.SEQUENCES_DIR
-
-
-class StartRunRequest(BaseModel):
-    """Strict-mode request body for POST /api/runs.
-
-    Pydantic strict mode rejects unknown fields and refuses type coercion
-    (string "100" will not silently become int 100). check_recipe_caps()
-    runs after parse to enforce the configured maxima.
-    """
-
-    model_config = ConfigDict(
-        extra="forbid",
-        strict=True,
-    )
-
-    run_name: str = Field(..., min_length=1, max_length=128)
-    model_path: str = Field(..., min_length=1)
-    recipe_data: dict
-    recipe_source: str
-    particles: int = Field(default=200_000, gt=0)
-    # When True, the handler runs the same validation a real run would
-    # (model_path existence, sim_area <-> model bbox overlap, etc.) but
-    # never spawns the sim wrapper or touches the library. Useful for
-    # compatibility-matrix sanity checks across the recipe library
-    # without burning GPU time on actual runs.
-    dry_run: bool = False
-
-    @field_validator("run_name")
-    @classmethod
-    def _run_name_must_be_safe(cls, v: str) -> str:
-        if not _SAFE_RUN_NAME_RE.match(v):
-            raise ValueError("run_name must match ^[A-Za-z0-9_.-]+$")
-        return v
 
 
 def _caps_dep() -> CapConfig:
@@ -118,19 +78,7 @@ def _get_run_mgr(request: Request) -> RunManager:
 
 
 def _require_registered_model_path(path: str) -> Path:
-    model_dir = Path(path).resolve()
-    if not model_dir.exists():
-        raise FileNotFoundError(f"model_path does not exist: {path}")
-    if not model_dir.is_dir():
-        raise NotADirectoryError(f"model_path is not a directory: {path}")
-    known_paths = {
-        Path(entry["path"]).resolve()
-        for entry in m.list_models()
-        if entry.get("path")
-    }
-    if model_dir not in known_paths:
-        raise ValueError(f"model_path is not registered: {path}")
-    return model_dir
+    return require_registered_model_path(path, list_models=m.list_models)
 
 
 @router.get("")
@@ -159,113 +107,16 @@ async def start(
     """
     trace_id = new_trace_id()
 
-    # ---- 1. strict Pydantic parse ------------------------------------
-    try:
-        req = StartRunRequest.model_validate(raw_body, strict=True)
-    except PydanticValidationError as e:
-        # Pick the first error to surface as the kind / message; details
-        # carries the full list so the client can show all of them.
-        errs = e.errors()
-        first = errs[0] if errs else {}
-        loc = first.get("loc", ("?",))
-        loc_parts = [p for p in loc if p != "body"]
-        field = ".".join(str(p) for p in loc_parts) if loc_parts else "?"
-        msg = first.get("msg", "validation failed")
-        # Pydantic serializes ValueError back-refs containing arbitrary
-        # Python objects (e.g. dicts in `input`); cast to JSON-safe types.
-        safe_errs: list[dict] = []
-        for entry in errs:
-            safe_errs.append({
-                "loc": [str(p) for p in entry.get("loc", ())],
-                "type": entry.get("type", ""),
-                "msg": entry.get("msg", ""),
-            })
-        raise_validation_error(
-            kind=f"validation.{field}",
-            message=f"{field}: {msg}",
-            details={"errors": safe_errs, "trace_id": trace_id},
-        )
-
-    # ---- 2. cap check ------------------------------------------------
-    # Compose the cap-check input from the request fields the orchestrator
-    # actually consumes. recipe_data carries the customer's free-form
-    # recipe; we add particle_count from the structured request field for
-    # cap-checking purposes.
-    cap_input = {
-        **req.recipe_data,
-        "particle_count": req.particles,
-    }
-    try:
-        check_recipe_caps(cap_input, caps)
-    except CapExceededError as e:
-        # Translate cap-checker exception messages into typed kinds.
-        msg = str(e)
-        if "Particle count" in msg:
-            raise_cap_exceeded(
-                kind="cap_exceeded.particle_count",
-                message=msg,
-                details={"requested": req.particles, "limit": caps.max_particle_count},
-            )
-        if "Wall-time" in msg:
-            wt = int(req.recipe_data.get("wall_time_sec", caps.max_wall_time_sec))
-            raise_cap_exceeded(
-                kind="cap_exceeded.wall_time",
-                message=msg,
-                details={"requested": wt, "limit": caps.max_wall_time_sec},
-            )
-        if "Recipe size" in msg:
-            raise_cap_exceeded(
-                kind="cap_exceeded.recipe_size",
-                message=msg,
-                details={"limit": caps.max_recipe_bytes},
-            )
-        # Fallback for an unmapped cap-exceeded message — still 422,
-        # generic kind.
-        raise_cap_exceeded(
-            kind="cap_exceeded.unknown",
-            message=msg,
-            details={},
-        )
-
-    # ---- 3. model_path existence check -------------------------------
-    try:
-        model_dir = _require_registered_model_path(req.model_path)
-    except FileNotFoundError:
-        raise_validation_error(
-            kind="validation.model_path",
-            message=f"model_path does not exist: {req.model_path}",
-            details={"got": req.model_path},
-        )
-    except NotADirectoryError:
-        raise_validation_error(
-            kind="validation.model_path",
-            message=f"model_path is not a directory: {req.model_path}",
-            details={"got": req.model_path},
-        )
-    except ValueError as e:
-        raise_validation_error(
-            kind="validation.model_path",
-            message=str(e),
-            details={"got": req.model_path},
-        )
+    req = parse_start_request(raw_body, trace_id)
+    enforce_submission_caps(req, caps)
+    model_dir = load_registered_model_path(req, list_models=m.list_models)
 
     if req.dry_run:
-        try:
-            effective_recipe = recipe_validation.translate_sim_area_if_local(
-                req.recipe_data, model_dir,
-            )
-            recipe_validation.validate_sim_area_intersects_model(
-                effective_recipe.get("sim_area", []), model_dir,
-            )
-            recipe_validation.validate_model_orientation(
-                effective_recipe, model_dir,
-            )
-        except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
-            raise_validation_error(
-                kind="validation.recipe_data",
-                message=f"recipe validation failed: {e}",
-                details={"got": str(e)},
-            )
+        prepare_effective_recipe(
+            req,
+            model_dir,
+            error_prefix="recipe validation failed",
+        )
         return {"dry_run": True, "valid": True, "run_name": req.run_name, "trace_id": trace_id}
 
     # ---- 4. submit ---------------------------------------------------
@@ -274,22 +125,11 @@ async def start(
     # ValidatedRecipe Protocol surface (`_run_name`, `_particles`,
     # `_recipe_source_name`). Also forward sim_area pre-validation so
     # the engine inherits the translated bounds.
-    try:
-        effective_recipe = recipe_validation.translate_sim_area_if_local(
-            req.recipe_data, model_dir,
-        )
-        recipe_validation.validate_sim_area_intersects_model(
-            effective_recipe.get("sim_area", []), model_dir,
-        )
-        recipe_validation.validate_model_orientation(
-            effective_recipe, model_dir,
-        )
-    except (FileNotFoundError, PermissionError, NotADirectoryError, ValueError) as e:
-        raise_validation_error(
-            kind="validation.recipe_data",
-            message=f"failed to start run: {e}",
-            details={"got": str(e)},
-        )
+    effective_recipe = prepare_effective_recipe(
+        req,
+        model_dir,
+        error_prefix="failed to start run",
+    )
 
     submit_recipe = {
         **effective_recipe,
